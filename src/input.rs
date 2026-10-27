@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -25,8 +25,8 @@ impl Editor {
         &self.text
     }
 
-    pub fn into_text(self) -> String {
-        self.text
+    pub fn selected(&self) -> &str {
+        &self.text[self.selection()]
     }
 
     fn selection(&self) -> Range<usize> {
@@ -88,9 +88,11 @@ impl Editor {
     }
 
     pub fn key(&mut self, key: KeyEvent) {
-        let control = key.modifiers.contains(KeyModifiers::CONTROL)
-            && !key.modifiers.contains(KeyModifiers::ALT);
-        let selecting = key.modifiers.contains(KeyModifiers::SHIFT);
+        let control = key
+            .modifiers
+            .intersects(Modifiers::CONTROL | Modifiers::SUPER)
+            && !key.modifiers.contains(Modifiers::ALT);
+        let selecting = key.modifiers.contains(Modifiers::SHIFT);
         let selection = self.selection();
         match key.code {
             KeyCode::Char('a') if control => {
@@ -128,10 +130,9 @@ impl Editor {
             KeyCode::Char(character)
                 if !key
                     .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    || key
-                        .modifiers
-                        .contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER)
+                    || key.modifiers.contains(Modifiers::CONTROL | Modifiers::ALT)
+                        && !key.modifiers.contains(Modifiers::SUPER) =>
             {
                 self.insert(&character.to_string());
             }
@@ -216,7 +217,7 @@ pub fn clip(text: &str, width: usize) -> String {
 
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
+    for paragraph in text.lines() {
         let mut line = String::new();
         for grapheme in visible(paragraph).graphemes(true) {
             let end = line.len();

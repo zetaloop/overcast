@@ -1,24 +1,25 @@
 use std::{
+    borrow::Cow,
     collections::VecDeque,
-    io::{IsTerminal, Stdout, Write, stdout},
+    io::{IsTerminal, Write, stdout},
     ops::Range,
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, RecvTimeoutError},
+    },
     thread,
     time::{Duration, Instant},
 };
 
-use crossterm::{
-    cursor::{Hide, MoveTo, Show},
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+use termina::{
+    Event, PlatformTerminal, Terminal,
+    escape::{
+        csi::{Csi, Keyboard, KittyKeyboardFlags},
+        osc::{Osc, Selection},
     },
-    execute, queue,
-    style::{Attribute, Print, SetAttribute, StyledContent, Stylize, style},
-    terminal::{
-        self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate,
-        EnterAlternateScreen, LeaveAlternateScreen,
-    },
+    event::{KeyCode, KeyEvent, KeyEventKind, Modifiers},
+    style::{AnsiColor, StyleExt, Stylized},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -28,33 +29,49 @@ use crate::{
     progress::{FRAME, Progress, Step},
 };
 
-type Line = StyledContent<String>;
+type Line = Stylized<'static>;
 
 pub struct Item {
     pub key: String,
+    pub marker: &'static str,
     pub label: Line,
     pub value: String,
     pub detail: String,
 }
 
 impl Item {
-    pub fn new(key: impl Into<String>, label: StyledContent<&str>) -> Self {
+    pub fn new(key: impl Into<String>, label: Line) -> Self {
         Self {
             key: key.into(),
-            label: label.style().apply((*label.content()).to_owned()),
+            marker: ">",
+            label,
             value: String::new(),
             detail: String::new(),
         }
     }
 }
 
+pub struct Menu<'a> {
+    pub title: &'a str,
+    pub heading: &'a str,
+    pub items: &'a [Item],
+    pub help: &'a str,
+}
+
+pub enum Action {
+    Select,
+    Back,
+    Key(KeyEvent),
+    Paste(String),
+}
+
 pub struct Screen {
-    output: Stdout,
+    output: PlatformTerminal,
+    rows: u16,
+    alternate: Arc<AtomicBool>,
     arguments: VecDeque<String>,
     events: VecDeque<Event>,
     pub exiting: bool,
-    #[cfg(windows)]
-    pressed: std::collections::HashSet<KeyCode>,
 }
 
 impl Screen {
@@ -63,27 +80,27 @@ impl Screen {
             return Err("Overcast 需要在终端中运行".into());
         }
         let mut screen = Self {
-            output: stdout(),
+            output: PlatformTerminal::new()?,
+            rows: 0,
+            alternate: Arc::new(AtomicBool::new(true)),
             arguments: arguments.into_iter().collect(),
             events: VecDeque::new(),
             exiting: false,
-            #[cfg(windows)]
-            pressed: Default::default(),
         };
-        terminal::enable_raw_mode()?;
-        execute!(
+        screen.output.enter_raw_mode()?;
+        let alternate = screen.alternate.clone();
+        screen.output.set_panic_hook(move |output| {
+            let _ = restore(output, alternate.swap(false, Ordering::Relaxed));
+        });
+        write!(
             screen.output,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            Hide,
-            Clear(ClearType::All),
-            MoveTo(0, 0),
+            "\x1b[2J\x1b[3J\x1b[H\x1b[?1049h\x1b[?2004h\x1b[?25l{}",
+            Csi::Keyboard(Keyboard::PushFlags(
+                KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KittyKeyboardFlags::REPORT_EVENT_TYPES
+            )),
         )?;
-        let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            restore();
-            hook(info);
-        }));
+        screen.output.flush()?;
         Ok(screen)
     }
 
@@ -106,99 +123,75 @@ impl Screen {
         selected: Option<(usize, Range<usize>)>,
         cursor: Option<(usize, usize)>,
     ) -> Result<()> {
-        let (width, height) = terminal::size()?;
+        let dimensions = self.output.get_dimensions()?;
+        let (width, height) = (dimensions.cols, dimensions.rows);
         if width == 0 || height == 0 {
             return Ok(());
         }
-        queue!(
+        write!(
             self.output,
-            BeginSynchronizedUpdate,
-            Hide,
-            MoveTo(0, 0),
-            SetAttribute(Attribute::Bold),
-            Print(clip(
-                &format!("==== Overcast [{title}] ===="),
-                width as usize
-            )),
-            SetAttribute(Attribute::Reset),
-            Clear(ClearType::UntilNewLine),
+            "\x1b[?2026h\x1b[?25l\x1b[H{}\x1b[K",
+            clip(&format!("==== Overcast [{title}] ===="), width as usize).bold(),
         )?;
         if height > 1 {
-            queue!(self.output, MoveTo(0, 1), Clear(ClearType::UntilNewLine))?;
+            write!(self.output, "\x1b[2;1H\x1b[K")?;
         }
         for (index, line) in lines
             .iter()
             .take(height.saturating_sub(2) as usize)
             .enumerate()
         {
-            queue!(self.output, MoveTo(0, index as u16 + 2))?;
-            let text = clip(line.content(), width as usize);
+            write!(self.output, "\x1b[{};1H", index + 3)?;
+            let text = clip(&line.content, width as usize);
+            let mut line = line.clone();
             if let Some((_, range)) = selected.as_ref().filter(|(row, _)| *row == index) {
                 let start = text.floor_char_boundary(range.start.min(text.len()));
                 let end = text.floor_char_boundary(range.end.min(text.len()));
-                let mut appearance = *line.style();
-                appearance.attributes.set(Attribute::Reverse);
-                queue!(
-                    self.output,
-                    Print(line.style().apply(&text[..start])),
-                    Print(appearance.apply(&text[start..end])),
-                    Print(line.style().apply(&text[end..]))
-                )?;
+                line.content = Cow::Owned(format!(
+                    "{}\x1b[7m{}\x1b[27m{}",
+                    &text[..start],
+                    &text[start..end],
+                    &text[end..],
+                ));
             } else {
-                queue!(self.output, Print(line.style().apply(text)))?;
+                line.content = Cow::Owned(text);
             }
-            queue!(
-                self.output,
-                SetAttribute(Attribute::Reset),
-                Clear(ClearType::UntilNewLine),
-            )?;
+            write!(self.output, "{line}\x1b[m\x1b[K")?;
         }
         let end = (lines.len() + 2).min(height as usize);
         if end < height as usize {
-            queue!(
-                self.output,
-                MoveTo(0, end as u16),
-                Clear(ClearType::FromCursorDown)
-            )?;
+            write!(self.output, "\x1b[{};1H\x1b[J", end + 1)?;
         }
         if let Some((column, row)) = cursor
             && row < height as usize
         {
-            queue!(
+            write!(
                 self.output,
-                MoveTo(column.min(width as usize - 1) as u16, row as u16),
-                Show
+                "\x1b[{};{}H\x1b[?25h",
+                row + 1,
+                column.min(width as usize - 1) + 1,
             )?;
         }
-        queue!(self.output, EndSynchronizedUpdate)?;
+        write!(self.output, "\x1b[?2026l")?;
         self.output.flush()?;
+        self.rows = end as u16;
         Ok(())
     }
 
     fn event(&mut self, actions: bool) -> Result<Option<Event>> {
         let event = match self.events.pop_front() {
             Some(event) => event,
-            None => event::read()?,
+            None => self.output.read(|_| true)?,
         };
         if let Event::Key(key) = event {
-            #[cfg(windows)]
+            if key.kind == KeyEventKind::Release
+                || key.kind == KeyEventKind::Repeat
+                    && (key.code == KeyCode::Enter
+                        || actions && matches!(key.code, KeyCode::Right | KeyCode::Char(' ')))
             {
-                if key.kind == KeyEventKind::Release {
-                    self.pressed.remove(&key.code);
-                } else if self.pressed.contains(&key.code) {
-                    return Ok(None);
-                } else if key.code == KeyCode::Enter
-                    || actions && matches!(key.code, KeyCode::Right | KeyCode::Char(' '))
-                {
-                    self.pressed.insert(key.code);
-                }
-            }
-            #[cfg(not(windows))]
-            let _ = actions;
-            if key.kind == KeyEventKind::Release {
                 return Ok(None);
             }
-            if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            if actions && key.code == KeyCode::Char('c') && key.modifiers == Modifiers::CONTROL {
                 self.exiting = true;
                 return Ok(None);
             }
@@ -206,161 +199,200 @@ impl Screen {
         Ok(Some(event))
     }
 
+    fn menu(
+        &mut self,
+        menu: &Menu<'_>,
+        selected: usize,
+        notice: &str,
+        editor: Option<&mut Editor>,
+    ) -> Result<()> {
+        let dimensions = self.output.get_dimensions()?;
+        let (width, height) = (dimensions.cols, dimensions.rows);
+        let items = menu.items;
+        let label_width = items
+            .iter()
+            .map(|item| visible(&item.label.content).width())
+            .max()
+            .unwrap_or_default();
+        let item = &items[selected];
+        let editing = editor.is_some();
+        let value =
+            editor.map(|editor| editor.view((width as usize).saturating_sub(label_width + 9)));
+        let mut footer = Vec::new();
+        if !item.detail.is_empty() {
+            footer.push(String::new().stylized());
+            footer.extend(
+                wrap(&item.detail, width as usize)
+                    .into_iter()
+                    .map(StyleExt::stylized),
+            );
+        }
+        if !notice.is_empty() && notice != item.detail {
+            footer.push(String::new().stylized());
+            footer.extend(
+                wrap(notice, width as usize)
+                    .into_iter()
+                    .map(|line| line.foreground(AnsiColor::BrightRed)),
+            );
+        }
+        footer.push(String::new().stylized());
+        let help = if editing {
+            "回车键 确定\nEsc 取消\nCtrl+A 全选\nCtrl+C 复制 / Ctrl+X 剪切"
+        } else {
+            menu.help
+        };
+        footer.extend(help.lines().map(|line| line.to_owned().bold()));
+        let mut lines = Vec::new();
+        if !menu.heading.is_empty() {
+            lines.push(menu.heading.to_owned().stylized());
+            lines.push(String::new().stylized());
+        }
+        let offset = lines.len();
+        let count = (height as usize)
+            .saturating_sub(footer.len() + offset + 2)
+            .max(1);
+        let start = selected.saturating_sub(count - 1);
+        lines.extend(
+            items
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(count)
+                .map(|(index, item)| {
+                    let label = visible(&item.label.content);
+                    let mut line = item.label.clone();
+                    line.content = Cow::Owned(format!(
+                        "  {} {}{}    {}",
+                        item.marker,
+                        label,
+                        " ".repeat(label_width - label.width()),
+                        if index == selected {
+                            value
+                                .as_ref()
+                                .map_or(item.value.as_str(), |(text, _, _)| text)
+                        } else {
+                            ""
+                        },
+                    ));
+                    line
+                }),
+        );
+        lines.extend(footer);
+        let row = offset + selected - start;
+        let label = visible(&item.label.content);
+        let end = label.len() + label_width - label.width() + 7;
+        let (highlight, cursor) = match value {
+            Some((_, cursor, selection)) => (
+                end + 1 + selection.start..end + 1 + selection.end,
+                Some((label_width + 8 + cursor, row + 2)),
+            ),
+            None => (0..end, None),
+        };
+        self.draw(menu.title, &lines, Some((row, highlight)), cursor)
+    }
+
     pub fn select(
         &mut self,
-        title: &str,
-        heading: &str,
-        items: &[Item],
+        menu: &Menu<'_>,
         selected: &mut usize,
         notice: &str,
-    ) -> Result<bool> {
+    ) -> Result<Action> {
         if self.exiting {
-            return Ok(false);
+            return Ok(Action::Back);
         }
+        let items = menu.items;
         if items.is_empty() {
             return Err("菜单中没有可选择的项目".into());
         }
         *selected = (*selected).min(items.len() - 1);
         let mut notice = notice.to_owned();
-        if notice.is_empty()
-            && let Some(argument) = self.arguments.pop_front()
-        {
+        if !notice.is_empty() {
+            self.arguments.clear();
+        }
+        if let Some(argument) = self.arguments.pop_front() {
             match choice(items, *selected, &argument) {
                 Ok(index) => {
                     *selected = index;
-                    return Ok(true);
+                    return Ok(Action::Select);
                 }
-                Err(error) => notice = error,
+                Err(error) => {
+                    notice = error;
+                    self.arguments.clear();
+                }
             }
         }
-        let label_width = items
-            .iter()
-            .map(|item| visible(item.label.content()).width())
-            .max()
-            .unwrap_or_default();
         while !self.exiting {
-            let (width, height) = terminal::size()?;
-            let item = &items[*selected];
-            let mut footer = Vec::new();
-            if !notice.is_empty() {
-                footer.push(style(String::new()));
-                footer.extend(
-                    wrap(&notice, width as usize)
-                        .into_iter()
-                        .map(|line| line.red()),
-                );
-            }
-            if !item.detail.is_empty() && item.detail != notice {
-                footer.push(style(String::new()));
-                footer.extend(wrap(&item.detail, width as usize).into_iter().map(style));
-            }
-            footer.push(style(String::new()));
-            footer.push("方向键 选择　回车键 确定　Esc 返回".to_owned().bold());
-            let mut lines = Vec::new();
-            if !heading.is_empty() {
-                lines.extend(wrap(heading, width as usize).into_iter().map(style));
-                lines.push(style(String::new()));
-            }
-            let offset = lines.len();
-            let count = (height as usize)
-                .saturating_sub(footer.len() + offset + 2)
-                .max(1);
-            let start = selected.saturating_sub(count - 1);
-            let label = visible(item.label.content());
-            let highlight = label.len() + label_width - label.width() + 7;
-            lines.extend(
-                items
-                    .iter()
-                    .enumerate()
-                    .skip(start)
-                    .take(count)
-                    .map(|(index, item)| {
-                        let label = visible(item.label.content());
-                        item.label.style().apply(format!(
-                            "  > {}{}    {}",
-                            label,
-                            " ".repeat(label_width - label.width()),
-                            if index == *selected { &item.value } else { "" }
-                        ))
-                    }),
-            );
-            lines.extend(footer);
-            self.draw(
-                title,
-                &lines,
-                Some((offset + *selected - start, 0..highlight)),
-                None,
-            )?;
-            let Some(Event::Key(key)) = self.event(true)? else {
-                continue;
+            self.menu(menu, *selected, &notice, None)?;
+            let key = match self.event(true)? {
+                Some(Event::Key(key)) => key,
+                Some(Event::Paste(text)) => return Ok(Action::Paste(text)),
+                _ => continue,
             };
+            if key
+                .modifiers
+                .intersects(Modifiers::CONTROL | Modifiers::ALT)
+            {
+                return Ok(Action::Key(key));
+            }
             match key.code {
                 KeyCode::Up => *selected = (*selected + items.len() - 1) % items.len(),
                 KeyCode::Down => *selected = (*selected + 1) % items.len(),
-                KeyCode::Home => *selected = 0,
-                KeyCode::End => *selected = items.len() - 1,
-                KeyCode::PageUp => *selected = selected.saturating_sub(count),
-                KeyCode::PageDown => *selected = (*selected + count).min(items.len() - 1),
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => return Ok(true),
-                KeyCode::Esc | KeyCode::Left => return Ok(false),
-                _ => {}
+                KeyCode::Home | KeyCode::PageUp => *selected = 0,
+                KeyCode::End | KeyCode::PageDown => *selected = items.len() - 1,
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => return Ok(Action::Select),
+                KeyCode::Escape | KeyCode::Left => return Ok(Action::Back),
+                _ => return Ok(Action::Key(key)),
             }
         }
-        Ok(false)
+        Ok(Action::Back)
     }
 
-    pub fn input(
+    pub fn input<T>(
         &mut self,
-        title: &str,
-        detail: &str,
-        value: &str,
-        validate: impl Fn(&str) -> Result<()>,
-    ) -> Result<Option<String>> {
+        menu: &Menu<'_>,
+        selected: usize,
+        parse: impl Fn(&str) -> Result<T>,
+    ) -> Result<Option<T>> {
         if self.exiting {
             return Ok(None);
         }
-        let mut editor = Editor::new(value.to_owned());
+        let item = menu.items.get(selected).ok_or("没有选中的输入项")?;
+        let mut editor = Editor::new(item.value.clone());
         let mut notice = String::new();
         if let Some(argument) = self.arguments.pop_front() {
             if argument != "-" {
                 editor = Editor::new(argument);
             }
-            match validate(editor.text()) {
-                Ok(()) => return Ok(Some(editor.into_text())),
-                Err(error) => notice = error.to_string(),
+            match parse(editor.text()) {
+                Ok(value) => return Ok(Some(value)),
+                Err(error) => {
+                    notice = error.to_string();
+                    self.arguments.clear();
+                }
             }
         }
         while !self.exiting {
-            let (width, _) = terminal::size()?;
-            let (text, cursor, selection) = editor.view(width.saturating_sub(5) as usize);
-            let mut lines = vec![style(format!(" -- {text}"))];
-            if !notice.is_empty() {
-                lines.push(style(String::new()));
-                lines.extend(
-                    wrap(&notice, width as usize)
-                        .into_iter()
-                        .map(|line| line.red()),
-                );
-            }
-            if !detail.is_empty() {
-                lines.push(style(String::new()));
-                lines.extend(wrap(detail, width as usize).into_iter().map(style));
-            }
-            lines.push(style(String::new()));
-            lines.push("回车键 确定　Esc 返回　Ctrl+A 全选".to_owned().bold());
-            self.draw(
-                title,
-                &lines,
-                Some((0, selection.start + 4..selection.end + 4)),
-                Some((cursor + 4, 2)),
-            )?;
+            self.menu(menu, selected, &notice, Some(&mut editor))?;
             match self.event(false)? {
                 Some(Event::Key(key)) => match key.code {
-                    KeyCode::Enter => match validate(editor.text()) {
-                        Ok(()) => return Ok(Some(editor.into_text())),
+                    KeyCode::Enter => match parse(editor.text()) {
+                        Ok(value) => return Ok(Some(value)),
                         Err(error) => notice = error.to_string(),
                     },
-                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Escape => return Ok(None),
+                    KeyCode::Char('c' | 'x')
+                        if key.kind == KeyEventKind::Press
+                            && key
+                                .modifiers
+                                .intersects(Modifiers::CONTROL | Modifiers::SUPER) =>
+                    {
+                        if !editor.selected().is_empty() {
+                            self.copy(editor.selected())?;
+                            if key.code == KeyCode::Char('x') {
+                                editor.insert("");
+                            }
+                        }
+                    }
                     _ => editor.key(key),
                 },
                 Some(Event::Paste(text)) => editor.insert(&text),
@@ -370,9 +402,20 @@ impl Screen {
         Ok(None)
     }
 
+    pub fn copy(&mut self, text: &str) -> Result<()> {
+        write!(
+            self.output,
+            "{}",
+            Osc::SetSelection(Selection::CLIPBOARD, text)
+        )?;
+        self.output.flush()?;
+        Ok(())
+    }
+
     pub fn work<T: Send>(
         &mut self,
         title: &str,
+        detail: &str,
         operation: impl FnOnce(&Progress) -> Result<T> + Send,
     ) -> Result<T> {
         let progress = Progress::default();
@@ -384,57 +427,71 @@ impl Screen {
             });
             let result: Result<T> = (|| {
                 let started = Instant::now();
+                let mut deadline = started;
                 let mut cancelled = false;
                 loop {
-                    match receiver.recv_timeout(FRAME) {
-                        Ok(result) => return result,
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => {
-                            return Err("处理线程已中断".into());
-                        }
-                    }
-                    let (width, height) = terminal::size()?;
+                    let dimensions = self.output.get_dimensions()?;
+                    let (width, height) = (dimensions.cols, dimensions.rows);
                     let steps = progress.steps();
-                    let mut lines = Vec::new();
+                    let mut lines: Vec<Line> = wrap(detail, width as usize)
+                        .into_iter()
+                        .map(StyleExt::stylized)
+                        .collect();
+                    lines.push(String::new().stylized());
+                    let records = progress.records();
                     let mut current = Vec::new();
-                    for step in &steps {
+                    if let Some((step, text)) = steps.iter().rev().find_map(|step| {
                         let text = step.text();
-                        if text.finished {
-                            lines.extend(
-                                wrap(&format!("{}：{}", step.name, text.detail), width as usize)
-                                    .into_iter()
-                                    .map(style),
-                            );
+                        (!text.finished).then_some((step, text))
+                    }) {
+                        let name = step.group.as_deref().unwrap_or(&step.name);
+                        step.request();
+                        let mut detail = text.detail.lines();
+                        let heading = if step.total != 0 {
+                            format!(
+                                "{name}：{}/{} {}；",
+                                step.completed(),
+                                step.total,
+                                step.unit
+                            )
                         } else {
-                            let heading = if step.total == 0 {
-                                format!("{}：", step.name)
-                            } else {
-                                format!(
-                                    "{}：{}/{} {}；",
-                                    step.name,
-                                    step.completed(),
-                                    step.total,
-                                    step.unit
-                                )
-                            };
-                            current.push(style(format!(
-                                "{}{}",
-                                heading,
-                                bar(
-                                    step,
-                                    (width as usize).saturating_sub(visible(&heading).width()),
-                                    started.elapsed()
-                                )
-                            )));
-                            current
-                                .extend(wrap(&text.detail, width as usize).into_iter().map(style));
+                            format!("{name}：")
+                        };
+                        let size = (width as usize).saturating_sub(heading.width());
+                        current.push(
+                            clip(
+                                &format!("{heading}{}", bar(step, size, started.elapsed())),
+                                width as usize,
+                            )
+                            .stylized(),
+                        );
+                        if step.total == 0
+                            && let Some(line) = detail.next()
+                        {
+                            current.push(clip(&format!("  {line}"), width as usize).stylized());
                         }
+                        current.push(
+                            clip(
+                                &format!("  {}", detail.collect::<Vec<_>>().join("；")),
+                                width as usize,
+                            )
+                            .stylized(),
+                        );
                     }
-                    let count = (height as usize).saturating_sub(current.len() + 4);
-                    let skip = lines.len().saturating_sub(count);
-                    let mut lines: Vec<_> = lines.into_iter().skip(skip).collect();
+                    let available =
+                        (height as usize).saturating_sub(lines.len() + current.len() + 4);
+                    let logs = records.iter().flat_map(|record| {
+                        let name = record.group.as_deref().unwrap_or(&record.name);
+                        record.detail.lines().flat_map(move |line| {
+                            wrap(&format!("{name}：{line}"), width as usize)
+                                .into_iter()
+                                .map(StyleExt::stylized)
+                        })
+                    });
+                    let logs: Vec<_> = logs.rev().take(available).collect();
+                    lines.extend(logs.into_iter().rev());
                     lines.extend(current);
-                    lines.push(style(String::new()));
+                    lines.push(String::new().stylized());
                     lines.push(
                         if cancelled {
                             "正在取消…"
@@ -445,13 +502,13 @@ impl Screen {
                         .bold(),
                     );
                     self.draw(title, &lines, None, None)?;
-                    if event::poll(Duration::ZERO)? {
-                        let event = event::read()?;
+                    if self.output.poll(|_| true, Some(Duration::ZERO))? {
+                        let event = self.output.read(|_| true)?;
                         if let Event::Key(key) = event
                             && key.kind != KeyEventKind::Release
-                            && (key.code == KeyCode::Esc
+                            && (key.code == KeyCode::Escape
                                 || key.code == KeyCode::Char('c')
-                                    && key.modifiers == KeyModifiers::CONTROL)
+                                    && key.modifiers == Modifiers::CONTROL)
                         {
                             cancelled = true;
                             self.exiting |= key.code == KeyCode::Char('c');
@@ -459,6 +516,18 @@ impl Screen {
                         } else {
                             self.events.push_back(event);
                         }
+                    }
+                    deadline += FRAME;
+                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(result) => return result,
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => {
+                            return Err("处理线程已中断".into());
+                        }
+                    }
+                    if deadline < Instant::now() {
+                        deadline = Instant::now();
                     }
                 }
             })();
@@ -468,24 +537,120 @@ impl Screen {
             result
         })
     }
+
+    pub fn about(&mut self) -> Result<()> {
+        self.draw("关于", &[], None, None)?;
+        write!(self.output, "\x1b[3;1H")?;
+        let body = format!(
+            "\x1b[1m   Overcast v{}\n\x1b[0m   By zetaloop\n\n[",
+            env!("CARGO_PKG_VERSION")
+        );
+        let mut bytes = Vec::new();
+        for (index, byte) in body.bytes().chain(Some(0)).enumerate() {
+            bytes.push(byte);
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                self.output
+                    .write_all(if text == "\n" { b"\r\n" } else { &bytes })?;
+                self.output.flush()?;
+                bytes.clear();
+            }
+            sleep(index as u32 % 2);
+        }
+        let repository = "github.com/zetaloop/overcast";
+        for (index, byte) in repository.bytes().chain(Some(0)).enumerate() {
+            let frame = format!(
+                "\x1b[34;1m\x1b[4m\x1b]8;;https://{repository}\x1b\\{}\x1b]8;;\x1b\\\x1b[0m]\x1b[1D",
+                char::from(byte)
+            );
+            self.output.write_all(frame.as_bytes())?;
+            self.output.flush()?;
+            sleep(index as u32 % 2);
+        }
+        write!(self.output, "]\r\n\r\n\x1b[7m  > 返回   \x1b[m")?;
+        self.output.flush()?;
+        self.rows = 8;
+        if self.arguments.pop_front().is_none() {
+            while !self.exiting {
+                if matches!(self.event(true)?, Some(Event::Key(_))) {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> Result<()> {
+        let heading = "==== Overcast [退出] ====";
+        write!(self.output, "\x1b[H{}\x1b[K", heading.bold())?;
+        self.output.flush()?;
+        let start = Instant::now();
+        for row in (2..self.rows).rev() {
+            let remaining = f64::from(row - 2) / f64::from(self.rows - 2);
+            let deadline = start + Duration::from_millis(350).mul_f64(1.0 - remaining.sqrt());
+            sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u32,
+            );
+            write!(self.output, "\x1b[{};1H\x1b[2K", row + 1)?;
+            self.output.flush()?;
+        }
+        let banner = format!("  Overcast v{}  ", env!("CARGO_PKG_VERSION"));
+        write!(self.output, "\x1b[3;2H\x1b[7m")?;
+        let mut written = 0;
+        for tick in 0..39 {
+            let visible = (tick + 1) * banner.len() / 39;
+            self.output
+                .write_all(&banner.as_bytes()[written..visible])?;
+            self.output.flush()?;
+            written = visible;
+            sleep(tick as u32 % 2);
+        }
+        sleep(250);
+        write!(
+            self.output,
+            "\x1b[m\x1b[?2026h{}\x1b[?1049l",
+            Csi::Keyboard(Keyboard::PopFlags(1)),
+        )?;
+        self.alternate.store(false, Ordering::Relaxed);
+        write!(
+            self.output,
+            "{}\r\n\r\n \x1b[7m{banner}\x1b[m\r\n\x1b[?2026l",
+            heading.bold()
+        )?;
+        self.output.flush()?;
+        Ok(())
+    }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        restore();
+        let _ = restore(
+            &mut self.output,
+            self.alternate.swap(false, Ordering::Relaxed),
+        );
     }
 }
 
-fn restore() {
-    let _ = execute!(
-        stdout(),
-        EndSynchronizedUpdate,
-        SetAttribute(Attribute::Reset),
-        Show,
-        DisableBracketedPaste,
-        LeaveAlternateScreen
-    );
-    let _ = terminal::disable_raw_mode();
+fn sleep(milliseconds: u32) {
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Threading::Sleep(milliseconds)
+    };
+    #[cfg(not(windows))]
+    thread::sleep(Duration::from_millis(milliseconds as u64));
+}
+
+fn restore(output: &mut impl Write, alternate: bool) -> std::io::Result<()> {
+    write!(output, "\x1b[?2026l\x1b[m\x1b[?25h\x1b[?2004l")?;
+    if alternate {
+        write!(
+            output,
+            "{}\x1b[?1049l",
+            Csi::Keyboard(Keyboard::PopFlags(1))
+        )?;
+    }
+    output.flush()
 }
 
 fn choice(items: &[Item], selected: usize, argument: &str) -> std::result::Result<usize, String> {
@@ -495,7 +660,7 @@ fn choice(items: &[Item], selected: usize, argument: &str) -> std::result::Resul
     let mut matches = items
         .iter()
         .enumerate()
-        .filter(|(_, item)| item.key == argument || item.label.content() == argument);
+        .filter(|(_, item)| item.key == argument || item.label.content == argument);
     let Some((index, _)) = matches.next() else {
         return Err(format!("找不到菜单项：{argument}"));
     };
@@ -514,7 +679,7 @@ fn bar(step: &Step, width: usize, elapsed: Duration) -> String {
         }
         return cells.into_iter().collect();
     }
-    let fraction = (step.completed() as f64 / step.total as f64).min(1.0);
+    let fraction = step.completed() as f64 / step.total as f64;
     let cells = width.saturating_sub(8);
     let units = (fraction * cells as f64 * 8.0) as usize;
     let whole = units / 8;
