@@ -351,13 +351,13 @@ impl Screen {
         &mut self,
         menu: &Menu<'_>,
         selected: usize,
+        value: &str,
         parse: impl Fn(&str) -> Result<T>,
     ) -> Result<Option<T>> {
         if self.exiting {
             return Ok(None);
         }
-        let item = menu.items.get(selected).ok_or("没有选中的输入项")?;
-        let mut editor = Editor::new(item.value.clone());
+        let mut editor = Editor::new(value.to_owned());
         let mut notice = String::new();
         if let Some(argument) = self.arguments.pop_front() {
             if argument != "-" {

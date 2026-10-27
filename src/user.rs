@@ -108,14 +108,14 @@ fn edit(
             Ok(edited)
         };
         let edited = match items[selected].key.as_str() {
-            "name" => screen.input(&menu, selected, |value| {
+            "name" => screen.input(&menu, selected, &user.name, |value| {
                 name(value)?;
                 apply(User {
                     name: value.to_owned(),
                     ..user.clone()
                 })
             })?,
-            "uuid" => screen.input(&menu, selected, |value| {
+            "uuid" => screen.input(&menu, selected, &user.uuid.to_string(), |value| {
                 apply(User {
                     uuid: value
                         .parse()
@@ -123,7 +123,7 @@ fn edit(
                     ..user.clone()
                 })
             })?,
-            "password" => screen.input(&menu, selected, |value| {
+            "password" => screen.input(&menu, selected, &user.password, |value| {
                 password(value)?;
                 apply(User {
                     password: value.to_owned(),
