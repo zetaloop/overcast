@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     fs::{self, File, OpenOptions},
     io::{BufReader, ErrorKind, Write},
@@ -12,13 +12,19 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-use crate::{Result, outbound::Outbound, user::User};
+use crate::{
+    Result,
+    component::{Component, Settings},
+    outbound::Outbound,
+    user::User,
+};
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub users: Vec<User>,
     pub outbounds: Vec<Outbound>,
+    pub components: BTreeMap<Component, Settings>,
 }
 
 impl Config {
@@ -120,17 +126,7 @@ impl Store {
     }
 
     pub fn update(&self, change: impl FnOnce(&mut Config) -> Result<()>) -> Result<()> {
-        if let Some(parent) = self.directory.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let builder = &mut fs::DirBuilder::new();
-        #[cfg(unix)]
-        builder.mode(0o700);
-        match builder.create(&self.directory) {
-            Ok(()) => self.own(&self.directory)?,
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
+        self.create_dir(&self.directory)?;
         let path = self.directory.join("config.lock");
         let mut options = OpenOptions::new();
         options.read(true).write(true);
@@ -161,10 +157,31 @@ impl Store {
         Ok(())
     }
 
-    fn own(&self, path: &Path) -> Result<()> {
+    pub fn create_dir(&self, directory: &Path) -> Result<()> {
+        let mut missing = Vec::new();
+        for path in directory.ancestors() {
+            if path.try_exists()? {
+                break;
+            }
+            missing.push(path);
+        }
+        for path in missing.into_iter().rev() {
+            let builder = &mut fs::DirBuilder::new();
+            #[cfg(unix)]
+            builder.mode(0o700);
+            match builder.create(path) {
+                Ok(()) => self.own(path)?,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn own(&self, path: &Path) -> Result<()> {
         #[cfg(unix)]
         if let Some((uid, gid)) = self.owner {
-            std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
+            std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
         }
         #[cfg(not(unix))]
         let _ = path;

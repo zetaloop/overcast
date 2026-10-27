@@ -1,7 +1,7 @@
 use std::{
     io::{Error, ErrorKind},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -86,6 +86,7 @@ pub struct Progress {
     steps: Arc<Mutex<Vec<Step>>>,
     records: Arc<Mutex<Vec<Arc<Record>>>>,
     cancelled: Arc<AtomicBool>,
+    wake: Arc<(Mutex<()>, Condvar)>,
 }
 
 impl Progress {
@@ -154,7 +155,20 @@ impl Progress {
     }
 
     pub fn cancel(&self) {
+        let _guard = self.wake.0.lock().expect("progress lock poisoned");
         self.cancelled.store(true, Ordering::Relaxed);
+        self.wake.1.notify_all();
+    }
+
+    pub fn wait(&self, duration: Duration) -> Result<()> {
+        let guard = self.wake.0.lock().expect("progress lock poisoned");
+        drop(
+            self.wake
+                .1
+                .wait_timeout_while(guard, duration, |_| !self.cancelled.load(Ordering::Relaxed))
+                .expect("progress lock poisoned"),
+        );
+        self.check()
     }
 
     pub fn check(&self) -> Result<()> {
