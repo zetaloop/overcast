@@ -12,12 +12,13 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-use crate::{Result, user::User};
+use crate::{Result, outbound::Outbound, user::User};
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub users: Vec<User>,
+    pub outbounds: Vec<Outbound>,
 }
 
 impl Config {
@@ -31,6 +32,13 @@ impl Config {
             }
             if let Some(name) = passwords.insert(&user.password, &user.name) {
                 return Err(format!("{name} 与 {} 的主密码相同", user.name).into());
+            }
+        }
+        identifiers.clear();
+        for outbound in &self.outbounds {
+            outbound.validate()?;
+            if !identifiers.insert(outbound.uuid) {
+                return Err(format!("出站 UUID 重复：{}", outbound.uuid).into());
             }
         }
         Ok(())

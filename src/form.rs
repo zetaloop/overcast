@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Display, str::FromStr};
+use std::{collections::BTreeMap, fmt::Display, rc::Rc, str::FromStr};
 
 use termina::{
     event::{KeyCode, Modifiers},
@@ -19,19 +19,67 @@ pub trait Value: Clone + Default {
         ">"
     }
 
-    fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool>;
+    fn edit(
+        &mut self,
+        screen: &mut Screen,
+        menu: &Menu<'_>,
+        selected: usize,
+        apply: Apply<'_, Self>,
+    ) -> Result<bool> {
+        self.run(screen, menu, selected, apply, false)
+    }
+
+    fn create(
+        screen: &mut Screen,
+        menu: &Menu<'_>,
+        selected: usize,
+        apply: Apply<'_, Self>,
+    ) -> Result<Option<Self>> {
+        let mut value = Self::default();
+        let accepted = value.run(screen, menu, selected, apply, true)?;
+        Ok(accepted.then_some(value))
+    }
+
+    fn run(
+        &mut self,
+        screen: &mut Screen,
+        menu: &Menu<'_>,
+        selected: usize,
+        apply: Apply<'_, Self>,
+        creating: bool,
+    ) -> Result<bool>;
+}
+
+pub type Apply<'a, T> = Rc<dyn Fn(&T) -> Result<()> + 'a>;
+
+pub fn map<'a, T: Clone + 'a, U: Clone + 'a>(
+    value: Rc<T>,
+    apply: Apply<'a, T>,
+    replace: impl Fn(&mut T, U) + 'a,
+) -> Apply<'a, U> {
+    Rc::new(move |edited| {
+        let mut value = (*value).clone();
+        replace(&mut value, edited.clone());
+        apply(&value)
+    })
+}
+
+pub fn set<T>(value: &mut T, edited: T, apply: &Apply<'_, T>) -> Result<bool> {
+    apply(&edited)?;
+    *value = edited;
+    Ok(true)
 }
 
 pub trait Field {
     fn item(&self) -> Item;
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool>;
-    fn reset(&mut self);
+    fn reset(&mut self) -> Result<bool>;
 }
 
 pub type Fields<'a> = Vec<Box<dyn Field + 'a>>;
 
-pub trait Form: Default {
-    fn fields(&mut self, defaults: Self) -> Fields<'_>;
+pub trait Form: Clone + Default {
+    fn fields<'a>(&'a mut self, defaults: Self, apply: Apply<'a, Self>) -> Fields<'a>;
 }
 
 struct Binding<'a, T> {
@@ -39,6 +87,7 @@ struct Binding<'a, T> {
     label: &'static str,
     value: &'a mut T,
     default: T,
+    apply: Apply<'a, T>,
 }
 
 pub fn field<'a, T: Value>(
@@ -46,12 +95,14 @@ pub fn field<'a, T: Value>(
     label: &'static str,
     value: &'a mut T,
     default: T,
+    apply: Apply<'a, T>,
 ) -> Box<dyn Field + 'a> {
     Box::new(Binding {
         key,
         label,
         value,
         default,
+        apply,
     })
 }
 
@@ -64,35 +115,62 @@ impl<T: Value> Field for Binding<'_, T> {
     }
 
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
-        self.value.edit(screen, menu, selected)
+        self.value.edit(screen, menu, selected, self.apply.clone())
     }
 
-    fn reset(&mut self) {
-        *self.value = self.default.clone();
+    fn reset(&mut self) -> Result<bool> {
+        set(self.value, self.default.clone(), &self.apply)
     }
 }
 
-pub fn edit<T: Form>(screen: &mut Screen, title: &str, value: &mut T) -> Result<bool> {
-    let mut fields = value.fields(T::default());
+pub fn edit<T: Form>(
+    screen: &mut Screen,
+    title: &str,
+    value: &mut T,
+    apply: Apply<'_, T>,
+    creating: bool,
+) -> Result<bool> {
+    let update: Apply<'_, T> = if creating {
+        Rc::new(|_| Ok(()))
+    } else {
+        apply.clone()
+    };
     let mut selected = 0;
     let mut notice = String::new();
     let mut changed = false;
     loop {
+        let mut fields = value.fields(T::default(), update.clone());
         let mut items: Vec<_> = fields.iter().map(|field| field.item()).collect();
-        items.push(Item::new("back", "返回".stylized()));
+        if creating {
+            items.push(Item::new("create", "确定".stylized()));
+        }
+        items.push(Item::new(
+            "back",
+            if creating { "取消" } else { "返回" }.stylized(),
+        ));
         let menu = Menu {
             title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 返回",
+            help: if creating {
+                "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 取消"
+            } else {
+                "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 返回"
+            },
         };
         let result = match screen.select(&menu, &mut selected, &notice)? {
-            Action::Back => return Ok(changed),
-            Action::Select if selected == fields.len() => return Ok(changed),
+            Action::Back => return Ok(!creating && changed),
+            Action::Select if selected == items.len() - 1 => return Ok(!creating && changed),
+            Action::Select if selected == fields.len() => {
+                drop(fields);
+                match apply(value) {
+                    Ok(()) => return Ok(true),
+                    Err(error) => Err(error),
+                }
+            }
             Action::Select => fields[selected].edit(screen, &menu, selected),
             Action::Key(key) if key.code == KeyCode::Delete && selected < fields.len() => {
-                fields[selected].reset();
-                Ok(true)
+                fields[selected].reset()
             }
             _ => continue,
         };
@@ -111,13 +189,17 @@ fn input<T: Display + FromStr>(
     screen: &mut Screen,
     menu: &Menu<'_>,
     selected: usize,
+    apply: Apply<'_, T>,
 ) -> Result<bool>
 where
     T::Err: Display,
 {
     let Some(edited) = screen.input(menu, selected, &value.to_string(), |text| {
-        text.parse()
-            .map_err(|error| format!("格式不正确：{error}").into())
+        let edited = text
+            .parse()
+            .map_err(|error| format!("格式不正确：{error}"))?;
+        apply(&edited)?;
+        Ok(edited)
     })?
     else {
         return Ok(false);
@@ -130,8 +212,8 @@ macro_rules! scalar {
     ($($ty:ty),* $(,)?) => {
         $(impl Value for $ty {
             fn text(&self) -> String { self.to_string() }
-            fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
-                input(self, screen, menu, selected)
+            fn run(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize, apply: Apply<'_, Self>, _: bool) -> Result<bool> {
+                input(self, screen, menu, selected, apply)
             }
         })*
     };
@@ -148,9 +230,15 @@ impl Value for bool {
         if *self { "■" } else { "□" }
     }
 
-    fn edit(&mut self, _: &mut Screen, _: &Menu<'_>, _: usize) -> Result<bool> {
-        *self = !*self;
-        Ok(true)
+    fn run(
+        &mut self,
+        _: &mut Screen,
+        _: &Menu<'_>,
+        _: usize,
+        apply: Apply<'_, Self>,
+        _: bool,
+    ) -> Result<bool> {
+        set(self, !*self, &apply)
     }
 }
 
@@ -163,9 +251,19 @@ impl<T: Value> Value for Option<T> {
         self.as_ref().map_or(">", Value::marker)
     }
 
-    fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
+    fn run(
+        &mut self,
+        screen: &mut Screen,
+        menu: &Menu<'_>,
+        selected: usize,
+        apply: Apply<'_, Self>,
+        creating: bool,
+    ) -> Result<bool> {
         let mut value = self.clone().unwrap_or_default();
-        if value.edit(screen, menu, selected)? {
+        let apply = map(Rc::new(self.clone()), apply, |option, value| {
+            *option = Some(value)
+        });
+        if value.run(screen, menu, selected, apply, creating)? {
             *self = Some(value);
             Ok(true)
         } else {
@@ -175,7 +273,19 @@ impl<T: Value> Value for Option<T> {
 }
 
 impl<T: Value> Value for Vec<T> {
-    fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
+    fn run(
+        &mut self,
+        screen: &mut Screen,
+        parent: &Menu<'_>,
+        field: usize,
+        apply: Apply<'_, Self>,
+        creating: bool,
+    ) -> Result<bool> {
+        let update: Apply<'_, Self> = if creating {
+            Rc::new(|_| Ok(()))
+        } else {
+            apply.clone()
+        };
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let mut selected = 0;
         let mut notice = String::new();
@@ -191,33 +301,56 @@ impl<T: Value> Value for Vec<T> {
                     item
                 })
                 .collect();
-            items.extend([
-                Item::new("add", "添加".stylized()),
-                Item::new("back", "返回".stylized()),
-            ]);
+            items.push(Item::new("add", "添加".stylized()));
+            if creating {
+                items.push(Item::new("create", "确定".stylized()));
+            }
+            items.push(Item::new(
+                "back",
+                if creating { "取消" } else { "返回" }.stylized(),
+            ));
             let menu = Menu {
                 title: &title,
                 heading: "",
                 items: &items,
-                help: "方向键 选择\n回车键 编辑\nDel 删除\nAlt+↑↓ 移动\nEsc 返回",
+                help: if creating {
+                    "方向键 选择\n回车键 编辑\nDel 删除\nAlt+↑↓ 移动\nEsc 取消"
+                } else {
+                    "方向键 选择\n回车键 编辑\nDel 删除\nAlt+↑↓ 移动\nEsc 返回"
+                },
             };
             let result = match screen.select(&menu, &mut selected, &notice)? {
-                Action::Back => return Ok(changed),
-                Action::Select if selected == self.len() + 1 => return Ok(changed),
+                Action::Back => return Ok(!creating && changed),
+                Action::Select if selected == items.len() - 1 => return Ok(!creating && changed),
+                Action::Select if creating && selected == self.len() + 1 => match apply(self) {
+                    Ok(()) => return Ok(true),
+                    Err(error) => Err(error),
+                },
                 Action::Select if selected == self.len() => {
-                    let mut value = T::default();
-                    match value.edit(screen, &menu, selected) {
-                        Ok(true) => {
+                    let apply = map(Rc::new(self.clone()), update.clone(), |values, value| {
+                        values.push(value);
+                    });
+                    T::create(screen, &menu, selected, apply).map(|value| {
+                        if let Some(value) = value {
                             self.push(value);
-                            Ok(true)
+                            true
+                        } else {
+                            false
                         }
-                        other => other,
-                    }
+                    })
                 }
-                Action::Select => self[selected].edit(screen, &menu, selected),
+                Action::Select => {
+                    let apply = map(
+                        Rc::new(self.clone()),
+                        update.clone(),
+                        move |values, value| values[selected] = value,
+                    );
+                    self[selected].edit(screen, &menu, selected, apply)
+                }
                 Action::Key(key) if key.code == KeyCode::Delete && selected < self.len() => {
-                    self.remove(selected);
-                    Ok(true)
+                    let mut edited = self.clone();
+                    edited.remove(selected);
+                    set(self, edited, &update)
                 }
                 Action::Key(key)
                     if key.modifiers.contains(Modifiers::ALT)
@@ -229,9 +362,11 @@ impl<T: Value> Value for Vec<T> {
                     } else {
                         (selected + 1).min(self.len() - 1)
                     };
-                    self.swap(selected, destination);
-                    selected = destination;
-                    Ok(true)
+                    let mut edited = self.clone();
+                    edited.swap(selected, destination);
+                    set(self, edited, &update).inspect(|_| {
+                        selected = destination;
+                    })
                 }
                 _ => continue,
             };
@@ -247,7 +382,19 @@ impl<T: Value> Value for Vec<T> {
 }
 
 impl<T: Value> Value for BTreeMap<String, T> {
-    fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
+    fn run(
+        &mut self,
+        screen: &mut Screen,
+        parent: &Menu<'_>,
+        field: usize,
+        apply: Apply<'_, Self>,
+        creating: bool,
+    ) -> Result<bool> {
+        let update: Apply<'_, Self> = if creating {
+            Rc::new(|_| Ok(()))
+        } else {
+            apply.clone()
+        };
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let mut selected = 0;
         let mut notice = String::new();
@@ -263,19 +410,31 @@ impl<T: Value> Value for BTreeMap<String, T> {
                     item
                 })
                 .collect();
-            items.extend([
-                Item::new("add", "添加".stylized()),
-                Item::new("back", "返回".stylized()),
-            ]);
+            items.push(Item::new("add", "添加".stylized()));
+            if creating {
+                items.push(Item::new("create", "确定".stylized()));
+            }
+            items.push(Item::new(
+                "back",
+                if creating { "取消" } else { "返回" }.stylized(),
+            ));
             let menu = Menu {
                 title: &title,
                 heading: "",
                 items: &items,
-                help: "方向键 选择\n回车键 编辑\nDel 删除\nEsc 返回",
+                help: if creating {
+                    "方向键 选择\n回车键 编辑\nDel 删除\nEsc 取消"
+                } else {
+                    "方向键 选择\n回车键 编辑\nDel 删除\nEsc 返回"
+                },
             };
             let result = match screen.select(&menu, &mut selected, &notice)? {
-                Action::Back => return Ok(changed),
-                Action::Select if selected == self.len() + 1 => return Ok(changed),
+                Action::Back => return Ok(!creating && changed),
+                Action::Select if selected == items.len() - 1 => return Ok(!creating && changed),
+                Action::Select if creating && selected == self.len() + 1 => match apply(self) {
+                    Ok(()) => return Ok(true),
+                    Err(error) => Err(error),
+                },
                 Action::Select if selected == self.len() => {
                     let Some(key) = screen.input(&menu, selected, "", |key| {
                         if self.contains_key(key) {
@@ -286,28 +445,46 @@ impl<T: Value> Value for BTreeMap<String, T> {
                     else {
                         continue;
                     };
-                    let mut value = T::default();
                     let items = [Item::new(key.clone(), key.clone().stylized())];
                     let entry = Menu {
                         items: &items,
                         ..menu
                     };
-                    match value.edit(screen, &entry, 0) {
-                        Ok(true) => {
+                    let name = key.clone();
+                    let apply = map(
+                        Rc::new(self.clone()),
+                        update.clone(),
+                        move |values, value| {
+                            values.insert(name.clone(), value);
+                        },
+                    );
+                    T::create(screen, &entry, 0, apply).map(|value| {
+                        if let Some(value) = value {
                             self.insert(key.clone(), value);
                             selected = self.keys().position(|name| name == &key).unwrap_or(0);
-                            Ok(true)
+                            true
+                        } else {
+                            false
                         }
-                        other => other,
-                    }
+                    })
                 }
-                Action::Select => self
-                    .get_mut(&keys[selected])
-                    .ok_or("项目已被删除")?
-                    .edit(screen, &menu, selected),
+                Action::Select => {
+                    let key = keys[selected].clone();
+                    let apply = map(
+                        Rc::new(self.clone()),
+                        update.clone(),
+                        move |values, value| {
+                            values.insert(key.clone(), value);
+                        },
+                    );
+                    self.get_mut(&keys[selected])
+                        .ok_or("项目已被删除")?
+                        .edit(screen, &menu, selected, apply)
+                }
                 Action::Key(key) if key.code == KeyCode::Delete && selected < keys.len() => {
-                    self.remove(&keys[selected]);
-                    Ok(true)
+                    let mut edited = self.clone();
+                    edited.remove(&keys[selected]);
+                    set(self, edited, &update)
                 }
                 _ => continue,
             };
@@ -328,6 +505,7 @@ pub fn choose<T: PartialEq + Clone>(
     parent: &Menu<'_>,
     field: usize,
     choices: &[(&str, &str, T)],
+    apply: Apply<'_, T>,
 ) -> Result<bool> {
     let title = format!("{} / {}", parent.title, parent.items[field].label.content);
     let mut items: Vec<_> = choices
@@ -350,8 +528,7 @@ pub fn choose<T: PartialEq + Clone>(
             Action::Back => return Ok(false),
             Action::Select if selected == choices.len() => return Ok(false),
             Action::Select => {
-                *value = choices[selected].2.clone();
-                return Ok(true);
+                return set(value, choices[selected].2.clone(), &apply);
             }
             _ => {}
         }
@@ -361,34 +538,40 @@ pub fn choose<T: PartialEq + Clone>(
 macro_rules! fields {
     ($ty:ty { $($field:ident: $label:tt),* $(,)? }) => {
         impl $crate::form::Form for $ty {
-            fn fields(&mut self, defaults: Self) -> $crate::form::Fields<'_> {
+            fn fields<'a>(&'a mut self, defaults: Self, apply: $crate::form::Apply<'a, Self>) -> $crate::form::Fields<'a> {
+                let original = std::rc::Rc::new(self.clone());
                 let Self { $($field),* } = self;
                 let mut fields = Vec::new();
-                $($crate::form::fields!(@push fields, $field, defaults.$field, $label);)*
+                $({
+                    let apply = $crate::form::map(original.clone(), apply.clone(), |value, edited| value.$field = edited);
+                    $crate::form::fields!(@push fields, $field, defaults.$field, $label, apply);
+                })*
                 fields
             }
         }
         $crate::form::group!($ty);
     };
-    (@push $fields:ident, $field:ident, $default:expr, ..) => {
-        $fields.extend($crate::form::Form::fields($field, $default));
+    (@push $fields:ident, $field:ident, $default:expr, .., $apply:ident) => {
+        $fields.extend($crate::form::Form::fields($field, $default, $apply));
     };
-    (@push $fields:ident, $field:ident, $default:expr, $label:literal) => {
-        $fields.push($crate::form::field(stringify!($field), $label, $field, $default));
+    (@push $fields:ident, $field:ident, $default:expr, $label:literal, $apply:ident) => {
+        $fields.push($crate::form::field(stringify!($field), $label, $field, $default, $apply));
     };
 }
 
 macro_rules! group {
     ($ty:ty) => {
         impl $crate::form::Value for $ty {
-            fn edit(
+            fn run(
                 &mut self,
                 screen: &mut $crate::tui::Screen,
                 menu: &$crate::tui::Menu<'_>,
                 selected: usize,
+                apply: $crate::form::Apply<'_, Self>,
+                creating: bool,
             ) -> $crate::Result<bool> {
                 let title = format!("{} / {}", menu.title, menu.items[selected].label.content);
-                $crate::form::edit(screen, &title, self)
+                $crate::form::edit(screen, &title, self, apply, creating)
             }
         }
     };
@@ -401,8 +584,8 @@ macro_rules! choices {
                 match self { $(Self::$variant => $label.to_owned()),* }
             }
 
-            fn edit(&mut self, screen: &mut $crate::tui::Screen, menu: &$crate::tui::Menu<'_>, selected: usize) -> $crate::Result<bool> {
-                $crate::form::choose(self, screen, menu, selected, &[$(($key, $label, Self::$variant)),*])
+            fn run(&mut self, screen: &mut $crate::tui::Screen, menu: &$crate::tui::Menu<'_>, selected: usize, apply: $crate::form::Apply<'_, Self>, _: bool) -> $crate::Result<bool> {
+                $crate::form::choose(self, screen, menu, selected, &[$(($key, $label, Self::$variant)),*], apply)
             }
         }
     };

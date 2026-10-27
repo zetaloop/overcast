@@ -1,5 +1,8 @@
 mod config;
+mod connection;
+mod form;
 pub mod input;
+mod outbound;
 pub mod progress;
 pub mod tui;
 mod user;
@@ -24,6 +27,7 @@ fn run() -> Result<()> {
     let mut notice = String::new();
     let items = [
         Item::new("users", "用户".stylized()),
+        Item::new("outbounds", "出站".stylized()),
         Item::new("about", "关于".stylized()),
         Item::new("exit", "退出".foreground(AnsiColor::BrightRed)),
     ];
@@ -41,7 +45,8 @@ fn run() -> Result<()> {
         }
         let result = match selected {
             0 => user::run(&mut screen, &store),
-            1 => screen.about(),
+            1 => outbound::run(&mut screen, &store),
+            2 => screen.about(),
             _ => break,
         };
         notice = result
