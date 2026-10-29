@@ -15,6 +15,7 @@ use tempfile::NamedTempFile;
 use crate::{
     Result,
     component::{Component, Settings},
+    inbound::Inbound,
     outbound::Outbound,
     user::User,
 };
@@ -23,6 +24,7 @@ use crate::{
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub users: Vec<User>,
+    pub inbounds: Vec<Inbound>,
     pub outbounds: Vec<Outbound>,
     pub components: BTreeMap<Component, Settings>,
 }
@@ -38,6 +40,13 @@ impl Config {
             }
             if let Some(name) = passwords.insert(&user.password, &user.name) {
                 return Err(format!("{name} 与 {} 的主密码相同", user.name).into());
+            }
+        }
+        identifiers.clear();
+        for inbound in &self.inbounds {
+            inbound.validate()?;
+            if !identifiers.insert(inbound.uuid) {
+                return Err(format!("入站 UUID 重复：{}", inbound.uuid).into());
             }
         }
         identifiers.clear();

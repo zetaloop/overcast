@@ -2,6 +2,7 @@ mod component;
 mod config;
 mod connection;
 mod form;
+mod inbound;
 pub mod input;
 mod outbound;
 pub mod progress;
@@ -28,8 +29,9 @@ fn run() -> Result<()> {
     let mut selected = 0;
     let mut notice = String::new();
     let items = [
-        Item::new("users", "用户".stylized()),
+        Item::new("inbounds", "入站".stylized()),
         Item::new("outbounds", "出站".stylized()),
+        Item::new("users", "用户".stylized()),
         Item::new("components", "组件".stylized()),
         Item::new("about", "关于".stylized()),
         Item::new("exit", "退出".foreground(AnsiColor::BrightRed)),
@@ -47,10 +49,11 @@ fn run() -> Result<()> {
             _ => continue,
         }
         let result = match selected {
-            0 => user::run(&mut screen, &store),
+            0 => inbound::run(&mut screen, &store),
             1 => outbound::run(&mut screen, &store),
-            2 => component::run(&mut screen, &store),
-            3 => screen.about(),
+            2 => user::run(&mut screen, &store),
+            3 => component::run(&mut screen, &store),
+            4 => screen.about(),
             _ => break,
         };
         notice = result

@@ -18,12 +18,10 @@ pub struct User {
 
 impl User {
     fn new() -> Result<Self> {
-        let mut bytes = [0; 32];
-        getrandom::fill(&mut bytes).map_err(|error| format!("生成主密码失败：{error}"))?;
         Ok(Self {
             name: String::new(),
             uuid: Uuid::new_v4(),
-            password: bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+            password: secret()?,
         })
     }
 
@@ -40,7 +38,13 @@ fn name(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn password(value: &str) -> Result<()> {
+pub fn secret() -> Result<String> {
+    let mut bytes = [0; 32];
+    getrandom::fill(&mut bytes).map_err(|error| format!("生成主密码失败：{error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+pub fn password(value: &str) -> Result<()> {
     if value.is_empty() {
         return Err("主密码不能为空".into());
     }
@@ -55,7 +59,7 @@ fn edit(
     store: &Store,
     mut original: Option<Uuid>,
     mut user: User,
-) -> Result<()> {
+) -> Result<Option<User>> {
     let mut selected = 0;
     let mut notice = String::new();
     loop {
@@ -89,7 +93,7 @@ fn edit(
         };
         match screen.select(&menu, &mut selected, &notice)? {
             Action::Select => {}
-            Action::Back => return Ok(()),
+            Action::Back => return Ok(original.map(|_| user)),
             _ => continue,
         }
         notice.clear();
@@ -140,7 +144,7 @@ fn edit(
                         })
                     });
                 match result {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => return Ok(Some(user)),
                     Err(error) => notice = error.to_string(),
                 }
                 None
@@ -155,18 +159,22 @@ fn edit(
                         })
                     });
                 match result {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => return Ok(None),
                     Err(error) => notice = error.to_string(),
                 }
                 None
             }
-            _ => return Ok(()),
+            _ => return Ok(original.map(|_| user)),
         };
         if let Some(edited) = edited {
             original = original.map(|_| edited.uuid);
             user = edited;
         }
     }
+}
+
+pub fn create(screen: &mut Screen, store: &Store) -> Result<Option<User>> {
+    edit(screen, store, None, User::new()?)
 }
 
 pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
@@ -204,7 +212,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
         let result = if let Some(user) = config.users.get(selected) {
             edit(screen, store, Some(user.uuid), user.clone())
         } else {
-            User::new().and_then(|user| edit(screen, store, None, user))
+            create(screen, store)
         };
         notice = result
             .err()
