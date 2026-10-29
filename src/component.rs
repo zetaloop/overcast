@@ -19,7 +19,7 @@ use crate::{
     Result,
     config::Store,
     progress::{Progress, Step},
-    resource,
+    resource::{self, Asset, Release},
     tui::{Action, Item, Menu, Screen},
 };
 
@@ -30,23 +30,6 @@ pub enum Component {
     SingBox,
     Mihomo,
     Caddy,
-}
-
-#[derive(Deserialize)]
-struct Release {
-    tag_name: String,
-    draft: bool,
-    published_at: String,
-    assets: Vec<Asset>,
-}
-
-#[derive(Deserialize)]
-struct Asset {
-    id: u64,
-    name: String,
-    size: u64,
-    updated_at: String,
-    browser_download_url: String,
 }
 
 #[derive(Default, Deserialize, Serialize)]

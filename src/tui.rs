@@ -13,7 +13,7 @@ use std::{
 };
 
 use termina::{
-    Event, PlatformTerminal, Terminal,
+    Event, PlatformTerminal, Terminal, WindowSize,
     escape::{
         csi::{Csi, Keyboard, KittyKeyboardFlags},
         osc::{Osc, Selection},
@@ -69,7 +69,7 @@ pub struct Screen {
     output: PlatformTerminal,
     rows: u16,
     alternate: Arc<AtomicBool>,
-    arguments: VecDeque<String>,
+    pub(crate) arguments: VecDeque<String>,
     events: VecDeque<Event>,
     pub exiting: bool,
 }
@@ -116,14 +116,18 @@ impl Screen {
         }
     }
 
-    fn draw(
+    pub(crate) fn dimensions(&self) -> Result<WindowSize> {
+        Ok(self.output.get_dimensions()?)
+    }
+
+    pub(crate) fn draw(
         &mut self,
         title: &str,
         lines: &[Line],
-        selected: Option<(usize, Range<usize>)>,
+        selected: &[(usize, Range<usize>)],
         cursor: Option<(usize, usize)>,
     ) -> Result<()> {
-        let dimensions = self.output.get_dimensions()?;
+        let dimensions = self.dimensions()?;
         let (width, height) = (dimensions.cols, dimensions.rows);
         if width == 0 || height == 0 {
             return Ok(());
@@ -144,7 +148,7 @@ impl Screen {
             write!(self.output, "\x1b[{};1H", index + 3)?;
             let text = clip(&line.content, width as usize);
             let mut line = line.clone();
-            if let Some((_, range)) = selected.as_ref().filter(|(row, _)| *row == index) {
+            if let Some((_, range)) = selected.iter().find(|(row, _)| *row == index) {
                 let start = text.floor_char_boundary(range.start.min(text.len()));
                 let end = text.floor_char_boundary(range.end.min(text.len()));
                 line.content = Cow::Owned(format!(
@@ -178,7 +182,7 @@ impl Screen {
         Ok(())
     }
 
-    fn event(&mut self, actions: bool) -> Result<Option<Event>> {
+    pub(crate) fn event(&mut self, actions: bool) -> Result<Option<Event>> {
         let event = match self.events.pop_front() {
             Some(event) => event,
             None => self.output.read(|_| true)?,
@@ -199,14 +203,14 @@ impl Screen {
         Ok(Some(event))
     }
 
-    fn menu(
+    pub(crate) fn menu(
         &mut self,
         menu: &Menu<'_>,
         selected: usize,
         notice: &str,
         editor: Option<&mut Editor>,
     ) -> Result<()> {
-        let dimensions = self.output.get_dimensions()?;
+        let dimensions = self.dimensions()?;
         let (width, height) = (dimensions.cols, dimensions.rows);
         let items = menu.items;
         let label_width = items
@@ -288,7 +292,146 @@ impl Screen {
             ),
             None => (0..end, None),
         };
-        self.draw(menu.title, &lines, Some((row, highlight)), cursor)
+        self.draw(menu.title, &lines, &[(row, highlight)], cursor)
+    }
+
+    pub(crate) fn prompt<'a>(
+        &mut self,
+        title: &str,
+        editor: &mut Editor,
+        items: impl ExactSizeIterator<Item = &'a Item> + Clone,
+        selected: Option<usize>,
+        notice: &str,
+        help: &str,
+    ) -> Result<()> {
+        let dimensions = self.dimensions()?;
+        let width = dimensions.cols as usize;
+        let (text, cursor, selection) = editor.view(width.saturating_sub(5));
+        let mut lines = vec![format!("  -- {text}").stylized(), String::new().stylized()];
+        let mut footer = Vec::new();
+        if let Some(item) = selected.and_then(|index| items.clone().nth(index))
+            && !item.detail.is_empty()
+        {
+            footer.push(String::new().stylized());
+            footer.extend(
+                wrap(&item.detail, width)
+                    .into_iter()
+                    .map(StyleExt::stylized),
+            );
+        }
+        if !notice.is_empty() {
+            footer.push(String::new().stylized());
+            footer.extend(
+                wrap(notice, width)
+                    .into_iter()
+                    .map(|line| line.foreground(AnsiColor::BrightRed)),
+            );
+        }
+        footer.push(String::new().stylized());
+        footer.extend(help.lines().map(|line| line.to_owned().bold()));
+        let count = (dimensions.rows as usize)
+            .saturating_sub(footer.len() + 4)
+            .max(1);
+        let start = selected.unwrap_or_default().saturating_sub(count - 1);
+        let mut highlights = vec![(0, 5 + selection.start..5 + selection.end)];
+        for (index, item) in items.enumerate().skip(start).take(count) {
+            let mut line = item.label.clone();
+            line.content = Cow::Owned(format!(
+                "  {} {}    {}",
+                item.marker,
+                visible(&item.label.content),
+                visible(&item.value),
+            ));
+            if selected == Some(index) {
+                highlights.push((lines.len(), 0..line.content.len()));
+            }
+            lines.push(line);
+        }
+        lines.extend(footer);
+        self.draw(title, &lines, &highlights, Some((5 + cursor, 2)))
+    }
+
+    pub(crate) fn search(
+        &mut self,
+        title: &str,
+        items: &[Item],
+        selected: usize,
+    ) -> Result<Option<usize>> {
+        if self.exiting {
+            return Ok(None);
+        }
+        let mut notice = String::new();
+        let mut editor = Editor::new(String::new());
+        let mut selected = selected.min(items.len().saturating_sub(1));
+        if let Some(argument) = self.arguments.pop_front() {
+            match choice(items, selected, &argument) {
+                Ok(index) => return Ok(Some(index)),
+                Err(error) => {
+                    notice = error;
+                    editor = Editor::new(argument);
+                    selected = 0;
+                    self.arguments.clear();
+                }
+            }
+        }
+        let searchable: Vec<_> = items
+            .iter()
+            .map(|item| {
+                format!("{} {} {}", item.key, item.label.content, item.value).to_lowercase()
+            })
+            .collect();
+        while !self.exiting {
+            let query = editor.text().to_lowercase();
+            let terms: Vec<_> = query.split_whitespace().collect();
+            let matches: Vec<_> = searchable
+                .iter()
+                .enumerate()
+                .filter(|(_, text)| terms.iter().all(|term| text.contains(term)))
+                .map(|(index, _)| index)
+                .collect();
+            selected = selected.min(matches.len().saturating_sub(1));
+            self.prompt(
+                title,
+                &mut editor,
+                matches.iter().map(|index| &items[*index]),
+                (!matches.is_empty()).then_some(selected),
+                &notice,
+                "输入文字 搜索\n↑↓ 选择\n回车键 确定\nEsc 返回",
+            )?;
+            let Some(event) = self.event(false)? else {
+                continue;
+            };
+            if let Event::Key(key) = event {
+                match key.code {
+                    KeyCode::Escape => return Ok(None),
+                    KeyCode::Enter if !matches.is_empty() => return Ok(Some(matches[selected])),
+                    KeyCode::Up if !matches.is_empty() => {
+                        selected = (selected + matches.len() - 1) % matches.len();
+                        continue;
+                    }
+                    KeyCode::Down if !matches.is_empty() => {
+                        selected = (selected + 1) % matches.len();
+                        continue;
+                    }
+                    KeyCode::PageUp => {
+                        selected = 0;
+                        continue;
+                    }
+                    KeyCode::PageDown => {
+                        selected = matches.len().saturating_sub(1);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            let previous = editor.text().to_owned();
+            self.edit(&mut editor, event)?;
+            if editor.text() != previous {
+                selected = 0;
+                notice.clear();
+            }
+        }
+        Ok(None)
     }
 
     pub fn select(
@@ -374,32 +517,40 @@ impl Screen {
         while !self.exiting {
             self.menu(menu, selected, &notice, Some(&mut editor))?;
             match self.event(false)? {
-                Some(Event::Key(key)) => match key.code {
-                    KeyCode::Enter => match parse(editor.text()) {
-                        Ok(value) => return Ok(Some(value)),
-                        Err(error) => notice = error.to_string(),
-                    },
-                    KeyCode::Escape => return Ok(None),
-                    KeyCode::Char('c' | 'x')
-                        if key.kind == KeyEventKind::Press
-                            && key
-                                .modifiers
-                                .intersects(Modifiers::CONTROL | Modifiers::SUPER) =>
-                    {
-                        if !editor.selected().is_empty() {
-                            self.copy(editor.selected())?;
-                            if key.code == KeyCode::Char('x') {
-                                editor.insert("");
-                            }
-                        }
-                    }
-                    _ => editor.key(key),
+                Some(Event::Key(key)) if key.code == KeyCode::Enter => match parse(editor.text()) {
+                    Ok(value) => return Ok(Some(value)),
+                    Err(error) => notice = error.to_string(),
                 },
-                Some(Event::Paste(text)) => editor.insert(&text),
+                Some(Event::Key(key)) if key.code == KeyCode::Escape => return Ok(None),
+                Some(event) => self.edit(&mut editor, event)?,
                 _ => {}
             }
         }
         Ok(None)
+    }
+
+    pub(crate) fn edit(&mut self, editor: &mut Editor, event: Event) -> Result<()> {
+        match event {
+            Event::Key(key)
+                if matches!(key.code, KeyCode::Char('c' | 'x'))
+                    && key.kind == KeyEventKind::Press
+                    && key
+                        .modifiers
+                        .intersects(Modifiers::CONTROL | Modifiers::SUPER)
+                    && !key.modifiers.contains(Modifiers::ALT) =>
+            {
+                if !editor.selected().is_empty() {
+                    self.copy(editor.selected())?;
+                    if key.code == KeyCode::Char('x') {
+                        editor.insert("");
+                    }
+                }
+            }
+            Event::Key(key) => editor.key(key),
+            Event::Paste(text) => editor.insert(&text),
+            _ => {}
+        }
+        Ok(())
     }
 
     pub fn copy(&mut self, text: &str) -> Result<()> {
@@ -430,7 +581,7 @@ impl Screen {
                 let mut deadline = started;
                 let mut cancelled = false;
                 loop {
-                    let dimensions = self.output.get_dimensions()?;
+                    let dimensions = self.dimensions()?;
                     let (width, height) = (dimensions.cols, dimensions.rows);
                     let steps = progress.steps();
                     let mut lines: Vec<Line> = wrap(detail, width as usize)
@@ -501,7 +652,7 @@ impl Screen {
                         .to_owned()
                         .bold(),
                     );
-                    self.draw(title, &lines, None, None)?;
+                    self.draw(title, &lines, &[], None)?;
                     if self.output.poll(|_| true, Some(Duration::ZERO))? {
                         let event = self.output.read(|_| true)?;
                         if let Event::Key(key) = event
@@ -539,7 +690,7 @@ impl Screen {
     }
 
     pub fn about(&mut self) -> Result<()> {
-        self.draw("关于", &[], None, None)?;
+        self.draw("关于", &[], &[], None)?;
         write!(self.output, "\x1b[3;1H")?;
         let body = format!(
             "\x1b[1m   Overcast v{}\n\x1b[0m   By zetaloop\n\n[",
@@ -653,9 +804,16 @@ fn restore(output: &mut impl Write, alternate: bool) -> std::io::Result<()> {
     output.flush()
 }
 
-fn choice(items: &[Item], selected: usize, argument: &str) -> std::result::Result<usize, String> {
+pub(crate) fn choice(
+    items: &[Item],
+    selected: usize,
+    argument: &str,
+) -> std::result::Result<usize, String> {
     if argument == "-" {
-        return Ok(selected);
+        return items
+            .get(selected)
+            .map(|_| selected)
+            .ok_or_else(|| "没有可选择的项目".to_owned());
     }
     let mut matches = items
         .iter()

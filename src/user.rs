@@ -59,7 +59,7 @@ fn edit(
     store: &Store,
     mut original: Option<Uuid>,
     mut user: User,
-) -> Result<Option<User>> {
+) -> Result<Option<Uuid>> {
     let mut selected = 0;
     let mut notice = String::new();
     loop {
@@ -93,7 +93,7 @@ fn edit(
         };
         match screen.select(&menu, &mut selected, &notice)? {
             Action::Select => {}
-            Action::Back => return Ok(original.map(|_| user)),
+            Action::Back => return Ok(original),
             _ => continue,
         }
         notice.clear();
@@ -106,6 +106,11 @@ fn edit(
                         .find(|user| user.uuid == uuid)
                         .ok_or("用户已被删除")?;
                     *current = edited.clone();
+                    if uuid != edited.uuid {
+                        for rule in &mut config.rules {
+                            rule.replace_user(uuid, edited.uuid);
+                        }
+                    }
                     Ok(())
                 })?;
             }
@@ -144,7 +149,7 @@ fn edit(
                         })
                     });
                 match result {
-                    Ok(()) => return Ok(Some(user)),
+                    Ok(()) => return Ok(Some(user.uuid)),
                     Err(error) => notice = error.to_string(),
                 }
                 None
@@ -164,7 +169,7 @@ fn edit(
                 }
                 None
             }
-            _ => return Ok(original.map(|_| user)),
+            _ => return Ok(original),
         };
         if let Some(edited) = edited {
             original = original.map(|_| edited.uuid);
@@ -173,7 +178,7 @@ fn edit(
     }
 }
 
-pub fn create(screen: &mut Screen, store: &Store) -> Result<Option<User>> {
+pub fn create(screen: &mut Screen, store: &Store) -> Result<Option<Uuid>> {
     edit(screen, store, None, User::new()?)
 }
 

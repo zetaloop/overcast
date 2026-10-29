@@ -96,7 +96,7 @@ impl Inbound {
         Ok(())
     }
 
-    fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         let address = if self.address.contains(':') && !self.address.starts_with('[') {
             format!("[{}]", self.address)
         } else {
@@ -328,7 +328,12 @@ impl Default for Listen {
     }
 }
 
-fn edit(screen: &mut Screen, store: &Store, existing: bool, mut inbound: Inbound) -> Result<()> {
+fn edit(
+    screen: &mut Screen,
+    store: &Store,
+    existing: bool,
+    mut inbound: Inbound,
+) -> Result<Option<Uuid>> {
     let apply: form::Apply<'_, Inbound> = Rc::new(|edited| {
         if existing {
             store.update(|config| {
@@ -417,7 +422,7 @@ fn edit(screen: &mut Screen, store: &Store, existing: bool, mut inbound: Inbound
             };
         }
         let result = match action {
-            Action::Back => return Ok(()),
+            Action::Back => return Ok(existing.then_some(inbound.uuid)),
             Action::Key(key)
                 if key.code == KeyCode::Delete && items[selected].key == "credentials" =>
             {
@@ -499,7 +504,7 @@ fn edit(screen: &mut Screen, store: &Store, existing: bool, mut inbound: Inbound
                         Ok(())
                     });
                     if result.is_ok() {
-                        return Ok(());
+                        return Ok(Some(inbound.uuid));
                     }
                     result
                 }
@@ -509,17 +514,29 @@ fn edit(screen: &mut Screen, store: &Store, existing: bool, mut inbound: Inbound
                         Ok(())
                     });
                     if result.is_ok() {
-                        return Ok(());
+                        return Ok(None);
                     }
                     result
                 }
-                _ => return Ok(()),
+                _ => return Ok(existing.then_some(inbound.uuid)),
             },
             _ => continue,
         };
         notice = result
             .err()
             .map_or_else(String::new, |error| error.to_string());
+    }
+}
+
+pub fn create(
+    screen: &mut Screen,
+    store: &Store,
+    menu: &Menu<'_>,
+    selected: usize,
+) -> Result<Option<Uuid>> {
+    match Kind::create(screen, menu, selected, Rc::new(|_| Ok(())))? {
+        Some(kind) => edit(screen, store, false, Inbound::new(kind)),
+        None => Ok(None),
     }
 }
 
@@ -550,15 +567,10 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),
             Action::Select if selected < config.inbounds.len() => {
-                edit(screen, store, true, config.inbounds[selected].clone())
+                edit(screen, store, true, config.inbounds[selected].clone()).map(|_| ())
             }
             Action::Select if selected == config.inbounds.len() => {
-                let mut kind = Kind::default();
-                if kind.edit(screen, &menu, selected, Rc::new(|_| Ok(())))? {
-                    edit(screen, store, false, Inbound::new(kind))
-                } else {
-                    Ok(())
-                }
+                create(screen, store, &menu, selected).map(|_| ())
             }
             Action::Select => return Ok(()),
             _ => continue,

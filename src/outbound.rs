@@ -55,7 +55,7 @@ impl Outbound {
         Ok(())
     }
 
-    fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         self.connections
             .iter()
             .map(Connection::summary)
@@ -217,7 +217,12 @@ fn copy_connections(screen: &mut Screen, outbound: &Outbound) -> Result<()> {
     }
 }
 
-fn edit(screen: &mut Screen, store: &Store, existing: bool, mut outbound: Outbound) -> Result<()> {
+fn edit(
+    screen: &mut Screen,
+    store: &Store,
+    existing: bool,
+    mut outbound: Outbound,
+) -> Result<Option<Uuid>> {
     let apply: form::Apply<'_, Outbound> = Rc::new(|edited| {
         if existing {
             store.update(|config| {
@@ -277,7 +282,7 @@ fn edit(screen: &mut Screen, store: &Store, existing: bool, mut outbound: Outbou
             .checked_sub(1)
             .filter(|index| *index < outbound.connections.len());
         let result = match (action, connection) {
-            (Action::Back, _) => return Ok(()),
+            (Action::Back, _) => return Ok(existing.then_some(outbound.uuid)),
             (Action::Paste(text), connection) => Selection::parse(&text).and_then(|selections| {
                 let position = connection.map_or(
                     if selected == 0 {
@@ -384,7 +389,7 @@ fn edit(screen: &mut Screen, store: &Store, existing: bool, mut outbound: Outbou
                         },
                     );
                     if result.is_ok() {
-                        return Ok(());
+                        return Ok(Some(outbound.uuid));
                     }
                     result
                 }
@@ -402,9 +407,9 @@ fn edit(screen: &mut Screen, store: &Store, existing: bool, mut outbound: Outbou
                             })
                         },
                     )?;
-                    return Ok(());
+                    return Ok(None);
                 }
-                _ => return Ok(()),
+                _ => return Ok(existing.then_some(outbound.uuid)),
             },
             _ => continue,
         };
@@ -412,6 +417,10 @@ fn edit(screen: &mut Screen, store: &Store, existing: bool, mut outbound: Outbou
             .err()
             .map_or_else(String::new, |error| error.to_string());
     }
+}
+
+pub fn create(screen: &mut Screen, store: &Store) -> Result<Option<Uuid>> {
+    edit(screen, store, false, Outbound::new())
 }
 
 pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
@@ -453,10 +462,10 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                 config.outbounds[selected].selection().copy(screen)
             }
             Action::Select if selected < config.outbounds.len() => {
-                edit(screen, store, true, config.outbounds[selected].clone())
+                edit(screen, store, true, config.outbounds[selected].clone()).map(|_| ())
             }
             Action::Select if selected == config.outbounds.len() => {
-                edit(screen, store, false, Outbound::new())
+                create(screen, store).map(|_| ())
             }
             Action::Select => return Ok(()),
             _ => continue,

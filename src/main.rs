@@ -1,12 +1,15 @@
 mod component;
+mod condition;
 mod config;
 mod connection;
 mod form;
+mod geodata;
 mod inbound;
 pub mod input;
 mod outbound;
 pub mod progress;
 mod resource;
+mod route;
 pub mod tui;
 mod user;
 
@@ -32,6 +35,7 @@ fn run() -> Result<()> {
         Item::new("inbounds", "入站".stylized()),
         Item::new("outbounds", "出站".stylized()),
         Item::new("users", "用户".stylized()),
+        Item::new("rules", "分流".stylized()),
         Item::new("components", "组件".stylized()),
         Item::new("about", "关于".stylized()),
         Item::new("exit", "退出".foreground(AnsiColor::BrightRed)),
@@ -52,8 +56,9 @@ fn run() -> Result<()> {
             0 => inbound::run(&mut screen, &store),
             1 => outbound::run(&mut screen, &store),
             2 => user::run(&mut screen, &store),
-            3 => component::run(&mut screen, &store),
-            4 => screen.about(),
+            3 => route::run(&mut screen, &store),
+            4 => component::run(&mut screen, &store),
+            5 => screen.about(),
             _ => break,
         };
         notice = result

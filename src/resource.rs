@@ -6,13 +6,31 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use ureq::{Agent, Body, http::Response};
 
 use crate::{
     Result,
     progress::{Progress, Step},
 };
+
+#[derive(Deserialize)]
+pub struct Release {
+    pub id: u64,
+    pub tag_name: String,
+    pub draft: bool,
+    pub published_at: String,
+    pub assets: Vec<Asset>,
+}
+
+#[derive(Deserialize)]
+pub struct Asset {
+    pub id: u64,
+    pub name: String,
+    pub size: u64,
+    pub updated_at: String,
+    pub browser_download_url: String,
+}
 
 pub fn client() -> Agent {
     Agent::config_builder()

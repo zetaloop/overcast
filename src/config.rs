@@ -17,6 +17,7 @@ use crate::{
     component::{Component, Settings},
     inbound::Inbound,
     outbound::Outbound,
+    route::Rule,
     user::User,
 };
 
@@ -26,6 +27,7 @@ pub struct Config {
     pub users: Vec<User>,
     pub inbounds: Vec<Inbound>,
     pub outbounds: Vec<Outbound>,
+    pub rules: Vec<Rule>,
     pub components: BTreeMap<Component, Settings>,
 }
 
@@ -134,7 +136,7 @@ impl Store {
         Ok(config)
     }
 
-    pub fn update(&self, change: impl FnOnce(&mut Config) -> Result<()>) -> Result<()> {
+    pub fn update<T>(&self, change: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
         self.create_dir(&self.directory)?;
         let path = self.directory.join("config.lock");
         let mut options = OpenOptions::new();
@@ -153,15 +155,24 @@ impl Store {
         };
         lock.lock()?;
         let mut config = self.load()?;
-        change(&mut config)?;
+        let result = change(&mut config)?;
         config.validate()?;
         let path = self.directory.join("config.json");
-        let mut file = NamedTempFile::new_in(&self.directory)?;
-        serde_json::to_writer_pretty(&mut file, &config)?;
-        file.write_all(b"\n")?;
+        self.write(&path, |file| {
+            serde_json::to_writer_pretty(&mut *file, &config)?;
+            file.write_all(b"\n")?;
+            Ok(())
+        })?;
+        Ok(result)
+    }
+
+    pub fn write(&self, path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
+        let directory = path.parent().ok_or("文件路径缺少目录")?;
+        let mut file = NamedTempFile::new_in(directory)?;
+        write(file.as_file_mut())?;
         self.own(file.path())?;
         file.as_file().sync_all()?;
-        file.persist(&path)
+        file.persist(path)
             .map_err(|error| format!("无法保存 {}：{}", path.display(), error.error))?;
         Ok(())
     }

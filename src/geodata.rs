@@ -1,0 +1,215 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File},
+    io::{BufReader, ErrorKind, Write},
+    path::Path,
+};
+
+use maxminddb::{Reader, geoip2};
+use prost::Message;
+use serde::{Deserialize, Serialize};
+use ureq::Agent;
+
+use crate::{
+    Result,
+    config::Store,
+    progress::Progress,
+    resource::{self, Asset, Release},
+};
+
+#[derive(Deserialize, Serialize)]
+pub struct Catalog {
+    pub release: u64,
+    pub sites: BTreeSet<String>,
+    pub ips: BTreeSet<String>,
+    pub asns: BTreeMap<u32, String>,
+}
+
+impl Catalog {
+    pub fn load(store: &Store) -> Result<Option<Self>> {
+        let path = store.directory.join("geodata/index.json");
+        match File::open(&path) {
+            Ok(file) => Ok(Some(serde_json::from_reader(BufReader::new(file))?)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn update(store: &Store, progress: &Progress) -> Result<Self> {
+        let client = resource::client();
+        let step = progress.activity("查询规则数据");
+        let release: Release = resource::json(
+            &client,
+            "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/tags/latest",
+            progress,
+            &step,
+        )?;
+        step.finish(&release.published_at);
+        let root = store.directory.join("geodata");
+        let directory = root.join(release.id.to_string());
+        store.create_dir(&directory)?;
+        let asset = |name| {
+            release
+                .assets
+                .iter()
+                .find(|asset| asset.name == name)
+                .ok_or_else(|| format!("规则数据发布中没有 {name}"))
+        };
+        let sites = load(
+            store,
+            &directory,
+            asset("geosite.dat")?,
+            &client,
+            progress,
+            |bytes| {
+                let mut names = BTreeSet::new();
+                for site in Sites::decode(bytes)?.entries {
+                    progress.check()?;
+                    let name = site.name.to_ascii_lowercase();
+                    names.insert(name.clone());
+                    for domain in site.domains {
+                        for attribute in domain.attributes {
+                            names.insert(format!("{name}@{}", attribute.key));
+                        }
+                    }
+                }
+                Ok(names)
+            },
+        )?;
+        let ips = load(
+            store,
+            &directory,
+            asset("geoip.dat")?,
+            &client,
+            progress,
+            |bytes| {
+                Ok(Names::decode(bytes)?
+                    .entries
+                    .into_iter()
+                    .map(|entry| entry.name.to_ascii_lowercase())
+                    .collect())
+            },
+        )?;
+        let asns = load(
+            store,
+            &directory,
+            asset("GeoLite2-ASN.mmdb")?,
+            &client,
+            progress,
+            |bytes| {
+                let reader = Reader::from_source(bytes)?;
+                let mut names = BTreeMap::new();
+                for record in reader.networks(Default::default())? {
+                    progress.check()?;
+                    if let Some(asn) = record?.decode::<geoip2::Asn>()? {
+                        names
+                            .entry(asn.autonomous_system_number.unwrap_or_default())
+                            .or_insert_with(|| {
+                                asn.autonomous_system_organization
+                                    .unwrap_or_default()
+                                    .to_owned()
+                            });
+                    }
+                }
+                Ok(names)
+            },
+        )?;
+        let catalog = Self {
+            release: release.id,
+            sites,
+            ips,
+            asns,
+        };
+        progress.check()?;
+        store.write(&root.join("index.json"), |file| {
+            serde_json::to_writer(file, &catalog)?;
+            Ok(())
+        })?;
+        Ok(catalog)
+    }
+}
+
+fn load<T>(
+    store: &Store,
+    directory: &Path,
+    asset: &Asset,
+    client: &Agent,
+    progress: &Progress,
+    decode: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
+    let path = directory.join(&asset.name);
+    let mut downloaded = false;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let step = progress.start("下载规则数据", asset.size, "字节");
+            let bytes = resource::retry(progress, &step, || {
+                step.set(0);
+                step.detail(&asset.name);
+                let mut response = resource::request(client, &asset.browser_download_url)?;
+                let mut bytes = Vec::new();
+                resource::copy(
+                    &mut response.body_mut().as_reader(),
+                    &mut bytes,
+                    progress,
+                    &step,
+                )?;
+                Ok(bytes)
+            })?;
+            step.finish(&asset.name);
+            downloaded = true;
+            bytes
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let step = progress.activity("读取规则数据");
+    step.detail(&asset.name);
+    let value = decode(&bytes)?;
+    progress.check()?;
+    if downloaded {
+        store.write(&path, |file| {
+            file.write_all(&bytes)?;
+            Ok(())
+        })?;
+    }
+    step.finish(&asset.name);
+    Ok(value)
+}
+
+#[derive(Message)]
+struct Sites {
+    #[prost(message, repeated, tag = "1")]
+    entries: Vec<Site>,
+}
+
+#[derive(Message)]
+struct Site {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(message, repeated, tag = "2")]
+    domains: Vec<Domain>,
+}
+
+#[derive(Message)]
+struct Domain {
+    #[prost(message, repeated, tag = "3")]
+    attributes: Vec<Attribute>,
+}
+
+#[derive(Message)]
+struct Attribute {
+    #[prost(string, tag = "1")]
+    key: String,
+}
+
+#[derive(Message)]
+struct Names {
+    #[prost(message, repeated, tag = "1")]
+    entries: Vec<Name>,
+}
+
+#[derive(Message)]
+struct Name {
+    #[prost(string, tag = "1")]
+    name: String,
+}

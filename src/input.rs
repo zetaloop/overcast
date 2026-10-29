@@ -34,7 +34,7 @@ impl Editor {
         anchor.min(self.cursor)..anchor.max(self.cursor)
     }
 
-    fn move_to(&mut self, cursor: usize, selecting: bool) {
+    pub(crate) fn move_to(&mut self, cursor: usize, selecting: bool) {
         if selecting {
             self.anchor.get_or_insert(self.cursor);
         } else {
