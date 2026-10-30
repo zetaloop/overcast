@@ -43,6 +43,15 @@ impl Rule {
             child.replace_user(previous, current);
         }
     }
+
+    pub fn remove_outbound(&mut self, uuid: Uuid) {
+        if self.destination == Destination::Outbound(uuid) {
+            self.destination = Destination::Block;
+        }
+        for child in &mut self.children {
+            child.remove_outbound(uuid);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]

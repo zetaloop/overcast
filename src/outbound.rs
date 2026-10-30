@@ -403,6 +403,9 @@ fn edit(
                                 config
                                     .outbounds
                                     .retain(|current| current.uuid != outbound.uuid);
+                                for rule in &mut config.rules {
+                                    rule.remove_outbound(outbound.uuid);
+                                }
                                 Ok(())
                             })
                         },
