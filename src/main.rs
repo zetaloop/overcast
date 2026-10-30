@@ -7,6 +7,7 @@ mod geodata;
 mod inbound;
 pub mod input;
 mod outbound;
+mod pattern;
 pub mod progress;
 mod resource;
 mod route;

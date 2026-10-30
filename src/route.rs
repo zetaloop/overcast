@@ -29,6 +29,14 @@ pub struct Rule {
 }
 
 impl Rule {
+    pub fn validate(&self) -> Result<()> {
+        self.condition.validate()?;
+        for child in &self.children {
+            child.validate()?;
+        }
+        Ok(())
+    }
+
     pub fn replace_user(&mut self, previous: Uuid, current: Uuid) {
         self.condition.replace_user(previous, current);
         for child in &mut self.children {

@@ -456,11 +456,13 @@ dependencies = [
  "flate2",
  "getrandom 0.4.3",
  "httpdate",
+ "icu_properties",
  "ipnetwork",
  "maxminddb",
  "nix",
  "percent-encoding",
  "prost",
+ "regex-syntax",
  "serde",
  "serde_json",
  "tar",
@@ -574,6 +576,12 @@ checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
 ]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "ring"

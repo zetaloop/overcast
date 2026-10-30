@@ -4,7 +4,7 @@ use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Result, config::Config, geodata::Catalog};
+use crate::{Result, config::Config, geodata::Catalog, pattern};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
@@ -27,6 +27,21 @@ pub enum Condition {
 }
 
 impl Condition {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Regex(text) => {
+                pattern::parse(text)?;
+            }
+            Self::And(children) | Self::Or(children) => {
+                for child in children {
+                    child.validate()?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub fn text(&self, config: &Config) -> String {
         self.format(config, 0)
     }
@@ -284,7 +299,10 @@ impl Parser<'_> {
                 "domain" => return domain(name).map(Condition::Domain),
                 "suffix" => return domain(name).map(Condition::Suffix),
                 "keyword" => return Ok(Condition::Keyword(name.to_owned())),
-                "regex" => return Ok(Condition::Regex(name.to_owned())),
+                "regex" => {
+                    pattern::parse(name)?;
+                    return Ok(Condition::Regex(name.to_owned()));
+                }
                 "ip" => return network(name).map(Condition::Ip),
                 "user" | "inbound" | "site" | "geoip" | "asn" => {
                     return self.named(Some(kind), name);

@@ -58,6 +58,9 @@ impl Config {
                 return Err(format!("出站 UUID 重复：{}", outbound.uuid).into());
             }
         }
+        for rule in &self.rules {
+            rule.validate()?;
+        }
         Ok(())
     }
 }
