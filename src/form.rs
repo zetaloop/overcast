@@ -259,6 +259,7 @@ impl<T: Value> Value for Option<T> {
         apply: Apply<'_, Self>,
         creating: bool,
     ) -> Result<bool> {
+        let creating = creating || self.is_none();
         let mut value = self.clone().unwrap_or_default();
         let apply = map(Rc::new(self.clone()), apply, |option, value| {
             *option = Some(value)
