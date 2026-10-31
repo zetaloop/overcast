@@ -14,10 +14,12 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    if source.multiplex().is_some() && !matches!(source, Connection::Vless(_)) {
+    if source.multiplex().is_some()
+        && !matches!(source, Connection::Vless(_) | Connection::Vmess(_))
+    {
         return unsupported("sing-box HTTP/SOCKS 出站没有流复用配置");
     }
-    if !matches!(source, Connection::Vless(_))
+    if !matches!(source, Connection::Vless(_) | Connection::Vmess(_))
         && source
             .transport()
             .is_some_and(|transport| !transport.is_default())
@@ -29,6 +31,7 @@ pub fn outbound(
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
         Connection::Socks(value) => ("socks", Some(&value.proxy), &value.network),
         Connection::Vless(value) => ("vless", None, &value.network),
+        Connection::Vmess(value) => ("vmess", None, &value.network),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     dialer(network, &mut output)?;
@@ -129,13 +132,13 @@ pub fn outbound(
                 options.take("udp_concurrency");
             } else {
                 match value.vless.packet_encoding {
-                    crate::vless::PacketEncoding::Default => {}
+                    crate::connection::PacketEncoding::Default => {}
                     encoding => {
                         output.insert(
                             "packet_encoding".to_owned(),
                             json!(match encoding {
-                                crate::vless::PacketEncoding::Packet => "",
-                                crate::vless::PacketEncoding::PacketAddr => "packetaddr",
+                                crate::connection::PacketEncoding::Packet => "",
+                                crate::connection::PacketEncoding::PacketAddr => "packetaddr",
                                 _ => "xudp",
                             }),
                         );
@@ -149,6 +152,60 @@ pub fn outbound(
                 );
             }
             options.finish("sing-box VLESS")?;
+            if value.tls.enabled {
+                output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+            }
+            if let Some(transport) = super::transport::singbox(&value.transport, false)? {
+                output.insert("transport".to_owned(), transport);
+            }
+        }
+        Connection::Vmess(value) => {
+            let mut options = Options::new(&value.vmess)?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("server_port".to_owned(), json!(value.port));
+            output.insert("uuid".to_owned(), json!(value.uuid));
+            options.take("cipher");
+            output.insert(
+                "security".to_owned(),
+                serde_json::to_value(value.vmess.cipher.resolve())?,
+            );
+            options.copy(
+                &mut output,
+                &["alter_id", "global_padding", "authenticated_length"],
+            );
+            if value.vmess.termination_signal == Some(true) {
+                options.take("termination_signal");
+            }
+            options.take("tcp");
+            options.take("udp");
+            let mut networks = Vec::new();
+            if value.vmess.tcp.unwrap_or(true) {
+                networks.push("tcp");
+            }
+            if value.vmess.udp.unwrap_or(true) {
+                networks.push("udp");
+            }
+            output.insert("network".to_owned(), json!(networks));
+            options.take("packet_encoding");
+            if value.multiplex.as_ref().is_some_and(|mux| !mux.tcp_only) {
+                options.take("udp_concurrency");
+            } else if value.vmess.packet_encoding != connection::PacketEncoding::Default {
+                output.insert(
+                    "packet_encoding".to_owned(),
+                    json!(match value.vmess.packet_encoding {
+                        connection::PacketEncoding::PacketAddr => "packetaddr",
+                        connection::PacketEncoding::Xudp => "xudp",
+                        _ => "",
+                    }),
+                );
+            }
+            options.finish("sing-box VMess")?;
+            if let Some(multiplex) = &value.multiplex {
+                output.insert(
+                    "multiplex".to_owned(),
+                    super::multiplex::client(multiplex, inbound::Core::SingBox)?,
+                );
+            }
             if value.tls.enabled {
                 output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
             }
@@ -184,6 +241,16 @@ pub fn listeners(
                             ]);
                             if value.flow == crate::vless::Flow::Vision {
                                 user.insert("flow".to_owned(), json!("xtls-rprx-vision"));
+                            }
+                            json!(user)
+                        }
+                        Protocol::Vmess(value) => {
+                            let mut user = Map::from_iter([
+                                ("name".to_owned(), json!(name)),
+                                ("uuid".to_owned(), json!(name)),
+                            ]);
+                            if let Some(alter_id) = value.alter_id {
+                                user.insert("alterId".to_owned(), json!(alter_id));
                             }
                             json!(user)
                         }
@@ -241,6 +308,29 @@ pub fn listeners(
         }
         options.finish("sing-box VLESS 入站")?;
         output.insert("type".to_owned(), json!("vless"));
+        if source.tls.enabled {
+            output.insert("tls".to_owned(), server_tls(source, store)?);
+        }
+        if let Some(transport) = super::transport::singbox(&source.transport, true)? {
+            output.insert("transport".to_owned(), transport);
+        }
+        return Ok(vec![output]);
+    }
+    if let Protocol::Vmess(value) = &source.protocol {
+        if users.is_empty() {
+            return unsupported("VMess 入口需要认证用户");
+        }
+        let mut options = Options::new(value)?;
+        options.take("alter_id");
+        options.take("multiplex");
+        options.finish("sing-box VMess 入站")?;
+        output.insert("type".to_owned(), json!("vmess"));
+        if let Some(multiplex) = &value.multiplex {
+            output.insert(
+                "multiplex".to_owned(),
+                super::multiplex::server(multiplex, inbound::Core::SingBox)?,
+            );
+        }
         if source.tls.enabled {
             output.insert("tls".to_owned(), server_tls(source, store)?);
         }

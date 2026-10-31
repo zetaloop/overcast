@@ -1,9 +1,5 @@
 use std::{collections::BTreeMap, rc::Rc};
 
-use base64::{
-    Engine, alphabet,
-    engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
-};
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
@@ -33,10 +29,19 @@ pub enum Connection {
     Http(Http),
     Socks(Socks),
     Vless(crate::vless::Client),
+    Vmess(crate::vmess::Client),
 }
 
 impl Connection {
     pub fn parse(text: &str) -> Result<Self> {
+        if text
+            .split_once("://")
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("vmess"))
+        {
+            let value = Self::Vmess(crate::link::vmess(text)?);
+            value.validate()?;
+            return Ok(value);
+        }
         let url = Url::parse(text)?;
         if url.scheme() == "vless" {
             let value = Self::Vless(crate::link::vless(&url)?);
@@ -67,12 +72,7 @@ impl Connection {
                 let credentials = if username.contains(':') {
                     username
                 } else {
-                    let engine = GeneralPurpose::new(
-                        &alphabet::STANDARD,
-                        GeneralPurposeConfig::new()
-                            .with_decode_padding_mode(DecodePaddingMode::Indifferent),
-                    );
-                    String::from_utf8(engine.decode(username.replace('-', "+").replace('_', "/"))?)?
+                    String::from_utf8(crate::link::decode(&username)?)?
                 };
                 let (username, password) = credentials
                     .split_once(':')
@@ -138,6 +138,7 @@ impl Connection {
             Self::Http(value) => &value.proxy.name,
             Self::Socks(value) => &value.proxy.name,
             Self::Vless(value) => &value.name,
+            Self::Vmess(value) => &value.name,
         }
     }
 
@@ -147,6 +148,7 @@ impl Connection {
             Self::Http(value) => Some(&value.transport),
             Self::Socks(value) => Some(&value.transport),
             Self::Vless(value) => Some(&value.transport),
+            Self::Vmess(value) => Some(&value.transport),
         }
     }
 
@@ -156,6 +158,15 @@ impl Connection {
             Self::Http(value) => value.multiplex.as_ref(),
             Self::Socks(value) => value.multiplex.as_ref(),
             Self::Vless(value) => value.multiplex.as_ref(),
+            Self::Vmess(value) => value.multiplex.as_ref(),
+        }
+    }
+
+    pub fn packet_encoding(&self) -> Option<PacketEncoding> {
+        match self {
+            Self::Vless(value) => Some(value.vless.packet_encoding),
+            Self::Vmess(value) => Some(value.vmess.packet_encoding),
+            _ => None,
         }
     }
 
@@ -168,6 +179,7 @@ impl Connection {
             Self::Http(value) => format!("HTTP {}", value.proxy.address()),
             Self::Socks(value) => format!("SOCKS {}", value.proxy.address()),
             Self::Vless(value) => format!("VLESS {}", address(&value.server, value.port)),
+            Self::Vmess(value) => format!("VMess {}", address(&value.server, value.port)),
         }
     }
 
@@ -211,6 +223,13 @@ impl Connection {
                 Rc::new(move |value, screen| apply(&Self::Vless(value.clone()), screen)),
                 creating,
             ),
+            Self::Vmess(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Vmess(value.clone()), screen)),
+                creating,
+            ),
         }
     }
 
@@ -222,6 +241,12 @@ impl Connection {
             Self::Vless(value) => {
                 if value.uuid.is_empty() {
                     return Err("请填写 VLESS 用户标识".into());
+                }
+                (value.server.as_str(), value.port)
+            }
+            Self::Vmess(value) => {
+                if value.uuid.is_empty() {
+                    return Err("请填写 VMess 用户标识".into());
                 }
                 (value.server.as_str(), value.port)
             }
@@ -244,6 +269,7 @@ pub fn create(
         Item::new("http", "HTTP".stylized()),
         Item::new("socks", "SOCKS".stylized()),
         Item::new("vless", "VLESS".stylized()),
+        Item::new("vmess", "VMess".stylized()),
         Item::new("direct", "直连".stylized()),
         Item::new("back", "返回".stylized()),
     ];
@@ -262,7 +288,8 @@ pub fn create(
                     0 => Connection::Http(Http::default()),
                     1 => Connection::Socks(Socks::default()),
                     2 => Connection::Vless(crate::vless::Client::default()),
-                    3 => Connection::Direct(Direct::default()),
+                    3 => Connection::Vmess(crate::vmess::Client::default()),
+                    4 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
                 let accepted = connection.form(screen, apply, true)?;
@@ -370,6 +397,23 @@ pub enum SocksVersion {
     #[serde(rename = "5")]
     V5,
 }
+
+#[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PacketEncoding {
+    #[default]
+    Default,
+    Packet,
+    PacketAddr,
+    Xudp,
+}
+
+choices!(PacketEncoding {
+    Default: "default" => "默认",
+    Packet: "packet" => "原生数据包",
+    PacketAddr: "packetaddr" => "PacketAddr",
+    Xudp: "xudp" => "XUDP",
+});
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]

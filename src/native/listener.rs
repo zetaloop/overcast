@@ -28,6 +28,7 @@ enum Mode {
     Socks,
     SocksUdp,
     Vless,
+    Vmess,
 }
 
 impl Mode {
@@ -43,6 +44,7 @@ impl Mode {
             Self::Http1 | Self::Http2 | Self::Http3 => "HTTP/HTTPS",
             Self::Socks | Self::SocksUdp => "SOCKS",
             Self::Vless => "VLESS",
+            Self::Vmess => "VMess",
         }
     }
 
@@ -50,7 +52,7 @@ impl Mode {
         match self {
             Self::SocksUdp => network == Network::Udp,
             Self::Socks => network == Network::Tcp || core != Core::Mihomo,
-            Self::Vless => true,
+            Self::Vless | Self::Vmess => true,
             _ => network == Network::Tcp || core == Core::SingBox,
         }
     }
@@ -66,7 +68,7 @@ pub struct Member {
 
 impl Member {
     pub fn protocol(&self) -> Option<&'static str> {
-        if self.source.core != Core::Mihomo || matches!(self.source.protocol, Protocol::Vless(_)) {
+        if self.source.core != Core::Mihomo || !matches!(self.source.protocol, Protocol::Mixed(_)) {
             return None;
         }
         let families: BTreeSet<_> = self.modes.iter().map(|mode| mode.family()).collect();
@@ -203,36 +205,42 @@ pub fn build(
             .into());
         }
         let mut modes = BTreeSet::new();
-        if let Protocol::Mixed(protocol) = &source.protocol {
-            if protocol.http.enabled {
-                let versions = if protocol.http.versions.is_empty() {
-                    if source.core == Core::SingBox {
-                        vec![HttpVersion::Http1, HttpVersion::Http2]
+        match &source.protocol {
+            Protocol::Mixed(protocol) => {
+                if protocol.http.enabled {
+                    let versions = if protocol.http.versions.is_empty() {
+                        if source.core == Core::SingBox {
+                            vec![HttpVersion::Http1, HttpVersion::Http2]
+                        } else {
+                            vec![HttpVersion::Http1]
+                        }
                     } else {
-                        vec![HttpVersion::Http1]
+                        protocol.http.versions.clone()
+                    };
+                    modes.extend(versions.into_iter().map(|version| match version {
+                        HttpVersion::Http1 => Mode::Http1,
+                        HttpVersion::Http2 => Mode::Http2,
+                        HttpVersion::Http3 => Mode::Http3,
+                    }));
+                }
+                if protocol.socks.enabled {
+                    modes.insert(Mode::Socks);
+                    if source.core == Core::Mihomo
+                        && entry
+                            .accounts
+                            .iter()
+                            .any(|account| account.network == Network::Udp)
+                    {
+                        modes.insert(Mode::SocksUdp);
                     }
-                } else {
-                    protocol.http.versions.clone()
-                };
-                modes.extend(versions.into_iter().map(|version| match version {
-                    HttpVersion::Http1 => Mode::Http1,
-                    HttpVersion::Http2 => Mode::Http2,
-                    HttpVersion::Http3 => Mode::Http3,
-                }));
-            }
-            if protocol.socks.enabled {
-                modes.insert(Mode::Socks);
-                if source.core == Core::Mihomo
-                    && entry
-                        .accounts
-                        .iter()
-                        .any(|account| account.network == Network::Udp)
-                {
-                    modes.insert(Mode::SocksUdp);
                 }
             }
-        } else {
-            modes.insert(Mode::Vless);
+            Protocol::Vless(_) => {
+                modes.insert(Mode::Vless);
+            }
+            Protocol::Vmess(_) => {
+                modes.insert(Mode::Vmess);
+            }
         }
         let parts =
             if source.core == Core::SingBox && modes.contains(&Mode::Http3) && modes.len() > 1 {
@@ -498,6 +506,9 @@ pub fn build(
                         _ => return Err(conflict(&members, "VLESS 加密参数不同").into()),
                     }
                 }
+                (Protocol::Vmess(current), Protocol::Vmess(other)) => {
+                    same(current, other, &[], "VMess", &members)?
+                }
                 _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
             }
         }
@@ -511,7 +522,7 @@ pub fn build(
                 protocol.udp = modes.contains(&Mode::SocksUdp);
             }
         } else if users.is_empty() {
-            return Err(format!("入站 {} 的 VLESS 需要用户或入口凭据", source.name).into());
+            return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
         }
         let mut addresses: BTreeSet<_> = members
             .iter()

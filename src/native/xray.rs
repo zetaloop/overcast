@@ -19,6 +19,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
         Connection::Socks(value) => ("socks", Some(&value.proxy), &value.network),
         Connection::Vless(value) => ("vless", None, &value.network),
+        Connection::Vmess(value) => ("vmess", None, &value.network),
     };
     let mut output = Map::from_iter([("protocol".to_owned(), json!(kind))]);
     if let Some(multiplex) = source.multiplex() {
@@ -129,40 +130,72 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             options.take("packet_encoding");
             options.take("udp_concurrency");
             if value.multiplex.as_ref().is_none_or(|mux| mux.tcp_only) {
-                if let Some(concurrency) = value.vless.udp_concurrency {
-                    i16::try_from(concurrency).map_err(|_| "Xray UDP 并发流数超过支持范围")?;
-                    if concurrency == 0
-                        && value.vless.packet_encoding == crate::vless::PacketEncoding::Xudp
-                    {
-                        return Err("XUDP 并发流数需要大于零".into());
-                    }
+                if value.vless.packet_encoding == connection::PacketEncoding::Packet
+                    && value.vless.flow == crate::vless::Flow::Vision
+                {
+                    return unsupported("原生 VLESS 数据包与 Vision 无法同时使用");
                 }
-                match value.vless.packet_encoding {
-                    crate::vless::PacketEncoding::PacketAddr => {
-                        return unsupported("Xray VLESS 没有 PacketAddr 编码配置");
-                    }
-                    crate::vless::PacketEncoding::Packet
-                        if value.vless.udp_concurrency.is_some()
-                            || value.vless.flow == crate::vless::Flow::Vision =>
-                    {
-                        return unsupported(
-                            "原生 VLESS 数据包与 Vision、XUDP 并发设置无法同时使用",
-                        );
-                    }
-                    crate::vless::PacketEncoding::Xudp | crate::vless::PacketEncoding::Default
-                        if value.vless.packet_encoding == crate::vless::PacketEncoding::Xudp
-                            || value.vless.udp_concurrency.is_some() =>
-                    {
-                        let mux = output.entry("mux").or_insert_with(|| json!({"enabled": true, "concurrency": -1, "xudpProxyUDP443": "allow"}));
-                        if mux["xudpConcurrency"] == -1 {
-                            return unsupported("仅 TCP 流复用与 XUDP 并发配置无法同时使用");
-                        }
-                        mux["xudpConcurrency"] = json!(value.vless.udp_concurrency.unwrap_or(8));
-                    }
-                    _ => {}
-                }
+                packets(
+                    &mut output,
+                    value.vless.packet_encoding,
+                    value.vless.udp_concurrency,
+                )?;
             }
             options.finish("Xray VLESS")?;
+            Some(&value.tls)
+        }
+        Connection::Vmess(value) => {
+            let mut options = Options::new(&value.vmess)?;
+            settings.insert("address".to_owned(), json!(value.server));
+            settings.insert("port".to_owned(), json!(value.port));
+            settings.insert("id".to_owned(), json!(value.uuid));
+            if !matches!(
+                value.vmess.cipher,
+                crate::vmess::Cipher::Auto
+                    | crate::vmess::Cipher::Aes128Gcm
+                    | crate::vmess::Cipher::Chacha20Poly1305
+            ) {
+                return unsupported("Xray VMess 使用 AES-128-GCM 或 ChaCha20-Poly1305");
+            }
+            options.take("cipher");
+            settings.insert(
+                "security".to_owned(),
+                serde_json::to_value(value.vmess.cipher.resolve())?,
+            );
+            if value.vmess.alter_id == Some(0) {
+                options.take("alter_id");
+            }
+            if value.vmess.global_padding == Some(true) {
+                options.take("global_padding");
+            }
+            options.take("authenticated_length");
+            options.take("termination_signal");
+            let mut experiments = String::new();
+            if value.vmess.authenticated_length == Some(true) {
+                experiments.push_str("AuthenticatedLength");
+            }
+            if value.vmess.termination_signal == Some(false) {
+                experiments.push_str("NoTerminationSignal");
+            }
+            if !experiments.is_empty() {
+                settings.insert("experiments".to_owned(), json!(experiments));
+            }
+            options.rename(
+                &mut settings,
+                &[("user_level", "level"), ("user_label", "email")],
+            );
+            options.take("tcp");
+            options.take("udp");
+            options.take("packet_encoding");
+            options.take("udp_concurrency");
+            if value.multiplex.as_ref().is_none_or(|mux| mux.tcp_only) {
+                packets(
+                    &mut output,
+                    value.vmess.packet_encoding,
+                    value.vmess.udp_concurrency,
+                )?;
+            }
+            options.finish("Xray VMess")?;
             Some(&value.tls)
         }
     };
@@ -180,6 +213,37 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         output.insert("streamSettings".to_owned(), json!(stream));
     }
     Ok(output)
+}
+
+fn packets(
+    output: &mut Map<String, Value>,
+    encoding: connection::PacketEncoding,
+    concurrency: Option<u16>,
+) -> Result<()> {
+    use connection::PacketEncoding;
+    if let Some(concurrency) = concurrency {
+        i16::try_from(concurrency).map_err(|_| "Xray UDP 并发流数超过支持范围")?;
+        if concurrency == 0 && encoding == PacketEncoding::Xudp {
+            return Err("XUDP 并发流数需要大于零".into());
+        }
+    }
+    match encoding {
+        PacketEncoding::PacketAddr => return unsupported("Xray 没有 PacketAddr 编码配置"),
+        PacketEncoding::Packet if concurrency.is_some() => {
+            return unsupported("原生数据包不使用 XUDP 并发配置");
+        }
+        _ => {}
+    }
+    if encoding == PacketEncoding::Xudp || concurrency.is_some() {
+        let mux = output.entry("mux").or_insert_with(
+            || json!({"enabled": true, "concurrency": -1, "xudpProxyUDP443": "allow"}),
+        );
+        if mux["xudpConcurrency"] == -1 {
+            return unsupported("仅 TCP 流复用与 XUDP 并发配置无法同时使用");
+        }
+        mux["xudpConcurrency"] = json!(concurrency.unwrap_or(8));
+    }
+    Ok(())
 }
 
 pub fn listeners(
@@ -328,6 +392,43 @@ pub fn listeners(
                 settings.insert("fallbacks".to_owned(), json!(fallbacks));
             }
             options.finish("Xray VLESS 入站")?;
+        }
+        Protocol::Vmess(value) => {
+            if users.is_empty() {
+                return unsupported("VMess 入口需要认证用户");
+            }
+            output.insert("protocol".to_owned(), json!("vmess"));
+            let mut options = Options::new(value)?;
+            options.take("user_level");
+            options.take("multiplex");
+            if let Some(multiplex) = &value.multiplex {
+                super::multiplex::server(multiplex, inbound::Core::Xray)?;
+            }
+            if value.alter_id == Some(0) {
+                options.take("alter_id");
+            }
+            if let Some(level) = options.take("default_user_level") {
+                settings.insert("default".to_owned(), json!({"level": level}));
+            }
+            settings.insert(
+                "clients".to_owned(),
+                json!(
+                    users
+                        .iter()
+                        .map(|(name, _)| {
+                            let mut user = Map::from_iter([
+                                ("id".to_owned(), json!(name)),
+                                ("email".to_owned(), json!(name)),
+                            ]);
+                            if let Some(level) = value.user_level {
+                                user.insert("level".to_owned(), json!(level));
+                            }
+                            user
+                        })
+                        .collect::<Vec<_>>()
+                ),
+            );
+            options.finish("Xray VMess 入站")?;
         }
     }
     let mut options = Options::new(&source.listen)?;

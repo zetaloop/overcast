@@ -403,7 +403,7 @@ pub fn mihomo_server(source: &Transport) -> Result<Map<String, Value>> {
             options.finish("Mihomo WebSocket 入站")?;
         }
         Transport::HttpUpgrade(_) => {
-            return unsupported("Mihomo VLESS 入站没有 HTTPUpgrade 接收器");
+            return unsupported("Mihomo 没有 HTTPUpgrade 服务端传输配置");
         }
         Transport::Grpc(value) => {
             let mut options = Options::new(value)?;

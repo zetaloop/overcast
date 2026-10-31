@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    connection::{Core, Network, Tls},
+    connection::{Core, Network, PacketEncoding, Tls},
     form::{choices, fields},
     transport::Transport,
 };
@@ -86,26 +86,9 @@ pub enum Flow {
     Vision,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PacketEncoding {
-    #[default]
-    Default,
-    Packet,
-    PacketAddr,
-    Xudp,
-}
-
 choices!(Flow {
     None: "none" => "默认",
     Vision: "vision" => "Vision",
-});
-
-choices!(PacketEncoding {
-    Default: "default" => "默认",
-    Packet: "packet" => "VLESS 数据包",
-    PacketAddr: "packetaddr" => "PacketAddr",
-    Xudp: "xudp" => "XUDP",
 });
 
 fields!(Client {

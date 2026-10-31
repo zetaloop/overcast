@@ -188,7 +188,7 @@ pub fn build<'a>(
                             && (value.socks.enabled
                                 || value.http.enabled && inbound.core == Core::SingBox)
                     }
-                    Protocol::Vless(_) => true,
+                    Protocol::Vless(_) | Protocol::Vmess(_) => true,
                 }
             {
                 continue;

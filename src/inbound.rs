@@ -47,7 +47,7 @@ impl Inbound {
             address: String::new(),
             ports: match kind {
                 Kind::Mixed => "1080",
-                Kind::Vless => "443",
+                Kind::Vless | Kind::Vmess => "443",
             }
             .to_owned(),
             core: kind.core(),
@@ -56,7 +56,7 @@ impl Inbound {
             protocol: kind.protocol(),
             transport: Transport::default(),
             tls: Tls {
-                enabled: kind == Kind::Vless,
+                enabled: kind != Kind::Mixed,
                 ..Tls::default()
             },
             listen: Listen::default(),
@@ -141,12 +141,13 @@ enum Kind {
     #[default]
     Mixed,
     Vless,
+    Vmess,
 }
 
 impl Kind {
     fn core(self) -> Core {
         match self {
-            Self::Mixed => Core::SingBox,
+            Self::Mixed | Self::Vmess => Core::SingBox,
             Self::Vless => Core::Xray,
         }
     }
@@ -155,6 +156,7 @@ impl Kind {
         match self {
             Self::Mixed => Protocol::Mixed(Mixed::default()),
             Self::Vless => Protocol::Vless(crate::vless::Server::default()),
+            Self::Vmess => Protocol::Vmess(crate::vmess::Server::default()),
         }
     }
 }
@@ -164,6 +166,7 @@ impl Kind {
 pub enum Protocol {
     Mixed(Mixed),
     Vless(crate::vless::Server),
+    Vmess(crate::vmess::Server),
 }
 
 impl Protocol {
@@ -171,6 +174,7 @@ impl Protocol {
         match self {
             Self::Mixed(_) => Kind::Mixed,
             Self::Vless(_) => Kind::Vless,
+            Self::Vmess(_) => Kind::Vmess,
         }
     }
 
@@ -189,6 +193,13 @@ impl Protocol {
                 &title,
                 value,
                 Rc::new(move |value, screen| apply(&Self::Vless(value.clone()), screen)),
+                false,
+            ),
+            Self::Vmess(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Vmess(value.clone()), screen)),
                 false,
             ),
         }
@@ -700,6 +711,7 @@ choices!(Core {
 choices!(Kind {
     Mixed: "mixed" => "HTTP/SOCKS",
     Vless: "vless" => "VLESS",
+    Vmess: "vmess" => "VMess",
 });
 
 choices!(HttpVersion {

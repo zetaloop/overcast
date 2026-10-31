@@ -18,7 +18,7 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    if !matches!(source, Connection::Vless(_))
+    if !matches!(source, Connection::Vless(_) | Connection::Vmess(_))
         && source
             .transport()
             .is_some_and(|transport| !transport.is_default())
@@ -30,6 +30,7 @@ pub fn outbound(
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
         Connection::Socks(value) => ("socks5", Some(&value.proxy), &value.network),
         Connection::Vless(value) => ("vless", None, &value.network),
+        Connection::Vmess(value) => ("vmess", None, &value.network),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     let mut options = Options::new(network)?;
@@ -96,6 +97,65 @@ pub fn outbound(
             options.finish("Mihomo HTTP")?;
             Some(&value.tls)
         }
+        Connection::Vmess(value) => {
+            if matches!(value.transport, crate::transport::Transport::XHttp(_)) {
+                return unsupported("Mihomo VMess 没有 XHTTP 传输配置");
+            }
+            if value.tls.enabled
+                && value.tls.reality.enabled
+                && matches!(
+                    value.transport,
+                    crate::transport::Transport::WebSocket(_)
+                        | crate::transport::Transport::HttpUpgrade(_)
+                )
+            {
+                return unsupported("Mihomo 的 WebSocket 连接没有 REALITY 握手支持");
+            }
+            let mut options = Options::new(&value.vmess)?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("port".to_owned(), json!(value.port));
+            output.insert("uuid".to_owned(), json!(value.uuid));
+            output.insert(
+                "cipher".to_owned(),
+                serde_json::to_value(value.vmess.cipher.resolve())?,
+            );
+            options.take("cipher");
+            options.rename(
+                &mut output,
+                &[
+                    ("alter_id", "alterId"),
+                    ("global_padding", "global-padding"),
+                    ("authenticated_length", "authenticated-length"),
+                ],
+            );
+            if value.vmess.termination_signal == Some(true) {
+                options.take("termination_signal");
+            }
+            options.take("tcp");
+            options.take("udp");
+            output.insert("udp".to_owned(), json!(value.vmess.udp.unwrap_or(true)));
+            options.take("packet_encoding");
+            if value.multiplex.as_ref().is_some_and(|mux| !mux.tcp_only) {
+                options.take("udp_concurrency");
+            } else if value.vmess.packet_encoding != connection::PacketEncoding::Default {
+                output.insert(
+                    "packet-encoding".to_owned(),
+                    json!(match value.vmess.packet_encoding {
+                        connection::PacketEncoding::PacketAddr => "packetaddr",
+                        connection::PacketEncoding::Xudp => "xudp",
+                        _ => "",
+                    }),
+                );
+            }
+            options.finish("Mihomo VMess")?;
+            output.extend(super::transport::mihomo_client(
+                &value.transport,
+                &value.network,
+                store,
+                globals,
+            )?);
+            Some(&value.tls)
+        }
         Connection::Socks(value) => {
             if value.socks.version != SocksVersion::V5 {
                 return unsupported("Mihomo SOCKS 出站使用 SOCKS5");
@@ -152,14 +212,14 @@ pub fn outbound(
                 options.take("udp_concurrency");
             } else {
                 match value.vless.packet_encoding {
-                    crate::vless::PacketEncoding::Default => {}
-                    crate::vless::PacketEncoding::Packet => {
+                    crate::connection::PacketEncoding::Default => {}
+                    crate::connection::PacketEncoding::Packet => {
                         return unsupported("Mihomo VLESS 的 UDP 编码使用 XUDP 或 PacketAddr");
                     }
-                    crate::vless::PacketEncoding::PacketAddr => {
+                    crate::connection::PacketEncoding::PacketAddr => {
                         output.insert("packet-encoding".to_owned(), json!("packetaddr"));
                     }
-                    crate::vless::PacketEncoding::Xudp => {
+                    crate::connection::PacketEncoding::Xudp => {
                         output.insert("packet-encoding".to_owned(), json!("xudp"));
                     }
                 }
@@ -218,6 +278,16 @@ pub fn listeners(
                             }
                             json!(user)
                         }
+                        Protocol::Vmess(value) => {
+                            let mut user = Map::from_iter([
+                                ("username".to_owned(), json!(name)),
+                                ("uuid".to_owned(), json!(name)),
+                            ]);
+                            if let Some(alter_id) = value.alter_id {
+                                user.insert("alterId".to_owned(), json!(alter_id));
+                            }
+                            json!(user)
+                        }
                     })
                     .collect::<Vec<_>>()
             ),
@@ -259,6 +329,30 @@ pub fn listeners(
             server_tls(source, store, &mut output)?;
         } else if value.encryption.is_none() {
             output.insert("allow-insecure".to_owned(), json!(true));
+        }
+        output.extend(super::transport::mihomo_server(&source.transport)?);
+        return Ok(vec![output]);
+    }
+    if let Protocol::Vmess(value) = &source.protocol {
+        if users.is_empty() {
+            return unsupported("VMess 入口需要认证用户");
+        }
+        if matches!(source.transport, crate::transport::Transport::XHttp(_)) {
+            return unsupported("Mihomo VMess 没有 XHTTP 传输配置");
+        }
+        let mut options = Options::new(value)?;
+        options.take("alter_id");
+        options.take("multiplex");
+        options.finish("Mihomo VMess 入站")?;
+        output.insert("type".to_owned(), json!("vmess"));
+        if let Some(multiplex) = &value.multiplex {
+            output.insert(
+                "mux-option".to_owned(),
+                super::multiplex::server(multiplex, inbound::Core::Mihomo)?,
+            );
+        }
+        if source.tls.enabled {
+            server_tls(source, store, &mut output)?;
         }
         output.extend(super::transport::mihomo_server(&source.transport)?);
         return Ok(vec![output]);
@@ -325,7 +419,8 @@ pub fn client_tls(
     globals: &mut Map<String, Value>,
     kind: &str,
 ) -> Result<()> {
-    if source.reality.enabled && kind != "vless" {
+    let v2ray = matches!(kind, "vless" | "vmess");
+    if source.reality.enabled && !v2ray {
         return unsupported("Mihomo HTTP/SOCKS 出站没有 REALITY 配置");
     }
     let mut options = Options::new(source)?;
@@ -334,13 +429,10 @@ pub fn client_tls(
         output,
         &[
             ("enabled", "tls"),
-            (
-                "server_name",
-                if kind == "vless" { "servername" } else { "sni" },
-            ),
+            ("server_name", if v2ray { "servername" } else { "sni" }),
         ],
     );
-    if kind == "vless" {
+    if v2ray {
         options.copy(output, &["alpn"]);
         options.rename(output, &[("fingerprint", "client-fingerprint")]);
         if source.reality.enabled {
@@ -409,7 +501,7 @@ pub fn client_tls(
     }
     options.take("ech");
     if source.ech.enabled {
-        if kind != "vless" {
+        if !v2ray {
             return unsupported("Mihomo HTTP/SOCKS 出站没有 ECH 配置");
         }
         let mut ech = Map::from_iter([("enable".to_owned(), json!(true))]);

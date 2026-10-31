@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 
+use base64::{
+    Engine, alphabet,
+    engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
+};
 use percent_encoding::percent_decode_str;
 use serde_json::{Map, Value, json};
 use url::{Host, Url};
@@ -10,6 +14,119 @@ use crate::{
     transport::{Download, Grpc, HttpUpgrade, Pool, Transport, WebSocket, XHttp, XHttpOptions},
     vless::{Client, Flow},
 };
+
+pub fn decode(value: &str) -> Result<Vec<u8>> {
+    let engine = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    Ok(engine.decode(value.replace('-', "+").replace('_', "/"))?)
+}
+
+pub fn vmess(text: &str) -> Result<crate::vmess::Client> {
+    let mut client = crate::vmess::Client::default();
+    let mut query;
+    if text.contains('@') {
+        let url = Url::parse(text)?;
+        client.name = percent_decode_str(url.fragment().unwrap_or_default())
+            .decode_utf8()?
+            .into_owned();
+        client.server = host(&url)?;
+        client.port = url.port().ok_or("VMess 链接缺少端口")?;
+        client.uuid = percent_decode_str(url.username())
+            .decode_utf8()?
+            .into_owned();
+        if let Some(password) = url.password() {
+            client.uuid.push(':');
+            client
+                .uuid
+                .push_str(&percent_decode_str(password).decode_utf8()?);
+        }
+        query = url
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(cipher) = query.remove("encryption") {
+            client.vmess.cipher = serde_json::from_value(json!(cipher))?;
+        }
+    } else {
+        let encoded = text.split_once("://").ok_or("链接缺少协议")?.1;
+        let values: Map<String, Value> = serde_json::from_slice(&decode(encoded)?)?;
+        query = BTreeMap::new();
+        for (key, value) in values {
+            let value = match value {
+                Value::String(value) => value,
+                Value::Null => continue,
+                value => value.to_string(),
+            };
+            if !value.is_empty() {
+                query.insert(key, value);
+            }
+        }
+        query.remove("v");
+        client.name = query.remove("ps").unwrap_or_default();
+        client.server = query.remove("add").ok_or("VMess 链接缺少服务器地址")?;
+        client.port = query.remove("port").ok_or("VMess 链接缺少端口")?.parse()?;
+        client.uuid = query.remove("id").ok_or("VMess 链接缺少用户标识")?;
+        if let Some(value) = query.remove("aid") {
+            client.vmess.alter_id = Some(value.parse()?);
+        }
+        if let Some(value) = query.remove("scy") {
+            client.vmess.cipher = serde_json::from_value(json!(value))?;
+        }
+        let network = query.remove("net").unwrap_or_else(|| "tcp".to_owned());
+        let header = query.remove("type");
+        let host = query.remove("host");
+        let path = query.remove("path");
+        match network.as_str() {
+            "grpc" => {
+                if let Some(host) = host {
+                    query.insert("authority".to_owned(), host);
+                }
+                if let Some(path) = path {
+                    query.insert("serviceName".to_owned(), path);
+                }
+                if let Some(mode) = header.filter(|value| value != "none") {
+                    query.insert("mode".to_owned(), mode);
+                }
+            }
+            "kcp" => {
+                if let Some(header) = header {
+                    query.insert("headerType".to_owned(), header);
+                }
+                if let Some(path) = path {
+                    query.insert("seed".to_owned(), path);
+                }
+            }
+            _ => {
+                if let Some(host) = host {
+                    query.insert("host".to_owned(), host);
+                }
+                if let Some(path) = path {
+                    query.insert("path".to_owned(), path);
+                }
+                if let Some(header) = header {
+                    if network == "xhttp" {
+                        query.insert("mode".to_owned(), header);
+                    } else if matches!(network.as_str(), "raw" | "tcp") {
+                        query.insert("headerType".to_owned(), header);
+                    }
+                }
+            }
+        }
+        query.insert("type".to_owned(), network);
+        if let Some(security) = query.remove("tls") {
+            query.insert("security".to_owned(), security);
+        }
+        if let Some(insecure) = query.remove("insecure") {
+            query.insert("allowInsecure".to_owned(), insecure);
+        }
+    }
+    client.tls = tls(&mut query, false)?;
+    client.transport = transport(&mut query)?;
+    remaining(query.keys(), "链接参数")?;
+    Ok(client)
+}
 
 pub fn vless(url: &Url) -> Result<Client> {
     let mut query: BTreeMap<_, _> = url
@@ -41,13 +158,7 @@ pub fn vless(url: &Url) -> Result<Client> {
     client.vless.encryption = query.remove("encryption");
     client.tls = tls(&mut query, false)?;
     client.transport = transport(&mut query)?;
-    if !query.is_empty() {
-        return Err(format!(
-            "无法转换链接参数：{}",
-            query.keys().cloned().collect::<Vec<_>>().join("、")
-        )
-        .into());
-    }
+    remaining(query.keys(), "链接参数")?;
     Ok(client)
 }
 
@@ -110,8 +221,13 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
     let kind = query.remove("type").unwrap_or_else(|| "tcp".to_owned());
     match kind.as_str() {
         "tcp" | "raw" => {
-            if query.get("headerType").is_some_and(|value| value == "none") {
+            if query
+                .get("headerType")
+                .is_none_or(|value| value == "none" || value.is_empty())
+            {
                 query.remove("headerType");
+                query.remove("host");
+                query.remove("path");
             }
             Ok(Transport::Default)
         }
@@ -218,7 +334,7 @@ fn xhttp(mut extra: Map<String, Value>) -> Result<XHttp> {
         if security != "tls" && security != "reality" && security != "none" {
             return Err("无法识别 XHTTP 下载握手类型".into());
         }
-        remaining(&stream, "XHTTP 下载连接")?;
+        remaining(stream.keys(), "XHTTP 下载连接")?;
         value.download = Some(download);
     }
     value.http = http(extra)?;
@@ -260,7 +376,7 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Tls
             json!(!serde_json::from_value::<bool>(insecure)?),
         );
     }
-    remaining(&values, "XHTTP 下载握手")?;
+    remaining(values.keys(), "XHTTP 下载握手")?;
     Ok(serde_json::from_value(json!(output))?)
 }
 
@@ -340,7 +456,7 @@ fn http(mut values: Map<String, Value>) -> Result<XHttpOptions> {
             json!(pool_options(serde_json::from_value(pool)?)?),
         );
     }
-    remaining(&values, "XHTTP 参数")?;
+    remaining(values.keys(), "XHTTP 参数")?;
     Ok(serde_json::from_value(json!(output))?)
 }
 
@@ -358,7 +474,7 @@ fn pool_options(mut values: Map<String, Value>) -> Result<Pool> {
             output.insert(source.to_owned(), json!(range(value, unit)?));
         }
     }
-    remaining(&values, "XHTTP 连接复用")?;
+    remaining(values.keys(), "XHTTP 连接复用")?;
     Ok(serde_json::from_value(json!(output))?)
 }
 
@@ -397,14 +513,11 @@ fn rename(
     }
 }
 
-fn remaining(values: &Map<String, Value>, context: &str) -> Result<()> {
-    if values.is_empty() {
+fn remaining<'a>(keys: impl Iterator<Item = &'a String>, context: &str) -> Result<()> {
+    let fields: Vec<_> = keys.map(String::as_str).collect();
+    if fields.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "{context} 包含无法转换的字段：{}",
-            values.keys().cloned().collect::<Vec<_>>().join("、")
-        )
-        .into())
+        Err(format!("{context} 包含无法转换的字段：{}", fields.join("、")).into())
     }
 }

@@ -482,6 +482,7 @@ impl Builder<'_> {
                 Connection::Http(value) => value.proxy.core,
                 Connection::Socks(value) => value.proxy.core,
                 Connection::Vless(value) => value.core,
+                Connection::Vmess(value) => value.core,
             };
             let mut candidates = vec![preferred];
             candidates.extend(
@@ -510,8 +511,8 @@ impl Builder<'_> {
                         let mut environment = BTreeMap::new();
                         if core == Core::Xray
                             && connection.multiplex().is_none_or(|mux| mux.tcp_only)
-                            && matches!(connection, Connection::Vless(value)
-                                if value.vless.packet_encoding == crate::vless::PacketEncoding::Packet)
+                            && connection.packet_encoding()
+                                == Some(connection::PacketEncoding::Packet)
                         {
                             environment.insert("XRAY_CONE_DISABLED".to_owned(), "true".to_owned());
                         }
@@ -522,8 +523,8 @@ impl Builder<'_> {
                             value,
                             resolve_udp: core == Core::SingBox
                                 && connection.multiplex().is_none_or(|mux| mux.tcp_only)
-                                && matches!(connection, Connection::Vless(value)
-                                    if value.vless.packet_encoding == crate::vless::PacketEncoding::PacketAddr),
+                                && connection.packet_encoding()
+                                    == Some(connection::PacketEncoding::PacketAddr),
                         }));
                     }
                     Err(error) if error.is::<Unsupported>() => errors.push(error.to_string()),
@@ -840,6 +841,13 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
             [
                 transport && value.vless.tcp.unwrap_or(true),
                 transport && value.vless.udp.unwrap_or(true),
+            ]
+        }
+        Connection::Vmess(value) => {
+            let transport = value.transport.supported(&value.tls, parent);
+            [
+                transport && value.vmess.tcp.unwrap_or(true),
+                transport && value.vmess.udp.unwrap_or(true),
             ]
         }
     }

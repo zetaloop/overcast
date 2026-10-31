@@ -23,6 +23,7 @@ mod transport;
 pub mod tui;
 mod user;
 mod vless;
+mod vmess;
 
 use std::{error::Error, process::ExitCode};
 
