@@ -156,21 +156,21 @@ impl Connection {
                 screen,
                 &title,
                 value,
-                Rc::new(move |value| apply(&Self::Direct(value.clone()))),
+                Rc::new(move |value, screen| apply(&Self::Direct(value.clone()), screen)),
                 creating,
             ),
             Self::Http(value) => form::edit(
                 screen,
                 &title,
                 value,
-                Rc::new(move |value| apply(&Self::Http(value.clone()))),
+                Rc::new(move |value, screen| apply(&Self::Http(value.clone()), screen)),
                 creating,
             ),
             Self::Socks(value) => form::edit(
                 screen,
                 &title,
                 value,
-                Rc::new(move |value| apply(&Self::Socks(value.clone()))),
+                Rc::new(move |value, screen| apply(&Self::Socks(value.clone()), screen)),
                 creating,
             ),
         }
@@ -455,15 +455,15 @@ impl Value for FastOpen {
                 Action::Back => return Ok(false),
                 Action::Select => match selected {
                     0 | 1 => {
-                        return form::set(self, Self::Enabled(selected == 0), &apply);
+                        return form::set(screen, self, Self::Enabled(selected == 0), &apply);
                     }
                     2 => {
                         if let Some(value) =
-                            screen.input(&menu, selected, &queue.to_string(), |value| {
+                            screen.input(&menu, selected, &queue.to_string(), |value, screen| {
                                 let value = value
                                     .parse()
                                     .map_err(|error| format!("队列长度格式不正确：{error}"))?;
-                                apply(&Self::Queue(value))?;
+                                apply(&Self::Queue(value), screen)?;
                                 Ok(value)
                             })?
                         {

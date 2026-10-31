@@ -465,7 +465,7 @@ fn edit(screen: &mut Screen, store: &Store, client: &Agent, component: Component
             "install" | "version" => {
                 let version = if items[selected].key == "version" {
                     let Some(version) =
-                        screen.input(&menu, selected, &items[selected].value, |value| {
+                        screen.input(&menu, selected, &items[selected].value, |value, _| {
                             let version = value.trim();
                             if version.is_empty() {
                                 return Err("请填写发布标签".into());
@@ -485,8 +485,7 @@ fn edit(screen: &mut Screen, store: &Store, client: &Agent, component: Component
                         let release =
                             component.release(client, version.as_deref(), preview, progress)?;
                         let installed = component.install(store, client, &release, progress)?;
-                        store.update(|config| {
-                            progress.check()?;
+                        store.update(progress, |config| {
                             config.components.entry(component).or_default().installed =
                                 Some(installed);
                             Ok(())
@@ -499,10 +498,12 @@ fn edit(screen: &mut Screen, store: &Store, client: &Agent, component: Component
                         }
                     })
             }
-            "preview" => store
-                .update(|config| {
-                    config.components.entry(component).or_default().preview = !preview;
-                    Ok(())
+            "preview" => screen
+                .work(component.name(), "", |progress| {
+                    store.update(progress, |config| {
+                        config.components.entry(component).or_default().preview = !preview;
+                        Ok(())
+                    })
                 })
                 .map(|()| {
                     latest = None;
@@ -585,8 +586,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                         .collect::<Result<Vec<_>>>()
                 })?;
                 if !installed.is_empty() {
-                    store.update(|config| {
-                        progress.check()?;
+                    store.update(progress, |config| {
                         for (component, installed) in installed {
                             config.components.entry(component).or_default().installed =
                                 Some(installed);

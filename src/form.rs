@@ -50,22 +50,22 @@ pub trait Value: Clone + Default {
     ) -> Result<bool>;
 }
 
-pub type Apply<'a, T> = Rc<dyn Fn(&T) -> Result<()> + 'a>;
+pub type Apply<'a, T> = Rc<dyn Fn(&T, &mut Screen) -> Result<()> + 'a>;
 
 pub fn map<'a, T: Clone + 'a, U: Clone + 'a>(
     value: Rc<T>,
     apply: Apply<'a, T>,
     replace: impl Fn(&mut T, U) + 'a,
 ) -> Apply<'a, U> {
-    Rc::new(move |edited| {
+    Rc::new(move |edited, screen| {
         let mut value = (*value).clone();
         replace(&mut value, edited.clone());
-        apply(&value)
+        apply(&value, screen)
     })
 }
 
-pub fn set<T>(value: &mut T, edited: T, apply: &Apply<'_, T>) -> Result<bool> {
-    apply(&edited)?;
+pub fn set<T>(screen: &mut Screen, value: &mut T, edited: T, apply: &Apply<'_, T>) -> Result<bool> {
+    apply(&edited, screen)?;
     *value = edited;
     Ok(true)
 }
@@ -73,7 +73,7 @@ pub fn set<T>(value: &mut T, edited: T, apply: &Apply<'_, T>) -> Result<bool> {
 pub trait Field {
     fn item(&self) -> Item;
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool>;
-    fn reset(&mut self) -> Result<bool>;
+    fn reset(&mut self, screen: &mut Screen) -> Result<bool>;
 }
 
 pub type Fields<'a> = Vec<Box<dyn Field + 'a>>;
@@ -118,8 +118,8 @@ impl<T: Value> Field for Binding<'_, T> {
         self.value.edit(screen, menu, selected, self.apply.clone())
     }
 
-    fn reset(&mut self) -> Result<bool> {
-        set(self.value, self.default.clone(), &self.apply)
+    fn reset(&mut self, screen: &mut Screen) -> Result<bool> {
+        set(screen, self.value, self.default.clone(), &self.apply)
     }
 }
 
@@ -131,7 +131,7 @@ pub fn edit<T: Form>(
     creating: bool,
 ) -> Result<bool> {
     let update: Apply<'_, T> = if creating {
-        Rc::new(|_| Ok(()))
+        Rc::new(|_, _| Ok(()))
     } else {
         apply.clone()
     };
@@ -163,14 +163,14 @@ pub fn edit<T: Form>(
             Action::Select if selected == items.len() - 1 => return Ok(!creating && changed),
             Action::Select if selected == fields.len() => {
                 drop(fields);
-                match apply(value) {
+                match apply(value, screen) {
                     Ok(()) => return Ok(true),
                     Err(error) => Err(error),
                 }
             }
             Action::Select => fields[selected].edit(screen, &menu, selected),
             Action::Key(key) if key.code == KeyCode::Delete && selected < fields.len() => {
-                fields[selected].reset()
+                fields[selected].reset(screen)
             }
             _ => continue,
         };
@@ -194,11 +194,11 @@ fn input<T: Display + FromStr>(
 where
     T::Err: Display,
 {
-    let Some(edited) = screen.input(menu, selected, &value.to_string(), |text| {
+    let Some(edited) = screen.input(menu, selected, &value.to_string(), |text, screen| {
         let edited = text
             .parse()
             .map_err(|error| format!("格式不正确：{error}"))?;
-        apply(&edited)?;
+        apply(&edited, screen)?;
         Ok(edited)
     })?
     else {
@@ -232,13 +232,13 @@ impl Value for bool {
 
     fn run(
         &mut self,
-        _: &mut Screen,
+        screen: &mut Screen,
         _: &Menu<'_>,
         _: usize,
         apply: Apply<'_, Self>,
         _: bool,
     ) -> Result<bool> {
-        set(self, !*self, &apply)
+        set(screen, self, !*self, &apply)
     }
 }
 
@@ -282,7 +282,7 @@ impl<T: Value> Value for Vec<T> {
         creating: bool,
     ) -> Result<bool> {
         let update: Apply<'_, Self> = if creating {
-            Rc::new(|_| Ok(()))
+            Rc::new(|_, _| Ok(()))
         } else {
             apply.clone()
         };
@@ -322,10 +322,12 @@ impl<T: Value> Value for Vec<T> {
             let result = match screen.select(&menu, &mut selected, &notice)? {
                 Action::Back => return Ok(!creating && changed),
                 Action::Select if selected == items.len() - 1 => return Ok(!creating && changed),
-                Action::Select if creating && selected == self.len() + 1 => match apply(self) {
-                    Ok(()) => return Ok(true),
-                    Err(error) => Err(error),
-                },
+                Action::Select if creating && selected == self.len() + 1 => {
+                    match apply(self, screen) {
+                        Ok(()) => return Ok(true),
+                        Err(error) => Err(error),
+                    }
+                }
                 Action::Select if selected == self.len() => {
                     let apply = map(Rc::new(self.clone()), update.clone(), |values, value| {
                         values.push(value);
@@ -350,7 +352,7 @@ impl<T: Value> Value for Vec<T> {
                 Action::Key(key) if key.code == KeyCode::Delete && selected < self.len() => {
                     let mut edited = self.clone();
                     edited.remove(selected);
-                    set(self, edited, &update)
+                    set(screen, self, edited, &update)
                 }
                 Action::Key(key)
                     if key.modifiers.contains(Modifiers::ALT)
@@ -364,7 +366,7 @@ impl<T: Value> Value for Vec<T> {
                     };
                     let mut edited = self.clone();
                     edited.swap(selected, destination);
-                    set(self, edited, &update).inspect(|_| {
+                    set(screen, self, edited, &update).inspect(|_| {
                         selected = destination;
                     })
                 }
@@ -391,7 +393,7 @@ impl<T: Value> Value for BTreeMap<String, T> {
         creating: bool,
     ) -> Result<bool> {
         let update: Apply<'_, Self> = if creating {
-            Rc::new(|_| Ok(()))
+            Rc::new(|_, _| Ok(()))
         } else {
             apply.clone()
         };
@@ -431,12 +433,14 @@ impl<T: Value> Value for BTreeMap<String, T> {
             let result = match screen.select(&menu, &mut selected, &notice)? {
                 Action::Back => return Ok(!creating && changed),
                 Action::Select if selected == items.len() - 1 => return Ok(!creating && changed),
-                Action::Select if creating && selected == self.len() + 1 => match apply(self) {
-                    Ok(()) => return Ok(true),
-                    Err(error) => Err(error),
-                },
+                Action::Select if creating && selected == self.len() + 1 => {
+                    match apply(self, screen) {
+                        Ok(()) => return Ok(true),
+                        Err(error) => Err(error),
+                    }
+                }
                 Action::Select if selected == self.len() => {
-                    let Some(key) = screen.input(&menu, selected, "", |key| {
+                    let Some(key) = screen.input(&menu, selected, "", |key, _| {
                         if self.contains_key(key) {
                             return Err("这个名称已经存在".into());
                         }
@@ -484,7 +488,7 @@ impl<T: Value> Value for BTreeMap<String, T> {
                 Action::Key(key) if key.code == KeyCode::Delete && selected < keys.len() => {
                     let mut edited = self.clone();
                     edited.remove(&keys[selected]);
-                    set(self, edited, &update)
+                    set(screen, self, edited, &update)
                 }
                 _ => continue,
             };
@@ -528,7 +532,7 @@ pub fn choose<T: PartialEq + Clone>(
             Action::Back => return Ok(false),
             Action::Select if selected == choices.len() => return Ok(false),
             Action::Select => {
-                return set(value, choices[selected].2.clone(), &apply);
+                return set(screen, value, choices[selected].2.clone(), &apply);
             }
             _ => {}
         }

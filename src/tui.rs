@@ -495,7 +495,7 @@ impl Screen {
         menu: &Menu<'_>,
         selected: usize,
         value: &str,
-        parse: impl Fn(&str) -> Result<T>,
+        parse: impl Fn(&str, &mut Self) -> Result<T>,
     ) -> Result<Option<T>> {
         if self.exiting {
             return Ok(None);
@@ -506,7 +506,7 @@ impl Screen {
             if argument != "-" {
                 editor = Editor::new(argument);
             }
-            match parse(editor.text()) {
+            match parse(editor.text(), self) {
                 Ok(value) => return Ok(Some(value)),
                 Err(error) => {
                     notice = error.to_string();
@@ -517,10 +517,12 @@ impl Screen {
         while !self.exiting {
             self.menu(menu, selected, &notice, Some(&mut editor))?;
             match self.event(false)? {
-                Some(Event::Key(key)) if key.code == KeyCode::Enter => match parse(editor.text()) {
-                    Ok(value) => return Ok(Some(value)),
-                    Err(error) => notice = error.to_string(),
-                },
+                Some(Event::Key(key)) if key.code == KeyCode::Enter => {
+                    match parse(editor.text(), self) {
+                        Ok(value) => return Ok(Some(value)),
+                        Err(error) => notice = error.to_string(),
+                    }
+                }
                 Some(Event::Key(key)) if key.code == KeyCode::Escape => return Ok(None),
                 Some(event) => self.edit(&mut editor, event)?,
                 _ => {}
@@ -578,9 +580,17 @@ impl Screen {
             });
             let result: Result<T> = (|| {
                 let started = Instant::now();
-                let mut deadline = started;
+                let mut deadline = started + FRAME;
                 let mut cancelled = false;
                 loop {
+                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(result) => return result,
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => {
+                            return Err("处理线程已中断".into());
+                        }
+                    }
                     let dimensions = self.dimensions()?;
                     let (width, height) = (dimensions.cols, dimensions.rows);
                     let steps = progress.steps();
@@ -669,14 +679,6 @@ impl Screen {
                         }
                     }
                     deadline += FRAME;
-                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    {
-                        Ok(result) => return result,
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => {
-                            return Err("处理线程已中断".into());
-                        }
-                    }
                     if deadline < Instant::now() {
                         deadline = Instant::now();
                     }

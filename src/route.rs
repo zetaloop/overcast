@@ -259,7 +259,7 @@ fn select_target(
             items: &fields,
             help: "",
         };
-        if let Some(condition) = screen.input(&menu, 0, "", |value| {
+        if let Some(condition) = screen.input(&menu, 0, "", |value, _| {
             Condition::parse(
                 &format!("{kind}:{}", serde_json::to_string(value)?),
                 config,
@@ -345,18 +345,20 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
         item
     })
     .collect();
-    let apply = |text: &str| {
-        store.update(|config| {
-            let condition = Condition::parse(text, config, &catalog, &bindings)?;
-            get_mut(&mut config.rules, path)?.condition = condition;
-            Ok(())
+    let apply = |text: &str, screen: &mut Screen| {
+        screen.work("编辑条件", text, |progress| {
+            store.update(progress, |config| {
+                let condition = Condition::parse(text, config, &catalog, &bindings)?;
+                get_mut(&mut config.rules, path)?.condition = condition;
+                Ok(())
+            })
         })
     };
     if let Some(argument) = screen.arguments.pop_front() {
         if argument != "-" {
             editor = Editor::new(argument);
         }
-        match apply(editor.text()) {
+        match apply(editor.text(), screen) {
             Ok(()) => return Ok(()),
             Err(error) => {
                 notice = error.to_string();
@@ -388,7 +390,7 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
                     continue;
                 }
                 KeyCode::Enter if selected == 0 => {
-                    match apply(editor.text()) {
+                    match apply(editor.text(), screen) {
                         Ok(()) => return Ok(()),
                         Err(error) => notice = error.to_string(),
                     }
@@ -504,9 +506,11 @@ fn move_rule(
         let result = match key {
             KeyCode::Escape => return Ok(None),
             KeyCode::Enter => {
-                let result = store.update(|config| {
-                    config.rules = rules.clone();
-                    Ok(())
+                let result = screen.work(menu.title, "", |progress| {
+                    store.update(progress, |config| {
+                        config.rules = rules.clone();
+                        Ok(())
+                    })
                 });
                 if result.is_ok() {
                     return Ok(Some(path));
@@ -552,23 +556,27 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
                 "destination" => {
                     destination(screen, store, rule.destination).and_then(|destination| {
                         match destination {
-                            Some(destination) => store.update(|config| {
-                                get_mut(&mut config.rules, &path)?.destination = destination;
-                                Ok(())
+                            Some(destination) => screen.work(menu.title, "", |progress| {
+                                store.update(progress, |config| {
+                                    get_mut(&mut config.rules, &path)?.destination = destination;
+                                    Ok(())
+                                })
                             }),
                             None => Ok(()),
                         }
                     })
                 }
                 "new" => {
-                    let index = store.update(|config| {
-                        let rule = get_mut(&mut config.rules, &path)?;
-                        let index = rule.children.len();
-                        rule.children.push(Rule {
-                            destination: rule.destination,
-                            ..Rule::default()
-                        });
-                        Ok(index)
+                    let index = screen.work(menu.title, "", |progress| {
+                        store.update(progress, |config| {
+                            let rule = get_mut(&mut config.rules, &path)?;
+                            let index = rule.children.len();
+                            rule.children.push(Rule {
+                                destination: rule.destination,
+                                ..Rule::default()
+                            });
+                            Ok(index)
+                        })
                     });
                     index.map(|index| {
                         path.push(index);
@@ -581,14 +589,16 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
                     }
                 }),
                 "delete" => {
-                    let result = store.update(|config| {
-                        let (&index, parent) = path.split_last().ok_or("找不到规则")?;
-                        let siblings = children(&mut config.rules, parent)?;
-                        if index >= siblings.len() {
-                            return Err("找不到规则".into());
-                        }
-                        siblings.remove(index);
-                        Ok(())
+                    let result = screen.work(menu.title, "", |progress| {
+                        store.update(progress, |config| {
+                            let (&index, parent) = path.split_last().ok_or("找不到规则")?;
+                            let siblings = children(&mut config.rules, parent)?;
+                            if index >= siblings.len() {
+                                return Err("找不到规则".into());
+                            }
+                            siblings.remove(index);
+                            Ok(())
+                        })
                     });
                     if result.is_ok() {
                         return Ok(None);
@@ -640,10 +650,12 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             }
             Action::Select => match items[selected].key.as_str() {
                 "new" => {
-                    let index = store.update(|config| {
-                        let index = config.rules.len();
-                        config.rules.push(Rule::default());
-                        Ok(index)
+                    let index = screen.work(menu.title, "", |progress| {
+                        store.update(progress, |config| {
+                            let index = config.rules.len();
+                            config.rules.push(Rule::default());
+                            Ok(index)
+                        })
                     });
                     match index {
                         Ok(index) => edit(screen, store, vec![index]).map(|path| focus = path),

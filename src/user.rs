@@ -97,53 +97,63 @@ fn edit(
             _ => continue,
         }
         notice.clear();
-        let apply = |edited: User| {
+        let apply = |edited: User, screen: &mut Screen| {
             if let Some(uuid) = original {
-                store.update(|config| {
-                    let current = config
-                        .users
-                        .iter_mut()
-                        .find(|user| user.uuid == uuid)
-                        .ok_or("用户已被删除")?;
-                    *current = edited.clone();
-                    if uuid != edited.uuid {
-                        for rule in &mut config.rules {
-                            rule.replace_user(uuid, edited.uuid);
+                screen.work("保存用户", &format!(" -- {}", edited.name), |progress| {
+                    store.update(progress, |config| {
+                        let current = config
+                            .users
+                            .iter_mut()
+                            .find(|user| user.uuid == uuid)
+                            .ok_or("用户已被删除")?;
+                        *current = edited.clone();
+                        if uuid != edited.uuid {
+                            for rule in &mut config.rules {
+                                rule.replace_user(uuid, edited.uuid);
+                            }
                         }
-                    }
-                    Ok(())
+                        Ok(())
+                    })
                 })?;
             }
             Ok(edited)
         };
         let edited = match items[selected].key.as_str() {
-            "name" => screen.input(&menu, selected, &user.name, |value| {
+            "name" => screen.input(&menu, selected, &user.name, |value, screen| {
                 name(value)?;
-                apply(User {
-                    name: value.to_owned(),
-                    ..user.clone()
-                })
+                apply(
+                    User {
+                        name: value.to_owned(),
+                        ..user.clone()
+                    },
+                    screen,
+                )
             })?,
-            "uuid" => screen.input(&menu, selected, &user.uuid.to_string(), |value| {
-                apply(User {
-                    uuid: value
-                        .parse()
-                        .map_err(|error| format!("UUID 格式不正确：{error}"))?,
-                    ..user.clone()
-                })
+            "uuid" => screen.input(&menu, selected, &user.uuid.to_string(), |value, screen| {
+                apply(
+                    User {
+                        uuid: value
+                            .parse()
+                            .map_err(|error| format!("UUID 格式不正确：{error}"))?,
+                        ..user.clone()
+                    },
+                    screen,
+                )
             })?,
-            "password" => screen.input(&menu, selected, &user.password, |value| {
+            "password" => screen.input(&menu, selected, &user.password, |value, screen| {
                 password(value)?;
-                apply(User {
-                    password: value.to_owned(),
-                    ..user.clone()
-                })
+                apply(
+                    User {
+                        password: value.to_owned(),
+                        ..user.clone()
+                    },
+                    screen,
+                )
             })?,
             "create" => {
                 let result =
                     screen.work("保存用户", &format!(" -- {}", user.name), |progress| {
-                        store.update(|config| {
-                            progress.check()?;
+                        store.update(progress, |config| {
                             config.users.push(user.clone());
                             Ok(())
                         })
@@ -157,8 +167,7 @@ fn edit(
             "delete" => {
                 let result =
                     screen.work("删除用户", &format!(" -- {}", user.name), |progress| {
-                        store.update(|config| {
-                            progress.check()?;
+                        store.update(progress, |config| {
                             config.users.retain(|user| Some(user.uuid) != original);
                             Ok(())
                         })

@@ -160,14 +160,14 @@ impl Protocol {
                 screen,
                 &title,
                 value,
-                Rc::new(move |value| apply(&Self::Http(value.clone()))),
+                Rc::new(move |value, screen| apply(&Self::Http(value.clone()), screen)),
                 false,
             ),
             Self::Socks(value) => form::edit(
                 screen,
                 &title,
                 value,
-                Rc::new(move |value| apply(&Self::Socks(value.clone()))),
+                Rc::new(move |value, screen| apply(&Self::Socks(value.clone()), screen)),
                 false,
             ),
         }
@@ -334,16 +334,18 @@ fn edit(
     existing: bool,
     mut inbound: Inbound,
 ) -> Result<Option<Uuid>> {
-    let apply: form::Apply<'_, Inbound> = Rc::new(|edited| {
+    let apply: form::Apply<'_, Inbound> = Rc::new(|edited, screen| {
         if existing {
-            store.update(|config| {
-                let current = config
-                    .inbounds
-                    .iter_mut()
-                    .find(|current| current.uuid == edited.uuid)
-                    .ok_or("入站已被删除")?;
-                *current = edited.clone();
-                Ok(())
+            screen.work("保存入站", &format!(" -- {}", edited.name), |progress| {
+                store.update(progress, |config| {
+                    let current = config
+                        .inbounds
+                        .iter_mut()
+                        .find(|current| current.uuid == edited.uuid)
+                        .ok_or("入站已被删除")?;
+                    *current = edited.clone();
+                    Ok(())
+                })
             })?;
         }
         Ok(())
@@ -428,7 +430,7 @@ fn edit(
             {
                 let mut edited = inbound.clone();
                 edited.credentials = None;
-                form::set(&mut inbound, edited, &apply).map(|_| ())
+                form::set(screen, &mut inbound, edited, &apply).map(|_| ())
             }
             Action::Select => match items[selected].key.as_str() {
                 "name" => edit!(name),
@@ -455,7 +457,7 @@ fn edit(
                         screen,
                         &menu,
                         selected,
-                        Rc::new(|kind| apply(&candidate(*kind))),
+                        Rc::new(|kind, screen| apply(&candidate(*kind), screen)),
                     ) {
                         Ok(true) => {
                             inbound = candidate(kind);
@@ -495,24 +497,36 @@ fn edit(
                 "tls" => edit!(tls),
                 "listen" => edit!(listen),
                 "create" => {
-                    let result = store.update(|config| {
-                        let mut value = inbound.clone();
-                        if value.name.trim().is_empty() {
-                            value.name = value.summary();
-                        }
-                        config.inbounds.push(value);
-                        Ok(())
-                    });
+                    let result = screen.work(
+                        "保存入站",
+                        &format!(" -- {}", inbound.name),
+                        |progress| {
+                            store.update(progress, |config| {
+                                let mut value = inbound.clone();
+                                if value.name.trim().is_empty() {
+                                    value.name = value.summary();
+                                }
+                                config.inbounds.push(value);
+                                Ok(())
+                            })
+                        },
+                    );
                     if result.is_ok() {
                         return Ok(Some(inbound.uuid));
                     }
                     result
                 }
                 "delete" => {
-                    let result = store.update(|config| {
-                        config.inbounds.retain(|value| value.uuid != inbound.uuid);
-                        Ok(())
-                    });
+                    let result = screen.work(
+                        "删除入站",
+                        &format!(" -- {}", inbound.name),
+                        |progress| {
+                            store.update(progress, |config| {
+                                config.inbounds.retain(|value| value.uuid != inbound.uuid);
+                                Ok(())
+                            })
+                        },
+                    );
                     if result.is_ok() {
                         return Ok(None);
                     }
@@ -534,7 +548,7 @@ pub fn create(
     menu: &Menu<'_>,
     selected: usize,
 ) -> Result<Option<Uuid>> {
-    match Kind::create(screen, menu, selected, Rc::new(|_| Ok(())))? {
+    match Kind::create(screen, menu, selected, Rc::new(|_, _| Ok(())))? {
         Some(kind) => edit(screen, store, false, Inbound::new(kind)),
         None => Ok(None),
     }

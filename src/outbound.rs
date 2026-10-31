@@ -12,6 +12,7 @@ use crate::{
     config::Store,
     connection::{self, Connection},
     form,
+    progress::Progress,
     tui::{Action, Item, Menu, Screen},
 };
 
@@ -124,9 +125,9 @@ impl From<Connection> for Selection {
     }
 }
 
-fn paste(store: &Store, selections: Vec<Selection>) -> Result<usize> {
+fn paste(store: &Store, selections: Vec<Selection>, progress: &Progress) -> Result<usize> {
     let mut index = 0;
-    store.update(|config| {
+    store.update(progress, |config| {
         index = config.outbounds.len();
         for selection in selections {
             let mut outbound = Outbound {
@@ -223,16 +224,18 @@ fn edit(
     existing: bool,
     mut outbound: Outbound,
 ) -> Result<Option<Uuid>> {
-    let apply: form::Apply<'_, Outbound> = Rc::new(|edited| {
+    let apply: form::Apply<'_, Outbound> = Rc::new(|edited, screen| {
         if existing {
-            store.update(|config| {
-                let current = config
-                    .outbounds
-                    .iter_mut()
-                    .find(|current| current.uuid == edited.uuid)
-                    .ok_or("出站已被删除")?;
-                *current = edited.clone();
-                Ok(())
+            screen.work("保存出站", &format!(" -- {}", edited.name), |progress| {
+                store.update(progress, |config| {
+                    let current = config
+                        .outbounds
+                        .iter_mut()
+                        .find(|current| current.uuid == edited.uuid)
+                        .ok_or("出站已被删除")?;
+                    *current = edited.clone();
+                    Ok(())
+                })
             })?;
         }
         Ok(())
@@ -299,7 +302,7 @@ fn edit(
                 let count = connections.len();
                 let mut edited = outbound.clone();
                 edited.connections.splice(position..position, connections);
-                form::set(&mut outbound, edited, &apply).map(|_| {
+                form::set(screen, &mut outbound, edited, &apply).map(|_| {
                     selected = position + count;
                 })
             }),
@@ -317,7 +320,7 @@ fn edit(
             (Action::Key(key), Some(index)) if key.code == KeyCode::Delete => {
                 let mut edited = outbound.clone();
                 edited.connections.remove(index);
-                form::set(&mut outbound, edited, &apply).map(|_| ())
+                form::set(screen, &mut outbound, edited, &apply).map(|_| ())
             }
             (Action::Key(key), Some(index))
                 if key.modifiers.contains(Modifiers::ALT)
@@ -330,7 +333,7 @@ fn edit(
                 };
                 let mut edited = outbound.clone();
                 edited.connections.swap(index, destination);
-                form::set(&mut outbound, edited, &apply).map(|_| {
+                form::set(screen, &mut outbound, edited, &apply).map(|_| {
                     selected = destination + 1;
                 })
             }
@@ -346,14 +349,16 @@ fn edit(
             }
             (Action::Select, None) => match items[selected].key.as_str() {
                 "name" => {
-                    if let Some(value) = screen.input(&menu, selected, &outbound.name, |value| {
-                        let edited = Outbound {
-                            name: value.to_owned(),
-                            ..outbound.clone()
-                        };
-                        apply(&edited)?;
-                        Ok(edited.name)
-                    })? {
+                    if let Some(value) =
+                        screen.input(&menu, selected, &outbound.name, |value, screen| {
+                            let edited = Outbound {
+                                name: value.to_owned(),
+                                ..outbound.clone()
+                            };
+                            apply(&edited, screen)?;
+                            Ok(edited.name)
+                        })?
+                    {
                         outbound.name = value;
                     }
                     Ok(())
@@ -377,8 +382,7 @@ fn edit(
                         "保存出站",
                         &format!(" -- {}", outbound.name),
                         |progress| {
-                            store.update(|config| {
-                                progress.check()?;
+                            store.update(progress, |config| {
                                 let mut value = outbound.clone();
                                 if value.name.trim().is_empty() {
                                     value.name = value.summary();
@@ -398,8 +402,7 @@ fn edit(
                         "删除出站",
                         &format!(" -- {}", outbound.name),
                         |progress| {
-                            store.update(|config| {
-                                progress.check()?;
+                            store.update(progress, |config| {
                                 config
                                     .outbounds
                                     .retain(|current| current.uuid != outbound.uuid);
@@ -454,7 +457,11 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),
             Action::Paste(text) => Selection::parse(&text)
-                .and_then(|selection| paste(store, selection))
+                .and_then(|selection| {
+                    screen.work("保存出站", "", |progress| {
+                        paste(store, selection, progress)
+                    })
+                })
                 .map(|index| {
                     selected = index;
                 }),

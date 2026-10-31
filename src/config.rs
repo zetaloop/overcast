@@ -17,6 +17,7 @@ use crate::{
     component::{Component, Settings},
     inbound::Inbound,
     outbound::Outbound,
+    progress::Progress,
     route::Rule,
     user::User,
 };
@@ -139,7 +140,11 @@ impl Store {
         Ok(config)
     }
 
-    pub fn update<T>(&self, change: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
+    pub fn update<T>(
+        &self,
+        progress: &Progress,
+        change: impl FnOnce(&mut Config) -> Result<T>,
+    ) -> Result<T> {
         self.create_dir(&self.directory)?;
         let path = self.directory.join("config.lock");
         let mut options = OpenOptions::new();
@@ -157,9 +162,11 @@ impl Store {
             Err(error) => return Err(error.into()),
         };
         lock.lock()?;
+        progress.check()?;
         let mut config = self.load()?;
         let result = change(&mut config)?;
         config.validate()?;
+        progress.check()?;
         let path = self.directory.join("config.json");
         self.write(&path, |file| {
             serde_json::to_writer_pretty(&mut *file, &config)?;
