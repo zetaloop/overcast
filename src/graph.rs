@@ -155,6 +155,21 @@ pub fn build<'a>(
         if inbound.users && config.users.is_empty() {
             continue;
         }
+        if inbound.tls.enabled && inbound.tls.reality.enabled {
+            match inbound.tls.reality.outbound {
+                Destination::Block => continue,
+                Destination::Outbound(uuid)
+                    if !config
+                        .outbounds
+                        .iter()
+                        .any(|outbound| outbound.uuid == uuid)
+                        || !reachable(inbound.core, Destination::Outbound(uuid), Network::Tcp)? =>
+                {
+                    continue;
+                }
+                _ => {}
+            }
+        }
         let Protocol::Mixed(protocol) = &inbound.protocol;
         if !protocol.http.enabled && !protocol.socks.enabled {
             continue;

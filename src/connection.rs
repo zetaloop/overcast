@@ -402,6 +402,7 @@ pub struct Tls {
     pub spoof_method: Option<String>,
     pub key_log: Option<String>,
     pub ech: Ech,
+    pub reality: crate::reality::Client,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -687,6 +688,7 @@ fields!(Tls {
     spoof_method: "伪装方式",
     key_log: "密钥日志文件",
     ech: "ECH",
+    reality: "REALITY",
 });
 
 fields!(Ech {

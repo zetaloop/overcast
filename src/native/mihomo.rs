@@ -213,7 +213,11 @@ fn client_tls(
     output: &mut Map<String, Value>,
     globals: &mut Map<String, Value>,
 ) -> Result<()> {
+    if source.reality.enabled {
+        return unsupported("Mihomo HTTP/SOCKS 出站没有 REALITY 配置");
+    }
     let mut options = Options::new(source)?;
+    options.take("reality");
     options.rename(output, &[("enabled", "tls"), ("server_name", "sni")]);
     options.invert(output, "verify_certificate", "skip-cert-verify");
     if source.send_sni == Some(true) {
@@ -266,7 +270,12 @@ fn client_tls(
 }
 
 fn server_tls(source: &Inbound, store: &Store, output: &mut Map<String, Value>) -> Result<()> {
+    if source.tls.reality.enabled {
+        output.insert("reality-config".to_owned(), super::reality::server(source)?);
+        return Ok(());
+    }
     let mut options = Options::new(&source.tls)?;
+    options.take("reality");
     options.take("enabled");
     options.take("server_name");
     let (certificate, key) = certificate_paths(store, source);

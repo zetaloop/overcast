@@ -84,12 +84,48 @@ pub struct Listener {
     pub binding: Binding,
 }
 
-pub fn build(store: &Store, graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>> {
+pub fn build(
+    store: &Store,
+    graph: &mut Graph<'_>,
+    keys: &BTreeMap<Uuid, crate::reality::Keys>,
+    progress: &Progress,
+) -> Result<Vec<Listener>> {
     let step = progress.activity("分配监听资源");
     let mut groups: BTreeMap<Option<u16>, Vec<Vec<Member>>> = BTreeMap::new();
     for (index, entry) in graph.entries.iter().enumerate() {
         progress.check()?;
         let mut source = entry.inbound.clone();
+        if source.tls.enabled && source.tls.reality.enabled {
+            if let Some(keys) = keys.get(&source.uuid) {
+                if source.tls.reality.private_key.is_none() {
+                    source.tls.reality.private_key = Some(keys.private_key.clone());
+                }
+                if source.tls.reality.short_ids.is_empty() {
+                    source.tls.reality.short_ids = keys.short_ids.clone();
+                }
+                if source.tls.reality.signature_seed.is_none() {
+                    source.tls.reality.signature_seed = keys.signature_seed.clone();
+                }
+            }
+            source.tls.reality.target = source.tls.reality.address()?;
+            source.tls.reality.server_names = source
+                .tls
+                .reality
+                .names(source.tls.server_name.as_deref())?;
+            source
+                .tls
+                .reality
+                .short_ids
+                .iter_mut()
+                .for_each(|value| value.make_ascii_lowercase());
+            source.tls.reality.short_ids.sort();
+            source.tls.reality.short_ids.dedup();
+            if !source.tls.reality.signature {
+                source.tls.reality.signature_seed = None;
+            }
+        } else {
+            source.tls.reality = crate::reality::Server::default();
+        }
         step.detail(&source.name);
         if source.listen.address == "localhost" {
             source.listen.address = "127.0.0.1".to_owned();
@@ -108,7 +144,10 @@ pub fn build(store: &Store, graph: &mut Graph<'_>, progress: &Progress) -> Resul
             return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
         }
         let Protocol::Mixed(protocol) = &source.protocol;
-        let transport_udp = source.transport.udp(source.tls.enabled, &source.tls.alpn);
+        let transport_udp = source.transport.udp(
+            source.tls.enabled && !source.tls.reality.enabled,
+            &source.tls.alpn,
+        );
         if unix && transport_udp {
             return Err(format!("入站 {} 的 XHTTP/3 使用 UDP 监听地址", source.name).into());
         }
@@ -255,6 +294,21 @@ pub fn build(store: &Store, graph: &mut Graph<'_>, progress: &Progress) -> Resul
             .ok_or_else(|| conflict(&members, "监听地址与接口的组合无法合并"))?;
         let mut binding = members[index].binding.clone();
         let mut source = (*members[index].source).clone();
+        if source.tls.enabled && source.tls.reality.enabled {
+            source.tls.reality.private_key = members
+                .iter()
+                .find_map(|member| member.source.tls.reality.private_key.clone());
+            source.tls.reality.signature_seed = members
+                .iter()
+                .find_map(|member| member.source.tls.reality.signature_seed.clone());
+            source.tls.reality.short_ids = members
+                .iter()
+                .find_map(|member| {
+                    (!member.source.tls.reality.short_ids.is_empty())
+                        .then(|| member.source.tls.reality.short_ids.clone())
+                })
+                .unwrap_or_default();
+        }
         let modes: BTreeSet<_> = members
             .iter()
             .flat_map(|member| member.modes.iter())
@@ -309,14 +363,28 @@ pub fn build(store: &Store, graph: &mut Graph<'_>, progress: &Progress) -> Resul
                 )?;
             }
             if source.tls.enabled {
+                let mut tls = member.source.tls.clone();
+                if tls.reality.enabled {
+                    if tls.reality.private_key.is_none() {
+                        tls.reality.private_key = source.tls.reality.private_key.clone();
+                    }
+                    if tls.reality.signature_seed.is_none() {
+                        tls.reality.signature_seed = source.tls.reality.signature_seed.clone();
+                    }
+                    if tls.reality.short_ids.is_empty() {
+                        tls.reality.short_ids = source.tls.reality.short_ids.clone();
+                    }
+                }
+                same(&source.tls.reality, &tls.reality, &[], "REALITY", &members)?;
                 same(
                     &source.tls,
-                    &member.source.tls,
-                    &["server_name"],
+                    &tls,
+                    &["server_name", "reality"],
                     "TLS",
                     &members,
                 )?;
                 if source.core != Core::Xray
+                    && !source.tls.reality.enabled
                     && certificate_name(&source) != certificate_name(&member.source)
                 {
                     return Err(conflict(&members, "这个核心的监听使用一组证书与私钥").into());

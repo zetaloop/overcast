@@ -289,6 +289,7 @@ pub struct Tls {
     pub kernel_rx: Option<bool>,
     pub key_log: Option<String>,
     pub ech: Ech,
+    pub reality: crate::reality::Server,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
@@ -431,6 +432,9 @@ fn edit(
             tls,
             Item::new("listen", "监听".stylized()),
         ]);
+        if existing && inbound.tls.reality.enabled {
+            items.push(Item::new("handshake", "握手资料".stylized()));
+        }
         items.push(if existing {
             Item::new("delete", "删除入站".foreground(AnsiColor::BrightRed))
         } else {
@@ -534,6 +538,41 @@ fn edit(
                 "tls" => edit!(tls),
                 "transport" => edit!(transport),
                 "listen" => edit!(listen),
+                "handshake" => store.load().and_then(|config| {
+                    let source = config
+                        .inbounds
+                        .iter()
+                        .find(|source| source.uuid == inbound.uuid)
+                        .ok_or("入站已被删除")?;
+                    let keys = crate::reality::Keys::resolve(
+                        &source.tls.reality,
+                        config.keys.get(&inbound.uuid),
+                    )?;
+                    let keys = if config.keys.get(&inbound.uuid) == Some(&keys) {
+                        keys
+                    } else {
+                        screen.work(
+                            "生成握手资料",
+                            &format!(" -- {}", inbound.name),
+                            |progress| {
+                                store.update(progress, |config| {
+                                    let source = config
+                                        .inbounds
+                                        .iter()
+                                        .find(|source| source.uuid == inbound.uuid)
+                                        .ok_or("入站已被删除")?;
+                                    let keys = crate::reality::Keys::resolve(
+                                        &source.tls.reality,
+                                        config.keys.get(&inbound.uuid),
+                                    )?;
+                                    config.keys.insert(inbound.uuid, keys.clone());
+                                    Ok(keys)
+                                })
+                            },
+                        )?
+                    };
+                    keys.show(screen)
+                }),
                 "create" => {
                     let result = screen.work(
                         "保存入站",
@@ -707,6 +746,7 @@ fields!(Tls {
     kernel_rx: "内核接收",
     key_log: "密钥日志文件",
     ech: "ECH",
+    reality: "REALITY",
 });
 
 fields!(Ech {

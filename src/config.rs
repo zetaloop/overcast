@@ -34,6 +34,8 @@ pub struct Config {
     pub outbounds: Vec<Outbound>,
     pub rules: Vec<Rule>,
     pub components: BTreeMap<Component, Settings>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<Uuid, crate::reality::Keys>,
 }
 
 impl Config {
@@ -171,7 +173,13 @@ impl Store {
         let previous = config.runtime;
         let result = change(&mut config)?;
         config.validate()?;
+        config
+            .keys
+            .retain(|uuid, _| config.inbounds.iter().any(|inbound| inbound.uuid == *uuid));
         let prepared = native::prepare(self, &config, progress)?;
+        if let Some(prepared) = &prepared {
+            config.keys = prepared.keys.clone();
+        }
         config.runtime = prepared.as_ref().map(|prepared| prepared.id);
         progress.check()?;
         let path = self.directory.join("config.json");

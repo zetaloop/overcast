@@ -241,7 +241,7 @@ fn http(options: &mut Options, output: &mut Map<String, Value>) -> Result<()> {
     )
 }
 
-fn dialer(source: &connection::Network, output: &mut Map<String, Value>) -> Result<()> {
+pub fn dialer(source: &connection::Network, output: &mut Map<String, Value>) -> Result<()> {
     let mut options = Options::new(source)?;
     options.rename(
         output,
@@ -317,7 +317,11 @@ fn client_tls(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Value> {
+    if source.reality.enabled {
+        return super::reality::singbox(source, store);
+    }
     let mut options = Options::new(source)?;
+    options.take("reality");
     let mut output = Map::new();
     options.copy(
         &mut output,
@@ -415,7 +419,19 @@ fn client_tls(
 }
 
 fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
+    if source.tls.reality.enabled {
+        let Protocol::Mixed(protocol) = &source.protocol;
+        if protocol
+            .http
+            .versions
+            .contains(&inbound::HttpVersion::Http3)
+        {
+            return unsupported("REALITY 握手使用 TCP，无法提供 HTTP/3 监听");
+        }
+        return super::reality::server(source);
+    }
     let mut options = Options::new(&source.tls)?;
+    options.take("reality");
     let (certificate, key) = certificate_paths(store, source);
     let mut output = Map::from_iter([
         ("certificate_path".to_owned(), json!(certificate)),

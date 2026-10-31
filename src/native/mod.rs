@@ -2,6 +2,7 @@ mod binding;
 mod listener;
 mod mihomo;
 mod options;
+mod reality;
 mod routing;
 mod singbox;
 mod transport;
@@ -36,6 +37,7 @@ use crate::{
 
 pub struct Prepared {
     pub id: Uuid,
+    pub keys: BTreeMap<Uuid, crate::reality::Keys>,
     directory: TempDir,
 }
 
@@ -141,16 +143,21 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         )?;
         builder.previous = serde_json::from_slice::<State>(&bytes)?.ports;
     }
-    let listeners = listener::build(store, &mut graph, progress)?;
+    let listeners = listener::build(store, &mut graph, &config.keys, progress)?;
     builder.reserved = listeners
         .iter()
         .map(|listener| listener.binding.clone())
         .collect();
     let mut certificates = BTreeSet::new();
+    let keys = reality::prepare(&listeners, &graph, &config.keys, progress)?;
     let step = progress.activity("生成核心配置");
     for (index, listener) in listeners.iter().enumerate() {
         progress.check()?;
-        let inbound = &listener.source;
+        let mut source = listener.source.clone();
+        if source.tls.enabled && source.tls.reality.enabled {
+            keys[&source.uuid].apply(&mut source.tls.reality);
+        }
+        let inbound = &source;
         step.detail(&inbound.name);
         let users: Vec<_> = listener
             .users
@@ -178,7 +185,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
             values
         };
         let service = builder.service(inbound.core, globals);
-        if inbound.tls.enabled {
+        if inbound.tls.enabled && !inbound.tls.reality.enabled {
             certificates.extend(
                 listener
                     .members
@@ -189,6 +196,23 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         let mut tags = Vec::new();
         for (part, mut value) in values.into_iter().enumerate() {
             progress.check()?;
+            if inbound.tls.enabled
+                && inbound.tls.reality.enabled
+                && let Destination::Outbound(uuid) = inbound.tls.reality.outbound
+            {
+                let endpoint = builder.outbound(uuid, inbound.core, graph::Network::Tcp)?;
+                let parent = builder.bridge(service, &endpoint)?;
+                match inbound.core {
+                    Core::SingBox => {
+                        value.get_mut("tls").unwrap()["reality"]["handshake"]["detour"] =
+                            json!(parent)
+                    }
+                    Core::Mihomo => {
+                        value.get_mut("reality-config").unwrap()["proxy"] = json!(parent)
+                    }
+                    Core::Xray => unreachable!(),
+                }
+            }
             let tag = format!("{}-{index}-{part}", inbound.uuid);
             match inbound.core {
                 Core::Xray => {
@@ -198,7 +222,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                     } else {
                         value.insert("port".to_owned(), json!(listener.binding.port_text()));
                     }
-                    if inbound.tls.enabled {
+                    if inbound.tls.enabled && !inbound.tls.reality.enabled {
                         let paths: BTreeSet<_> = listener
                             .members
                             .iter()
@@ -349,7 +373,11 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
     })?;
     progress.check()?;
     step.finish(format!("{} 个核心实例", state.instances.len()));
-    Ok(Some(Prepared { id, directory }))
+    Ok(Some(Prepared {
+        id,
+        directory,
+        keys,
+    }))
 }
 
 impl Builder<'_> {
@@ -696,7 +724,11 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
         Connection::Http(value) => {
             let transport =
                 if core == Core::SingBox && value.http.version == connection::HttpVersion::Http3 {
-                    parent[1] || !value.http.fixed_version && parent[0]
+                    if value.tls.enabled && value.tls.reality.enabled {
+                        !value.http.fixed_version && parent[0]
+                    } else {
+                        parent[1] || !value.http.fixed_version && parent[0]
+                    }
                 } else if core == Core::Xray {
                     value.transport.supported(&value.tls, parent)
                 } else {

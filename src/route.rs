@@ -12,6 +12,7 @@ use crate::{
     Result,
     condition::Condition,
     config::{Config, Store},
+    form::{self, Value},
     geodata::Catalog,
     inbound,
     input::Editor,
@@ -81,6 +82,29 @@ impl Destination {
             Self::Direct => "direct".to_owned(),
             Self::Block => "block".to_owned(),
             Self::Outbound(uuid) => uuid.to_string(),
+        }
+    }
+}
+
+impl Value for Destination {
+    fn text(&self) -> String {
+        match Store::open().and_then(|store| store.load()) {
+            Ok(config) => self.name(&config),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    fn run(
+        &mut self,
+        screen: &mut Screen,
+        _: &Menu<'_>,
+        _: usize,
+        apply: form::Apply<'_, Self>,
+        _: bool,
+    ) -> Result<bool> {
+        match destination(screen, &Store::open()?, *self)? {
+            Some(value) => form::set(screen, self, value, &apply),
+            None => Ok(false),
         }
     }
 }

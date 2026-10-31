@@ -232,10 +232,14 @@ impl Transport {
     }
 
     pub fn supported(&self, tls: &Tls, networks: [bool; 2]) -> bool {
-        networks[usize::from(self.udp(tls.enabled, &tls.alpn))]
+        networks[usize::from(self.udp(tls.enabled && !tls.reality.enabled, &tls.alpn))]
             && match self {
                 Self::XHttp(value) => value.download.as_ref().is_none_or(|download| {
-                    networks[usize::from(download.tls.enabled && download.tls.alpn == ["h3"])]
+                    networks[usize::from(
+                        download.tls.enabled
+                            && !download.tls.reality.enabled
+                            && download.tls.alpn == ["h3"],
+                    )]
                 }),
                 _ => true,
             }

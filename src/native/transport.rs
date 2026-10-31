@@ -166,11 +166,7 @@ fn xhttp(source: &XHttp, inbound: bool, store: &Store) -> Result<Map<String, Val
             stream.insert("sockopt".to_owned(), json!(socket));
         }
         if download.tls.enabled {
-            stream.insert("security".to_owned(), json!("tls"));
-            stream.insert(
-                "tlsSettings".to_owned(),
-                super::xray::client_tls(&download.tls, store)?,
-            );
+            stream.extend(super::xray::security(&download.tls, store)?);
         }
         let params = quic(&download.quic, false)?;
         if !params.is_empty() {

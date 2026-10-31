@@ -87,8 +87,10 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         }
     };
     if let Some(tls) = tls.filter(|tls| tls.enabled) {
-        stream.insert("security".to_owned(), json!("tls"));
-        stream.insert("tlsSettings".to_owned(), client_tls(tls, store)?);
+        if tls.reality.enabled {
+            reality_transport(source.transport().unwrap())?;
+        }
+        stream.extend(security(tls, store)?);
     }
     if let Some(transport) = source.transport() {
         stream.extend(transport::xray(transport, false, store)?);
@@ -105,7 +107,11 @@ pub fn listeners(
     users: &[(String, String)],
     store: &Store,
 ) -> Result<Vec<Map<String, Value>>> {
-    if source.transport.udp(source.tls.enabled, &source.tls.alpn) && source.listen.proxy_protocol {
+    if source.transport.udp(
+        source.tls.enabled && !source.tls.reality.enabled,
+        &source.tls.alpn,
+    ) && source.listen.proxy_protocol
+    {
         return unsupported("XHTTP/3 的 UDP 监听没有 PROXY protocol 支持");
     }
     let mut output = Map::from_iter([
@@ -240,8 +246,17 @@ pub fn listeners(
         stream.insert("sockopt".to_owned(), json!(sockopt));
     }
     if source.tls.enabled {
-        stream.insert("security".to_owned(), json!("tls"));
-        stream.insert("tlsSettings".to_owned(), server_tls(source, store)?);
+        if source.tls.reality.enabled {
+            reality_transport(&source.transport)?;
+            stream.insert("security".to_owned(), json!("reality"));
+            stream.insert(
+                "realitySettings".to_owned(),
+                super::reality::server(source)?,
+            );
+        } else {
+            stream.insert("security".to_owned(), json!("tls"));
+            stream.insert("tlsSettings".to_owned(), server_tls(source, store)?);
+        }
     }
     stream.extend(transport::xray(&source.transport, true, store)?);
     output.insert("settings".to_owned(), json!(settings));
@@ -352,9 +367,31 @@ fn socket(options: &mut Options) -> Result<Map<String, Value>> {
     Ok(output)
 }
 
-pub fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
+pub fn security(source: &connection::Tls, store: &Store) -> Result<Map<String, Value>> {
+    let (kind, name, value) = if source.reality.enabled {
+        ("reality", "realitySettings", super::reality::xray(source)?)
+    } else {
+        ("tls", "tlsSettings", client_tls(source, store)?)
+    };
+    Ok(Map::from_iter([
+        ("security".to_owned(), json!(kind)),
+        (name.to_owned(), value),
+    ]))
+}
+
+fn reality_transport(source: &crate::transport::Transport) -> Result<()> {
+    match source {
+        crate::transport::Transport::Default
+        | crate::transport::Transport::Grpc(_)
+        | crate::transport::Transport::XHttp(_) => Ok(()),
+        _ => unsupported("Xray REALITY 可用于原生 TCP、XHTTP 和 gRPC 传输"),
+    }
+}
+
+fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
     let mut options = Options::new(source)?;
     options.take("enabled");
+    options.take("reality");
     let mut output = Map::new();
     options.copy(&mut output, &["alpn", "fingerprint"]);
     options.rename(
@@ -455,6 +492,7 @@ pub fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
 
 fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
     let mut options = Options::new(&source.tls)?;
+    options.take("reality");
     options.take("enabled");
     let (certificate, key) = certificate_paths(store, source);
     let mut output = Map::from_iter([(
