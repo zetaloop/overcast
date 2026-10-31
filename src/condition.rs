@@ -27,6 +27,48 @@ pub enum Condition {
 }
 
 impl Condition {
+    pub fn scoped(&self, inbound: Uuid, user: Option<Uuid>) -> Self {
+        match self {
+            Self::User(uuid) => {
+                if Some(*uuid) == user {
+                    Self::Always
+                } else {
+                    Self::Never
+                }
+            }
+            Self::Inbound(uuid) => {
+                if *uuid == inbound {
+                    Self::Always
+                } else {
+                    Self::Never
+                }
+            }
+            Self::And(children) | Self::Or(children) => Self::combine(
+                matches!(self, Self::And(_)),
+                children
+                    .iter()
+                    .map(|child| child.scoped(inbound, user))
+                    .collect(),
+            ),
+            _ => self.clone(),
+        }
+    }
+
+    pub fn combine(and: bool, mut children: Vec<Self>) -> Self {
+        let neutral = if and { Self::Always } else { Self::Never };
+        let absorbing = if and { Self::Never } else { Self::Always };
+        if children.contains(&absorbing) {
+            return absorbing;
+        }
+        children.retain(|child| child != &neutral);
+        match children.len() {
+            0 => neutral,
+            1 => children.pop().unwrap(),
+            _ if and => Self::And(children),
+            _ => Self::Or(children),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::Regex(text) => {

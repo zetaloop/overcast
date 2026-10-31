@@ -7,6 +7,7 @@ mod geodata;
 mod graph;
 mod inbound;
 pub mod input;
+mod native;
 mod outbound;
 mod pattern;
 pub mod progress;

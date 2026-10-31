@@ -11,6 +11,7 @@ base64 = "0.23.1"
 flate2 = "1.1.10"
 getrandom = "0.4.3"
 httpdate = "1.0.3"
+humantime = "2.4.0"
 icu_properties = "2.4.0"
 ipnetwork = { version = "0.21.1", features = ["serde"] }
 maxminddb = "0.32.0"
@@ -35,4 +36,4 @@ zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2
 nix = { version = "0.31.3", features = ["user"] }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Networking_WinSock", "Win32_System_Threading"] }

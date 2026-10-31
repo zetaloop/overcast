@@ -491,7 +491,7 @@ pub struct Network {
     pub namespace: Option<String>,
     pub protect_path: Option<String>,
     pub connect_timeout: Option<String>,
-    pub address_strategy: Option<String>,
+    pub address_strategy: Option<AddressStrategy>,
     pub address_port_strategy: Option<String>,
     pub ipv6_only: Option<bool>,
     pub tcp_fast_open: Option<FastOpen>,
@@ -519,6 +519,23 @@ pub struct HappyEyeballs {
     pub delay: Option<String>,
     pub interleave: Option<u32>,
     pub concurrency: Option<u32>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AddressStrategy {
+    #[default]
+    AsIs,
+    Resolve,
+    Ipv4Only,
+    Ipv6Only,
+    PreferIpv4,
+    PreferIpv6,
+    TryIp,
+    TryIpv4,
+    TryIpv6,
+    TryIpv4Ipv6,
+    TryIpv6Ipv4,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -550,6 +567,20 @@ choices!(HttpVersion {
     Http1: "http1" => "HTTP/1.1",
     Http2: "http2" => "HTTP/2",
     Http3: "http3" => "HTTP/3",
+});
+
+choices!(AddressStrategy {
+    AsIs: "as-is" => "按需解析",
+    Resolve: "resolve" => "解析为 IP",
+    Ipv4Only: "ipv4-only" => "仅 IPv4",
+    Ipv6Only: "ipv6-only" => "仅 IPv6",
+    PreferIpv4: "prefer-ipv4" => "优先 IPv4",
+    PreferIpv6: "prefer-ipv6" => "优先 IPv6",
+    TryIp: "try-ip" => "尝试解析为 IP",
+    TryIpv4: "try-ipv4" => "尝试 IPv4",
+    TryIpv6: "try-ipv6" => "尝试 IPv6",
+    TryIpv4Ipv6: "try-ipv4-ipv6" => "依次尝试 IPv4、IPv6",
+    TryIpv6Ipv4: "try-ipv6-ipv4" => "依次尝试 IPv6、IPv4",
 });
 
 fields!(Proxy {

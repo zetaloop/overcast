@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, Ipv6Addr},
     path::Path,
     rc::Rc,
@@ -43,8 +43,7 @@ impl Inbound {
             name: String::new(),
             address: String::new(),
             ports: match kind {
-                Kind::Http => "8080",
-                Kind::Socks => "1080",
+                Kind::Mixed => "1080",
             }
             .to_owned(),
             core: Core::default(),
@@ -75,6 +74,15 @@ impl Inbound {
         {
             return Err("监听地址需要填写 IP、localhost 或套接字路径".into());
         }
+        self.ports()?;
+        if let Some(credentials) = &self.credentials {
+            user::password(&credentials.password)?;
+        }
+        Ok(())
+    }
+
+    pub fn ports(&self) -> Result<BTreeSet<u16>> {
+        let mut ports = BTreeSet::new();
         for range in self.ports.split(',') {
             let range = range.trim();
             let (first, last) = range.split_once('-').unwrap_or((range, range));
@@ -89,11 +97,9 @@ impl Inbound {
             if first == 0 || last < first {
                 return Err("端口需要在 1～65535 之间，范围按从小到大填写".into());
             }
+            ports.extend(first..=last);
         }
-        if let Some(credentials) = &self.credentials {
-            user::password(&credentials.password)?;
-        }
-        Ok(())
+        Ok(ports)
     }
 
     pub(crate) fn summary(&self) -> String {
@@ -113,7 +119,7 @@ fn is_ip(value: &str) -> bool {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Core {
     Xray,
@@ -125,15 +131,13 @@ pub enum Core {
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     #[default]
-    Http,
-    Socks,
+    Mixed,
 }
 
 impl Kind {
     fn protocol(self) -> Protocol {
         match self {
-            Self::Http => Protocol::Http(Http::default()),
-            Self::Socks => Protocol::Socks(Socks::default()),
+            Self::Mixed => Protocol::Mixed(Mixed::default()),
         }
     }
 }
@@ -141,33 +145,24 @@ impl Kind {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Protocol {
-    Http(Http),
-    Socks(Socks),
+    Mixed(Mixed),
 }
 
 impl Protocol {
     fn kind(&self) -> Kind {
         match self {
-            Self::Http(_) => Kind::Http,
-            Self::Socks(_) => Kind::Socks,
+            Self::Mixed(_) => Kind::Mixed,
         }
     }
 
     fn edit(&mut self, screen: &mut Screen, apply: form::Apply<'_, Self>) -> Result<()> {
         let title = self.kind().text();
         match self {
-            Self::Http(value) => form::edit(
+            Self::Mixed(value) => form::edit(
                 screen,
                 &title,
                 value,
-                Rc::new(move |value, screen| apply(&Self::Http(value.clone()), screen)),
-                false,
-            ),
-            Self::Socks(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Socks(value.clone()), screen)),
+                Rc::new(move |value, screen| apply(&Self::Mixed(value.clone()), screen)),
                 false,
             ),
         }
@@ -200,12 +195,32 @@ pub enum HttpVersion {
     Http3,
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Mixed {
+    pub http: Http,
+    pub socks: Socks,
+    pub udp: bool,
+    pub user_level: Option<u32>,
+}
+
+impl Default for Mixed {
+    fn default() -> Self {
+        Self {
+            http: Http::default(),
+            socks: Socks::default(),
+            udp: true,
+            user_level: None,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Http {
+    pub enabled: bool,
     pub versions: Vec<HttpVersion>,
     pub transparent: bool,
-    pub user_level: Option<u32>,
     pub idle_timeout: Option<String>,
     pub keep_alive: Option<String>,
     pub stream_receive_window: Option<u64>,
@@ -215,20 +230,35 @@ pub struct Http {
     pub disable_path_mtu_discovery: bool,
 }
 
+impl Default for Http {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            versions: Vec::new(),
+            transparent: false,
+            idle_timeout: None,
+            keep_alive: None,
+            stream_receive_window: None,
+            connection_receive_window: None,
+            max_concurrent_streams: None,
+            initial_packet_size: None,
+            disable_path_mtu_discovery: false,
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Socks {
-    pub udp: bool,
+    pub enabled: bool,
     pub udp_address: Option<String>,
-    pub user_level: Option<u32>,
 }
 
 impl Default for Socks {
     fn default() -> Self {
         Self {
-            udp: true,
+            enabled: true,
             udp_address: None,
-            user_level: None,
         }
     }
 }
@@ -602,8 +632,7 @@ choices!(Core {
 });
 
 choices!(Kind {
-    Http: "http" => "HTTP",
-    Socks: "socks" => "SOCKS",
+    Mixed: "mixed" => "HTTP/SOCKS",
 });
 
 choices!(HttpVersion {
@@ -625,10 +654,17 @@ fields!(Credentials {
     password: "主密码",
 });
 
+fields!(Mixed {
+    http: "HTTP",
+    socks: "SOCKS",
+    udp: "UDP",
+    user_level: "用户等级",
+});
+
 fields!(Http {
+    enabled: "启用",
     versions: "版本",
     transparent: "透明请求",
-    user_level: "用户等级",
     idle_timeout: "空闲超时",
     keep_alive: "保活间隔",
     stream_receive_window: "流接收窗口",
@@ -639,9 +675,8 @@ fields!(Http {
 });
 
 fields!(Socks {
-    udp: "UDP",
+    enabled: "启用",
     udp_address: "UDP 公布地址",
-    user_level: "用户等级",
 });
 
 fields!(Tls {

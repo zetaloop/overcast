@@ -7,18 +7,66 @@ use crate::{
     Result,
     condition::Condition,
     config::{Config, Store},
-    inbound::{Core, Inbound},
+    inbound::{Core, Inbound, Protocol},
     progress::Progress,
     route::{Destination, Rule},
     target::Targets,
+    user::User,
 };
 
-pub fn validate(store: &Store, config: &Config, progress: &Progress) -> Result<()> {
+pub struct Graph<'a> {
+    pub targets: Targets,
+    pub entries: Vec<Entry<'a>>,
+}
+
+pub struct Entry<'a> {
+    pub inbound: &'a Inbound,
+    pub users: Vec<&'a User>,
+    pub accounts: Vec<Account<'a>>,
+}
+
+pub struct Account<'a> {
+    pub user: Option<&'a User>,
+    pub network: Network,
+    pub rules: Vec<Rule>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    Tcp,
+    Udp,
+}
+
+impl Network {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+
+    pub fn identity(self, inbound: &Inbound) -> bool {
+        !(self == Self::Udp && inbound.core == Core::Mihomo)
+    }
+}
+
+pub fn build<'a>(
+    store: &Store,
+    config: &'a Config,
+    progress: &Progress,
+    mut reachable: impl FnMut(Core, Destination, Network) -> Result<bool>,
+) -> Result<Graph<'a>> {
     if config.rules.is_empty()
         || config.inbounds.is_empty()
         || config.users.is_empty() && config.inbounds.iter().all(|inbound| inbound.users)
     {
-        return Ok(());
+        return Ok(Graph {
+            targets: Targets {
+                domains: Vec::new(),
+                ips: Vec::new(),
+            },
+            entries: Vec::new(),
+        });
     }
     let mut conditions = Vec::new();
     let mut seen = HashSet::new();
@@ -28,64 +76,109 @@ pub fn validate(store: &Store, config: &Config, progress: &Progress) -> Result<(
         pending.extend(&rule.children);
     }
     let targets = Targets::load(store, conditions, progress)?;
-    let mut graph = Graph::new(&targets, config, progress)?;
+    let mut graph = Analysis::new(&targets, config, progress)?;
     let step = progress.activity("分析分流");
-    let mut active = 0;
+    let mut entries = Vec::new();
     for inbound in &config.inbounds {
         progress.check()?;
         step.detail(&inbound.name);
-        if inbound.users {
-            let mut reachable = false;
-            for user in &config.users {
-                let routes = graph.routes(inbound, Some(user.uuid))?;
-                reachable |= routes
-                    .iter()
-                    .any(|route| route.destination != Destination::Block);
+        if inbound.users && config.users.is_empty() {
+            continue;
+        }
+        let Protocol::Mixed(protocol) = &inbound.protocol;
+        if !protocol.http.enabled && !protocol.socks.enabled {
+            continue;
+        }
+        let mut accounts = Vec::new();
+        let mut users = HashSet::new();
+        for network in [Network::Tcp, Network::Udp] {
+            if network == Network::Udp
+                && !match &inbound.protocol {
+                    Protocol::Mixed(value) => {
+                        value.udp
+                            && (value.socks.enabled
+                                || value.http.enabled && inbound.core == Core::SingBox)
+                    }
+                }
+            {
+                continue;
             }
-            active += usize::from(reachable);
-        } else {
-            let anonymous = graph.routes(inbound, None)?;
-            for user in &config.users {
-                let authenticated = graph.routes(inbound, Some(user.uuid))?;
-                let destinations: HashSet<_> = anonymous
-                    .iter()
-                    .chain(&authenticated)
-                    .map(|route| route.destination)
-                    .filter(|destination| *destination != Destination::Block)
-                    .collect();
-                for destination in destinations {
-                    let before = graph.outcome(&anonymous, destination);
-                    let after = graph.outcome(&authenticated, destination);
-                    let added = graph.all(&[!before, after]);
-                    let removed = graph.all(&[before, !after]);
-                    let changed = graph.any(&[added, removed]);
-                    if graph.possible(changed, inbound.core)? {
-                        for route in anonymous.iter().chain(&authenticated) {
-                            let affected = graph.all(&[route.condition, changed]);
-                            if route.destination == destination
-                                && graph.possible(affected, inbound.core)?
-                            {
-                                return Err(format!(
-                                    "入站 {} 未提供用户身份，分流规则 {} 的结果依赖用户 {}",
-                                    inbound.name,
-                                    location(&route.path),
-                                    user.name,
-                                )
-                                .into());
+            if inbound.users && network.identity(inbound) {
+                for user in &config.users {
+                    let routes = graph.routes(inbound, Some(user.uuid), network, &mut reachable)?;
+                    if routes
+                        .iter()
+                        .any(|route| route.destination != Destination::Block)
+                    {
+                        users.insert(user.uuid);
+                        accounts.push(Account {
+                            user: Some(user),
+                            network,
+                            rules: materialize(routes, config, inbound.uuid, Some(user.uuid)),
+                        });
+                    }
+                }
+            } else {
+                let anonymous = graph.routes(inbound, None, network, &mut reachable)?;
+                for user in &config.users {
+                    let authenticated =
+                        graph.routes(inbound, Some(user.uuid), network, &mut reachable)?;
+                    let destinations: HashSet<_> = anonymous
+                        .iter()
+                        .chain(&authenticated)
+                        .map(|route| route.destination)
+                        .filter(|destination| *destination != Destination::Block)
+                        .collect();
+                    for destination in destinations {
+                        let before = graph.outcome(&anonymous, destination);
+                        let after = graph.outcome(&authenticated, destination);
+                        let added = graph.all(&[!before, after]);
+                        let removed = graph.all(&[before, !after]);
+                        let changed = graph.any(&[added, removed]);
+                        if graph.possible(changed, inbound.core)? {
+                            for route in anonymous.iter().chain(&authenticated) {
+                                let affected = graph.all(&[route.condition, changed]);
+                                if route.destination == destination
+                                    && graph.possible(affected, inbound.core)?
+                                {
+                                    return Err(format!(
+                                        "入站 {} 的 {} 流量未提供用户身份，分流规则 {} 的结果依赖用户 {}",
+                                        inbound.name, network.name().to_uppercase(), location(&route.path), user.name,
+                                    ).into());
+                                }
                             }
                         }
                     }
                 }
-            }
-            active += usize::from(
-                anonymous
+                if anonymous
                     .iter()
-                    .any(|route| route.destination != Destination::Block),
-            );
+                    .any(|route| route.destination != Destination::Block)
+                {
+                    if inbound.users {
+                        users.extend(config.users.iter().map(|user| user.uuid));
+                    }
+                    accounts.push(Account {
+                        user: None,
+                        network,
+                        rules: materialize(anonymous, config, inbound.uuid, None),
+                    });
+                }
+            }
+        }
+        if !accounts.is_empty() {
+            entries.push(Entry {
+                inbound,
+                users: config
+                    .users
+                    .iter()
+                    .filter(|user| users.contains(&user.uuid))
+                    .collect(),
+                accounts,
+            });
         }
     }
-    step.finish(format!("{active} 个入口具有可转发路径"));
-    Ok(())
+    step.finish(format!("{} 个入口具有可转发路径", entries.len()));
+    Ok(Graph { targets, entries })
 }
 
 struct Route {
@@ -94,7 +187,7 @@ struct Route {
     destination: Destination,
 }
 
-struct Graph<'a> {
+struct Analysis<'a> {
     solver: Solver<'static>,
     truth: Lit,
     single: Lit,
@@ -103,7 +196,7 @@ struct Graph<'a> {
     progress: &'a Progress,
 }
 
-impl<'a> Graph<'a> {
+impl<'a> Analysis<'a> {
     fn new(targets: &Targets, config: &'a Config, progress: &'a Progress) -> Result<Self> {
         let mut solver = Solver::new();
         let truth = solver.new_lit();
@@ -262,7 +355,13 @@ impl<'a> Graph<'a> {
         }
     }
 
-    fn routes(&mut self, inbound: &Inbound, user: Option<Uuid>) -> Result<Vec<Route>> {
+    fn routes(
+        &mut self,
+        inbound: &Inbound,
+        user: Option<Uuid>,
+        network: Network,
+        reachable_destination: &mut impl FnMut(Core, Destination, Network) -> Result<bool>,
+    ) -> Result<Vec<Route>> {
         let mut routes = Vec::new();
         self.flatten(
             &self.config.rules,
@@ -290,6 +389,9 @@ impl<'a> Graph<'a> {
                         location(&route.path),
                     )
                     .into());
+                }
+                if !reachable_destination(inbound.core, route.destination, network)? {
+                    route.destination = Destination::Block;
                 }
                 route.condition = condition;
                 reachable.push(route);
@@ -319,6 +421,31 @@ impl<'a> Graph<'a> {
         self.progress.check()?;
         Ok(result)
     }
+}
+
+fn materialize(
+    routes: Vec<Route>,
+    config: &Config,
+    inbound: Uuid,
+    user: Option<Uuid>,
+) -> Vec<Rule> {
+    routes
+        .into_iter()
+        .map(|route| {
+            let mut rules = &config.rules;
+            let mut conditions = Vec::new();
+            for index in route.path {
+                let rule = &rules[index];
+                conditions.push(rule.condition.scoped(inbound, user));
+                rules = &rule.children;
+            }
+            Rule {
+                condition: Condition::combine(true, conditions),
+                destination: route.destination,
+                children: Vec::new(),
+            }
+        })
+        .collect()
 }
 
 fn collect(condition: &Condition, conditions: &mut Vec<Condition>, seen: &mut HashSet<Condition>) {

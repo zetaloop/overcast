@@ -11,12 +11,13 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
+use uuid::Uuid;
 
 use crate::{
     Result,
     component::{Component, Settings},
-    graph,
     inbound::Inbound,
+    native,
     outbound::Outbound,
     progress::Progress,
     route::Rule,
@@ -26,6 +27,8 @@ use crate::{
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Uuid>,
     pub users: Vec<User>,
     pub inbounds: Vec<Inbound>,
     pub outbounds: Vec<Outbound>,
@@ -165,9 +168,11 @@ impl Store {
         lock.lock()?;
         progress.check()?;
         let mut config = self.load()?;
+        let previous = config.runtime;
         let result = change(&mut config)?;
         config.validate()?;
-        graph::validate(self, &config, progress)?;
+        let prepared = native::prepare(self, &config, progress)?;
+        config.runtime = prepared.as_ref().map(|prepared| prepared.id);
         progress.check()?;
         let path = self.directory.join("config.json");
         self.write(&path, |file| {
@@ -175,6 +180,20 @@ impl Store {
             file.write_all(b"\n")?;
             Ok(())
         })?;
+        if let Some(prepared) = prepared {
+            prepared.keep();
+        }
+        if let Some(previous) = previous.filter(|previous| Some(*previous) != config.runtime) {
+            let directory = self.directory.join("runtime").join(previous.to_string());
+            if let Err(error) = fs::remove_dir_all(&directory)
+                && error.kind() != ErrorKind::NotFound
+            {
+                progress.record(
+                    "清理旧配置失败",
+                    &format!("{}：{error}", directory.display()),
+                );
+            }
+        }
         Ok(result)
     }
 

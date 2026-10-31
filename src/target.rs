@@ -19,19 +19,14 @@ use crate::{
     Result,
     condition::Condition,
     config::Store,
-    geodata::{Catalog, DomainType, Geoips, Sites},
+    geodata::{Catalog, Domain, DomainType, Geoips, Sites},
     pattern,
     progress::Progress,
 };
 
 pub struct Targets {
-    pub domains: Vec<(Condition, Hir)>,
-    pub ips: Vec<(Condition, Networks)>,
-}
-
-pub struct Networks {
-    pub prefixes: Vec<IpNetwork>,
-    pub reverse: bool,
+    pub domains: Vec<(Condition, Vec<Domain>)>,
+    pub ips: Vec<(Condition, Vec<IpNetwork>)>,
 }
 
 impl Targets {
@@ -91,28 +86,16 @@ impl Targets {
         for condition in conditions {
             progress.check()?;
             match &condition {
-                Condition::Ip(network) => ips.push((
-                    condition.clone(),
-                    Networks {
-                        prefixes: vec![*network],
-                        reverse: false,
-                    },
-                )),
+                Condition::Ip(network) => ips.push((condition.clone(), vec![*network])),
                 Condition::Asn(number) => {
-                    ips.push((
-                        condition.clone(),
-                        Networks {
-                            prefixes: asns.remove(number).unwrap(),
-                            reverse: false,
-                        },
-                    ));
+                    ips.push((condition.clone(), asns.remove(number).unwrap()));
                 }
                 Condition::Geoip(name) => {
                     let data = geoips
                         .iter()
                         .find(|data| data.name.eq_ignore_ascii_case(name))
                         .ok_or_else(|| format!("找不到 GeoIP 规则：{name}"))?;
-                    let prefixes = data
+                    let mut prefixes = data
                         .networks
                         .iter()
                         .map(|cidr| {
@@ -125,14 +108,11 @@ impl Targets {
                             };
                             Ok(IpNetwork::new(address, cidr.prefix.try_into()?)?)
                         })
-                        .collect::<Result<_>>()?;
-                    ips.push((
-                        condition.clone(),
-                        Networks {
-                            prefixes,
-                            reverse: data.reverse,
-                        },
-                    ));
+                        .collect::<Result<Vec<_>>>()?;
+                    if data.reverse {
+                        prefixes = complement(&prefixes)?;
+                    }
+                    ips.push((condition.clone(), prefixes));
                 }
                 Condition::Site(name) => {
                     let mut parts = name.split('@');
@@ -142,7 +122,7 @@ impl Targets {
                         .iter()
                         .find(|site| site.name.eq_ignore_ascii_case(tag))
                         .ok_or_else(|| format!("找不到 GeoSite 规则：{name}"))?;
-                    let mut expressions = Vec::new();
+                    let mut entries = Vec::new();
                     for entry in &site.domains {
                         progress.check()?;
                         if attributes.iter().all(|attribute| {
@@ -151,18 +131,35 @@ impl Targets {
                                 .iter()
                                 .any(|item| item.key.eq_ignore_ascii_case(attribute))
                         }) {
-                            let value = match DomainType::try_from(entry.kind)? {
-                                DomainType::Keyword => Condition::Keyword(entry.value.clone()),
-                                DomainType::Regex => Condition::Regex(entry.value.clone()),
-                                DomainType::Suffix => Condition::Suffix(entry.value.clone()),
-                                DomainType::Domain => Condition::Domain(entry.value.clone()),
-                            };
-                            expressions.push(domain(&value)?);
+                            let mut entry = entry.clone();
+                            entry.attributes.clear();
+                            if DomainType::try_from(entry.kind)? != DomainType::Regex {
+                                entry.value = lowercase(&entry.value);
+                            }
+                            entries.push(entry);
                         }
                     }
-                    domains.push((condition.clone(), Hir::alternation(expressions)));
+                    domains.push((condition.clone(), entries));
                 }
-                _ => domains.push((condition.clone(), domain(&condition)?)),
+                _ => {
+                    let (kind, value) = match &condition {
+                        Condition::Domain(value) => (DomainType::Domain, value),
+                        Condition::Suffix(value) => (DomainType::Suffix, value),
+                        Condition::Keyword(value) => (DomainType::Keyword, value),
+                        Condition::Regex(value) => (DomainType::Regex, value),
+                        _ => return Err("目标条件的类型不正确".into()),
+                    };
+                    let entry = Domain {
+                        kind: kind as i32,
+                        value: if kind == DomainType::Regex {
+                            value.clone()
+                        } else {
+                            lowercase(value)
+                        },
+                        attributes: Vec::new(),
+                    };
+                    domains.push((condition.clone(), vec![entry]));
+                }
             }
         }
         step.finish(format!(
@@ -193,15 +190,17 @@ impl Targets {
                 ClassUnicodeRange::new(char::MIN, char::MAX),
             ])))),
         });
-        patterns.extend(self.domains.iter().map(|(_, expression)| {
-            Hir::concat(vec![
+        for (_, entries) in &self.domains {
+            let expression =
+                Hir::alternation(entries.iter().map(domain).collect::<Result<Vec<_>>>()?);
+            patterns.push(Hir::concat(vec![
                 Hir::look(Look::Start),
                 any.clone(),
-                expression.clone(),
+                expression,
                 any.clone(),
                 Hir::look(Look::End),
-            ])
-        }));
+            ]));
+        }
         let nfa = thompson::Compiler::new().build_many_from_hir(&patterns)?;
         let dfa = dense::Builder::new()
             .configure(
@@ -261,7 +260,7 @@ impl Targets {
             let mut events: BTreeMap<u128, Vec<(usize, bool)>> = BTreeMap::new();
             events.entry(0).or_default();
             for (index, (_, networks)) in self.ips.iter().enumerate() {
-                for prefix in &networks.prefixes {
+                for prefix in networks {
                     progress.check()?;
                     let (low, high) = match prefix {
                         IpNetwork::V4(network) if !ipv6 => (
@@ -290,13 +289,7 @@ impl Targets {
                         counts[index] -= 1;
                     }
                 }
-                classes.insert(
-                    counts
-                        .iter()
-                        .zip(&self.ips)
-                        .map(|(&count, (_, networks))| (count != 0) != networks.reverse)
-                        .collect(),
-                );
+                classes.insert(counts.iter().map(|&count| count != 0).collect());
             }
         }
         step.finish(format!("{} 种匹配组合", classes.len()));
@@ -304,31 +297,96 @@ impl Targets {
     }
 }
 
-fn domain(condition: &Condition) -> Result<Hir> {
-    let literal = |value: &str| {
-        Hir::literal(
-            value
-                .chars()
-                .map(|c| c.to_lowercase().next().unwrap())
-                .collect::<String>()
-                .into_bytes(),
-        )
-    };
-    Ok(match condition {
-        Condition::Domain(value) => Hir::concat(vec![
+fn domain(entry: &Domain) -> Result<Hir> {
+    let literal = || Hir::literal(entry.value.as_bytes());
+    Ok(match DomainType::try_from(entry.kind)? {
+        DomainType::Domain => Hir::concat(vec![
             Hir::look(Look::Start),
-            literal(value),
+            literal(),
             Hir::look(Look::End),
         ]),
-        Condition::Suffix(value) => Hir::concat(vec![
+        DomainType::Suffix => Hir::concat(vec![
             Hir::alternation(vec![Hir::look(Look::Start), Hir::literal(*b".")]),
-            literal(value),
+            literal(),
             Hir::look(Look::End),
         ]),
-        Condition::Keyword(value) => literal(value),
-        Condition::Regex(value) => pattern::parse(value)?,
-        _ => return Err("域名条件的类型不正确".into()),
+        DomainType::Keyword => literal(),
+        DomainType::Regex => pattern::parse(&entry.value)?,
     })
+}
+
+fn lowercase(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap())
+        .collect()
+}
+
+fn complement(prefixes: &[IpNetwork]) -> Result<Vec<IpNetwork>> {
+    let mut result = Vec::new();
+    for ipv6 in [false, true] {
+        let maximum = if ipv6 {
+            u128::MAX
+        } else {
+            u128::from(u32::MAX)
+        };
+        let mut ranges: Vec<_> = prefixes
+            .iter()
+            .filter_map(|prefix| match prefix {
+                IpNetwork::V4(network) if !ipv6 => Some((
+                    u128::from(u32::from(network.network())),
+                    u128::from(u32::from(network.broadcast())),
+                )),
+                IpNetwork::V6(network) if ipv6 => Some((
+                    u128::from(network.network()),
+                    u128::from(network.broadcast()),
+                )),
+                _ => None,
+            })
+            .collect();
+        ranges.sort_unstable();
+        let mut cursor = Some(0);
+        let mut gaps = Vec::new();
+        for (first, last) in ranges {
+            let Some(next) = cursor else { break };
+            if first > next {
+                gaps.push((next, first - 1));
+            }
+            if last >= next {
+                cursor = last.checked_add(1);
+            }
+        }
+        if let Some(next) = cursor.filter(|next| *next <= maximum) {
+            gaps.push((next, maximum));
+        }
+        let bits = if ipv6 { 128 } else { 32 };
+        for (mut first, last) in gaps {
+            loop {
+                let remaining = match (last - first).checked_add(1) {
+                    Some(length) => length.ilog2(),
+                    None => 128,
+                };
+                let size = first.trailing_zeros().min(bits).min(remaining);
+                let address = if ipv6 {
+                    IpAddr::V6(Ipv6Addr::from(first))
+                } else {
+                    IpAddr::V4(Ipv4Addr::from(u32::try_from(first)?))
+                };
+                result.push(IpNetwork::new(address, (bits - size).try_into()?)?);
+                if size == 128 {
+                    break;
+                }
+                let Some(next) = first
+                    .checked_add(1u128 << size)
+                    .filter(|next| *next <= last)
+                else {
+                    break;
+                };
+                first = next;
+            }
+        }
+    }
+    Ok(result)
 }
 
 static LOWERCASE: LazyLock<Hir> = LazyLock::new(|| {

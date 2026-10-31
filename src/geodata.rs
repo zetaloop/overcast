@@ -197,7 +197,7 @@ pub struct Site {
     pub domains: Vec<Domain>,
 }
 
-#[derive(Message)]
+#[derive(Clone, Message)]
 pub struct Domain {
     #[prost(enumeration = "DomainType", tag = "1")]
     pub kind: i32,
@@ -216,7 +216,7 @@ pub enum DomainType {
     Domain = 3,
 }
 
-#[derive(Message)]
+#[derive(Clone, Message)]
 pub struct Attribute {
     #[prost(string, tag = "1")]
     pub key: String,
