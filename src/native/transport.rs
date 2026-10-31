@@ -850,7 +850,7 @@ fn ranges(
     Ok(())
 }
 
-fn range(text: &str, unit: Option<Duration>) -> Result<Value> {
+pub(super) fn range(text: &str, unit: Option<Duration>) -> Result<Value> {
     let text = text.trim();
     let (first, last) = text
         .char_indices()

@@ -60,7 +60,7 @@ pub struct ClientOptions {
 #[serde(default, deny_unknown_fields)]
 pub struct Server {
     pub flow: Flow,
-    pub encryption: Option<String>,
+    pub encryption: Option<crate::encryption::Server>,
     pub user_level: Option<u32>,
     pub padding: Vec<u32>,
     pub fallbacks: Vec<Fallback>,

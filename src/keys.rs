@@ -1,0 +1,113 @@
+use serde::{Deserialize, Serialize};
+use termina::style::StyleExt;
+
+use crate::{
+    Result,
+    inbound::{Inbound, Protocol},
+    tui::{Action, Item, Menu, Screen},
+};
+
+#[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Keys {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reality: Option<crate::reality::Keys>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<crate::encryption::Keys>,
+}
+
+impl Keys {
+    pub fn needed(source: &Inbound) -> bool {
+        source.tls.enabled && source.tls.reality.enabled
+            || matches!(&source.protocol, Protocol::Vless(value) if value.encryption.is_some())
+    }
+
+    pub fn resolve(source: &Inbound, previous: Option<&Self>) -> Result<Self> {
+        let mut keys = previous.cloned().unwrap_or_default();
+        if source.tls.enabled && source.tls.reality.enabled {
+            keys.reality = Some(crate::reality::Keys::resolve(
+                &source.tls.reality,
+                keys.reality.as_ref(),
+            )?);
+        }
+        if let Protocol::Vless(value) = &source.protocol
+            && let Some(encryption) = &value.encryption
+        {
+            keys.encryption = Some(crate::encryption::Keys::resolve(
+                encryption,
+                keys.encryption.as_ref(),
+            )?);
+        }
+        Ok(keys)
+    }
+
+    pub fn apply(&self, source: &mut Inbound) {
+        if source.tls.enabled
+            && source.tls.reality.enabled
+            && let Some(keys) = &self.reality
+        {
+            keys.apply(&mut source.tls.reality);
+        }
+        if let Protocol::Vless(value) = &mut source.protocol
+            && let Some(encryption) = &mut value.encryption
+            && let Some(keys) = &self.encryption
+        {
+            encryption.private_keys = keys.private_keys.clone();
+        }
+    }
+
+    pub fn show(&self, source: &Inbound, screen: &mut Screen) -> Result<()> {
+        let mut values = Vec::new();
+        if source.tls.enabled
+            && source.tls.reality.enabled
+            && let Some(keys) = &self.reality
+        {
+            values.extend(keys.values());
+        }
+        if let Protocol::Vless(value) = &source.protocol
+            && let Some(encryption) = &value.encryption
+            && let Some(keys) = &self.encryption
+        {
+            let mut encryption = encryption.clone();
+            encryption.private_keys = keys.private_keys.clone();
+            values.push((
+                "encryption",
+                "客户端加密参数",
+                crate::native::encryption::client(&encryption, keys),
+            ));
+            values.push((
+                "decryption",
+                "服务端解密参数",
+                crate::native::encryption::server(&encryption)?,
+            ));
+        }
+        let mut items: Vec<_> = values
+            .iter()
+            .map(|(key, name, value)| {
+                let mut item = Item::new(*key, name.stylized());
+                item.value = value.clone();
+                item
+            })
+            .collect();
+        items.push(Item::new("back", "返回".stylized()));
+        let menu = Menu {
+            title: "握手资料",
+            heading: "",
+            items: &items,
+            help: "方向键 选择\n回车键 复制\nEsc 返回",
+        };
+        let mut selected = 0;
+        let mut notice = "";
+        loop {
+            match screen.select(&menu, &mut selected, notice)? {
+                Action::Back => return Ok(()),
+                Action::Select if selected == values.len() => return Ok(()),
+                Action::Select => {
+                    screen.copy(&values[selected].2)?;
+                    notice = "已复制";
+                }
+                _ => {}
+            }
+        }
+    }
+}

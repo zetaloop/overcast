@@ -87,10 +87,36 @@ pub struct Listener {
     pub binding: Binding,
 }
 
+pub struct Group<'a> {
+    pub entries: BTreeSet<usize>,
+    pub listeners: Vec<&'a Listener>,
+}
+
+pub fn related<'a>(
+    listeners: impl Iterator<Item = &'a Listener>,
+    progress: &Progress,
+) -> Result<Vec<Group<'a>>> {
+    let mut groups: Vec<Group<'a>> = Vec::new();
+    for listener in listeners {
+        progress.check()?;
+        let mut entries: BTreeSet<_> = listener.members.iter().map(|member| member.entry).collect();
+        let mut listeners = vec![listener];
+        let connected: Vec<_> = groups
+            .extract_if(.., |group| !group.entries.is_disjoint(&entries))
+            .collect();
+        for mut group in connected {
+            entries.extend(group.entries);
+            listeners.append(&mut group.listeners);
+        }
+        groups.push(Group { entries, listeners });
+    }
+    Ok(groups)
+}
+
 pub fn build(
     store: &Store,
     graph: &mut Graph<'_>,
-    keys: &BTreeMap<Uuid, crate::reality::Keys>,
+    keys: &BTreeMap<Uuid, crate::keys::Keys>,
     progress: &Progress,
 ) -> Result<Vec<Listener>> {
     let step = progress.activity("分配监听资源");
@@ -99,7 +125,10 @@ pub fn build(
         progress.check()?;
         let mut source = entry.inbound.clone();
         if source.tls.enabled && source.tls.reality.enabled {
-            if let Some(keys) = keys.get(&source.uuid) {
+            if let Some(keys) = keys
+                .get(&source.uuid)
+                .and_then(|keys| keys.reality.as_ref())
+            {
                 if source.tls.reality.private_key.is_none() {
                     source.tls.reality.private_key = Some(keys.private_key.clone());
                 }
@@ -128,6 +157,16 @@ pub fn build(
             }
         } else {
             source.tls.reality = crate::reality::Server::default();
+        }
+        if let Protocol::Vless(value) = &mut source.protocol
+            && let Some(encryption) = &mut value.encryption
+            && encryption.private_keys.is_empty()
+            && let Some(keys) = keys
+                .get(&source.uuid)
+                .and_then(|keys| keys.encryption.as_ref())
+            && keys.matches(encryption.authentication)
+        {
+            encryption.private_keys = keys.private_keys.clone();
         }
         step.detail(&source.name);
         if source.listen.address == "localhost" {
@@ -442,7 +481,22 @@ pub fn build(
                     }
                 }
                 (Protocol::Vless(current), Protocol::Vless(other)) => {
-                    same(current, other, &[], "VLESS", &members)?
+                    same(current, other, &["encryption"], "VLESS", &members)?;
+                    match (&mut current.encryption, &other.encryption) {
+                        (None, None) => {}
+                        (Some(current), Some(other)) => {
+                            let mut other = other.clone();
+                            current.inherit(&other);
+                            other.inherit(current);
+                            if current.authentication != other.authentication
+                                || super::encryption::server(current)?
+                                    != super::encryption::server(&other)?
+                            {
+                                return Err(conflict(&members, "VLESS 加密参数不同").into());
+                            }
+                        }
+                        _ => return Err(conflict(&members, "VLESS 加密参数不同").into()),
+                    }
                 }
                 _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
             }

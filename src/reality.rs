@@ -1,14 +1,7 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use termina::style::StyleExt;
 
-use crate::{
-    Result,
-    connection::Network,
-    form::fields,
-    route::Destination,
-    tui::{Action, Item, Menu, Screen},
-};
+use crate::{Result, connection::Network, form::fields, route::Destination};
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -86,7 +79,7 @@ pub struct Keys {
 }
 
 impl Keys {
-    pub fn show(&self, screen: &mut Screen) -> Result<()> {
+    pub fn values(&self) -> Vec<(&'static str, &'static str, String)> {
         let mut values = vec![
             ("public-key", "公钥", self.public_key.clone()),
             ("short-ids", "短标识", self.short_ids.join(",")),
@@ -98,34 +91,7 @@ impl Keys {
         if let Some(value) = &self.signature_seed {
             values.push(("signature-seed", "签名种子", value.clone()));
         }
-        let mut items: Vec<_> = values
-            .iter()
-            .map(|(key, name, value)| {
-                let mut item = Item::new(*key, name.stylized());
-                item.value = value.clone();
-                item
-            })
-            .collect();
-        items.push(Item::new("back", "返回".stylized()));
-        let menu = Menu {
-            title: "握手资料",
-            heading: "",
-            items: &items,
-            help: "方向键 选择\n回车键 复制\nEsc 返回",
-        };
-        let mut selected = 0;
-        let mut notice = "";
-        loop {
-            match screen.select(&menu, &mut selected, notice)? {
-                Action::Back => return Ok(()),
-                Action::Select if selected == values.len() => return Ok(()),
-                Action::Select => {
-                    screen.copy(&values[selected].2)?;
-                    notice = "已复制";
-                }
-                _ => {}
-            }
-        }
+        values
     }
 
     pub fn resolve(source: &Server, previous: Option<&Self>) -> Result<Self> {

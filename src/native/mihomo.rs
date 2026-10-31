@@ -246,16 +246,18 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::Mihomo)?,
             );
         }
-        options.rename(&mut output, &[("encryption", "decryption")]);
+        options.take("encryption");
+        if let Some(encryption) = &value.encryption {
+            output.insert(
+                "decryption".to_owned(),
+                json!(super::encryption::server(encryption)?),
+            );
+        }
         options.finish("Mihomo VLESS 入站")?;
         output.insert("type".to_owned(), json!("vless"));
         if source.tls.enabled {
             server_tls(source, store, &mut output)?;
-        } else if value
-            .encryption
-            .as_deref()
-            .is_none_or(|value| value == "none")
-        {
+        } else if value.encryption.is_none() {
             output.insert("allow-insecure".to_owned(), json!(true));
         }
         output.extend(super::transport::mihomo_server(&source.transport)?);

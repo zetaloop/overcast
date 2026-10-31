@@ -16,37 +16,27 @@ use crate::{
     reality::{Keys, Limit},
 };
 
-use super::{listener::Listener, options::Options, unsupported};
+use super::{
+    listener::{self, Listener},
+    options::Options,
+    unsupported,
+};
 
 pub fn prepare(
     listeners: &[Listener],
     graph: &Graph<'_>,
-    previous: &BTreeMap<Uuid, Keys>,
+    keys: &mut BTreeMap<Uuid, crate::keys::Keys>,
     progress: &Progress,
-) -> Result<BTreeMap<Uuid, Keys>> {
-    let mut groups: Vec<(BTreeSet<usize>, Vec<usize>)> = Vec::new();
-    for (index, listener) in listeners.iter().enumerate() {
+) -> Result<()> {
+    let active = listeners
+        .iter()
+        .filter(|listener| listener.source.tls.enabled && listener.source.tls.reality.enabled);
+    for group in listener::related(active, progress)? {
         progress.check()?;
-        if !listener.source.tls.enabled || !listener.source.tls.reality.enabled {
-            continue;
-        }
-        let mut entries: BTreeSet<_> = listener.members.iter().map(|member| member.entry).collect();
-        let mut indices = vec![index];
-        let connected: Vec<_> = groups
-            .extract_if(.., |(group, _)| !group.is_disjoint(&entries))
-            .collect();
-        for (group, mut listeners) in connected {
-            entries.extend(group);
-            indices.append(&mut listeners);
-        }
-        groups.push((entries, indices));
-    }
-    let mut result = previous.clone();
-    for (entries, indices) in groups {
-        progress.check()?;
-        let sources: Vec<_> = indices
+        let sources: Vec<_> = group
+            .listeners
             .iter()
-            .map(|index| &listeners[*index].source.tls.reality)
+            .map(|listener| &listener.source.tls.reality)
             .collect();
         let private: BTreeSet<_> = sources
             .iter()
@@ -62,7 +52,8 @@ pub fn prepare(
             .filter_map(|source| source.signature_seed.clone())
             .collect();
         if private.len() > 1 || short_ids.len() > 1 || seeds.len() > 1 {
-            let names: Vec<_> = entries
+            let names: Vec<_> = group
+                .entries
                 .iter()
                 .map(|entry| graph.entries[*entry].inbound.name.as_str())
                 .collect();
@@ -76,25 +67,28 @@ pub fn prepare(
         source.private_key = private.into_iter().next();
         source.short_ids = short_ids.into_iter().next().unwrap_or_default();
         source.signature_seed = seeds.into_iter().next();
-        let cached = entries
-            .iter()
-            .find_map(|entry| previous.get(&graph.entries[*entry].inbound.uuid));
+        let cached = group.entries.iter().find_map(|entry| {
+            keys.get(&graph.entries[*entry].inbound.uuid)
+                .and_then(|keys| keys.reality.as_ref())
+        });
         let material = Keys::resolve(&source, cached)?;
-        for entry in entries {
+        for entry in group.entries {
             let uuid = graph.entries[entry].inbound.uuid;
             let mut material = material.clone();
             if !source.signature {
-                material.signature_seed = previous
+                material.signature_seed = keys
                     .get(&uuid)
+                    .and_then(|keys| keys.reality.as_ref())
                     .and_then(|keys| keys.signature_seed.clone());
-                material.signature_key = previous
+                material.signature_key = keys
                     .get(&uuid)
+                    .and_then(|keys| keys.reality.as_ref())
                     .and_then(|keys| keys.signature_key.clone());
             }
-            result.insert(uuid, material);
+            keys.entry(uuid).or_default().reality = Some(material);
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 pub fn xray(source: &connection::Tls) -> Result<Value> {

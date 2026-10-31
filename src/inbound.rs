@@ -454,7 +454,7 @@ fn edit(
             tls,
             Item::new("listen", "监听".stylized()),
         ]);
-        if existing && inbound.tls.reality.enabled {
+        if existing && crate::keys::Keys::needed(&inbound) {
             items.push(Item::new("handshake", "握手资料".stylized()));
         }
         items.push(if existing {
@@ -566,10 +566,7 @@ fn edit(
                         .iter()
                         .find(|source| source.uuid == inbound.uuid)
                         .ok_or("入站已被删除")?;
-                    let keys = crate::reality::Keys::resolve(
-                        &source.tls.reality,
-                        config.keys.get(&inbound.uuid),
-                    )?;
+                    let keys = crate::keys::Keys::resolve(source, config.keys.get(&inbound.uuid))?;
                     let keys = if config.keys.get(&inbound.uuid) == Some(&keys) {
                         keys
                     } else {
@@ -583,8 +580,8 @@ fn edit(
                                         .iter()
                                         .find(|source| source.uuid == inbound.uuid)
                                         .ok_or("入站已被删除")?;
-                                    let keys = crate::reality::Keys::resolve(
-                                        &source.tls.reality,
+                                    let keys = crate::keys::Keys::resolve(
+                                        source,
                                         config.keys.get(&inbound.uuid),
                                     )?;
                                     config.keys.insert(inbound.uuid, keys.clone());
@@ -593,7 +590,7 @@ fn edit(
                             },
                         )?
                     };
-                    keys.show(screen)
+                    keys.show(source, screen)
                 }),
                 "create" => {
                     let result = screen.work(

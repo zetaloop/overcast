@@ -35,7 +35,7 @@ pub struct Config {
     pub rules: Vec<Rule>,
     pub components: BTreeMap<Component, Settings>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub keys: BTreeMap<Uuid, crate::reality::Keys>,
+    pub keys: BTreeMap<Uuid, crate::keys::Keys>,
 }
 
 impl Config {

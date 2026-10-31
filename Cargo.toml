@@ -16,6 +16,7 @@ icu_properties = "2.4.0"
 ipnetwork = { version = "0.21.1", features = ["serde"] }
 maxminddb = "0.32.0"
 ml-dsa = "0.1.1"
+ml-kem = "0.3.4"
 percent-encoding = "2.3.2"
 prost = "0.14.4"
 regex-automata = "0.4.18"

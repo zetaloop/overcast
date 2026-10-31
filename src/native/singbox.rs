@@ -239,9 +239,6 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::SingBox)?,
             );
         }
-        if value.encryption.as_deref() == Some("none") {
-            options.take("encryption");
-        }
         options.finish("sing-box VLESS 入站")?;
         output.insert("type".to_owned(), json!("vless"));
         if source.tls.enabled {

@@ -269,7 +269,14 @@ pub fn listeners(
             }
             settings.insert(
                 "decryption".to_owned(),
-                json!(value.encryption.as_deref().unwrap_or("none")),
+                json!(
+                    value
+                        .encryption
+                        .as_ref()
+                        .map(super::encryption::server)
+                        .transpose()?
+                        .unwrap_or_else(|| "none".to_owned())
+                ),
             );
             settings.insert(
                 "clients".to_owned(),
@@ -295,11 +302,7 @@ pub fn listeners(
             options.rename(&mut settings, &[("padding", "testseed")]);
             options.take("fallbacks");
             if !value.fallbacks.is_empty() {
-                if value
-                    .encryption
-                    .as_deref()
-                    .is_some_and(|value| value != "none")
-                {
+                if value.encryption.is_some() {
                     return unsupported("VLESS Encryption 与协议回落无法同时使用");
                 }
                 let mut fallbacks = Vec::new();

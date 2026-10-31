@@ -1,4 +1,5 @@
 mod binding;
+pub(crate) mod encryption;
 mod listener;
 mod mihomo;
 mod multiplex;
@@ -38,7 +39,7 @@ use crate::{
 
 pub struct Prepared {
     pub id: Uuid,
-    pub keys: BTreeMap<Uuid, crate::reality::Keys>,
+    pub keys: BTreeMap<Uuid, crate::keys::Keys>,
     directory: TempDir,
 }
 
@@ -156,13 +157,15 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         .map(|listener| listener.binding.clone())
         .collect();
     let mut certificates = BTreeSet::new();
-    let keys = reality::prepare(&listeners, &graph, &config.keys, progress)?;
+    let mut keys = config.keys.clone();
+    reality::prepare(&listeners, &graph, &mut keys, progress)?;
+    encryption::prepare(&listeners, &graph, &mut keys, progress)?;
     let step = progress.activity("生成核心配置");
     for (index, listener) in listeners.iter().enumerate() {
         progress.check()?;
         let mut source = listener.source.clone();
-        if source.tls.enabled && source.tls.reality.enabled {
-            keys[&source.uuid].apply(&mut source.tls.reality);
+        if let Some(keys) = keys.get(&source.uuid) {
+            keys.apply(&mut source);
         }
         let inbound = &source;
         step.detail(&inbound.name);
