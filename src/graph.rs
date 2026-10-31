@@ -17,6 +17,7 @@ use crate::{
 pub struct Graph<'a> {
     pub targets: Targets,
     pub entries: Vec<Entry<'a>>,
+    analysis: Analysis<'a>,
 }
 
 pub struct Entry<'a> {
@@ -31,7 +32,82 @@ pub struct Account<'a> {
     pub rules: Vec<Rule>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+impl Account<'_> {
+    pub fn identity(&self, inbound: &Inbound) -> Option<Uuid> {
+        self.user.map(|user| user.uuid).or_else(|| {
+            self.network
+                .identity(inbound)
+                .then(|| {
+                    inbound
+                        .credentials
+                        .as_ref()
+                        .map(|credentials| credentials.uuid)
+                })
+                .flatten()
+        })
+    }
+}
+
+impl Graph<'_> {
+    pub fn equivalent(
+        &mut self,
+        left: usize,
+        right: usize,
+        network: Network,
+        identity: Option<Uuid>,
+    ) -> Result<bool> {
+        let mut outcomes = Vec::new();
+        for index in [left, right] {
+            let entry = &self.entries[index];
+            let rules = entry
+                .accounts
+                .iter()
+                .find(|account| {
+                    account.network == network && account.identity(entry.inbound) == identity
+                })
+                .map_or(&[][..], |account| account.rules.as_slice());
+            let mut remaining = self.analysis.truth;
+            let mut clauses: HashMap<Destination, Vec<Lit>> = HashMap::new();
+            for rule in rules {
+                let condition =
+                    self.analysis
+                        .condition(&rule.condition, entry.inbound.uuid, identity);
+                let selected = self.analysis.all(&[remaining, condition]);
+                remaining = self.analysis.all(&[remaining, !condition]);
+                if rule.destination != Destination::Block {
+                    clauses.entry(rule.destination).or_default().push(selected);
+                }
+            }
+            outcomes.push(
+                clauses
+                    .into_iter()
+                    .map(|(destination, conditions)| (destination, self.analysis.any(&conditions)))
+                    .collect::<HashMap<_, _>>(),
+            );
+        }
+        let destinations: HashSet<_> = outcomes.iter().flat_map(HashMap::keys).copied().collect();
+        for destination in destinations {
+            let before = *outcomes[0]
+                .get(&destination)
+                .unwrap_or(&!self.analysis.truth);
+            let after = *outcomes[1]
+                .get(&destination)
+                .unwrap_or(&!self.analysis.truth);
+            let added = self.analysis.all(&[!before, after]);
+            let removed = self.analysis.all(&[before, !after]);
+            let difference = self.analysis.any(&[added, removed]);
+            if self
+                .analysis
+                .possible(difference, self.entries[left].inbound.core)?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Network {
     Tcp,
     Udp,
@@ -53,20 +129,14 @@ impl Network {
 pub fn build<'a>(
     store: &Store,
     config: &'a Config,
-    progress: &Progress,
+    progress: &'a Progress,
     mut reachable: impl FnMut(Core, Destination, Network) -> Result<bool>,
-) -> Result<Graph<'a>> {
+) -> Result<Option<Graph<'a>>> {
     if config.rules.is_empty()
         || config.inbounds.is_empty()
         || config.users.is_empty() && config.inbounds.iter().all(|inbound| inbound.users)
     {
-        return Ok(Graph {
-            targets: Targets {
-                domains: Vec::new(),
-                ips: Vec::new(),
-            },
-            entries: Vec::new(),
-        });
+        return Ok(None);
     }
     let mut conditions = Vec::new();
     let mut seen = HashSet::new();
@@ -178,7 +248,11 @@ pub fn build<'a>(
         }
     }
     step.finish(format!("{} 个入口具有可转发路径", entries.len()));
-    Ok(Graph { targets, entries })
+    Ok((!entries.is_empty()).then_some(Graph {
+        targets,
+        entries,
+        analysis: graph,
+    }))
 }
 
 struct Route {

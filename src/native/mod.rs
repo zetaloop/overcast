@@ -1,3 +1,5 @@
+mod binding;
+mod listener;
 mod mihomo;
 mod options;
 mod routing;
@@ -7,7 +9,7 @@ mod xray;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt, fs,
-    io::Write,
+    io::{ErrorKind, Write},
     net::{TcpListener, UdpSocket},
     path::PathBuf,
     rc::Rc,
@@ -97,8 +99,8 @@ struct Builder<'a> {
     bridges: BTreeMap<String, Endpoint>,
     previous: BTreeMap<String, u16>,
     ports: BTreeMap<String, u16>,
-    reserved: BTreeSet<u16>,
-    sockets: Vec<(TcpListener, UdpSocket)>,
+    reserved: Vec<binding::Binding>,
+    sockets: Vec<(TcpListener, Option<UdpSocket>)>,
 }
 
 pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Option<Prepared>> {
@@ -112,10 +114,10 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         bridges: BTreeMap::new(),
         previous: BTreeMap::new(),
         ports: BTreeMap::new(),
-        reserved: BTreeSet::new(),
+        reserved: Vec::new(),
         sockets: Vec::new(),
     };
-    let graph = graph::build(store, config, progress, |core, destination, network| {
+    let Some(mut graph) = graph::build(store, config, progress, |core, destination, network| {
         Ok(match destination {
             Destination::Block => false,
             Destination::Direct => true,
@@ -124,10 +126,10 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 .iter()
                 .any(|chain| chain.supports(network)),
         })
-    })?;
-    if graph.entries.is_empty() {
+    })?
+    else {
         return Ok(None);
-    }
+    };
     if let Some(id) = config.runtime {
         let bytes = fs::read(
             store
@@ -138,107 +140,117 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         )?;
         builder.previous = serde_json::from_slice::<State>(&bytes)?.ports;
     }
-    for entry in &graph.entries {
-        builder.reserved.extend(entry.inbound.ports()?);
-    }
+    let listeners = listener::build(&mut graph, progress)?;
+    builder.reserved = listeners
+        .iter()
+        .map(|listener| listener.binding.clone())
+        .collect();
     let mut certificates = BTreeSet::new();
     let step = progress.activity("生成核心配置");
-    for entry in &graph.entries {
+    for (index, listener) in listeners.iter().enumerate() {
         progress.check()?;
-        let inbound = entry.inbound;
+        let inbound = &listener.source;
         step.detail(&inbound.name);
-        let users: Vec<_> = if inbound.users {
-            entry
-                .users
-                .iter()
-                .map(|user| (user.uuid.to_string(), user.password.clone()))
-                .collect()
-        } else {
-            inbound
-                .credentials
-                .iter()
-                .map(|credentials| (credentials.uuid.to_string(), credentials.password.clone()))
-                .collect()
-        };
+        let users: Vec<_> = listener
+            .users
+            .iter()
+            .map(|(user, password)| (user.to_string(), password.clone()))
+            .collect();
         let mut globals = Map::new();
-        let mut listeners = match inbound.core {
+        let values = match inbound.core {
             Core::Xray => xray::listeners(inbound, &users, store)?,
             Core::SingBox => singbox::listeners(inbound, &users, store)?,
             Core::Mihomo => mihomo::listeners(inbound, &users, store, &mut globals)?,
         };
-        let crate::inbound::Protocol::Mixed(protocol) = &inbound.protocol;
-        if protocol.socks.enabled
-            && !entry
-                .accounts
-                .iter()
-                .any(|account| account.network == graph::Network::Udp)
-        {
-            for listener in &mut listeners {
-                match inbound.core {
-                    Core::Xray => {
-                        listener.get_mut("settings").unwrap()["udp"] = json!(false);
-                    }
-                    Core::Mihomo => {
-                        listener.insert("udp".to_owned(), json!(false));
-                    }
-                    Core::SingBox => {}
+        let values = if inbound.core == Core::SingBox {
+            let mut expanded = Vec::new();
+            for value in values {
+                for port in &listener.binding.ports {
+                    progress.check()?;
+                    let mut value = value.clone();
+                    value.insert("listen_port".to_owned(), json!(port));
+                    expanded.push(value);
                 }
             }
-        }
+            expanded
+        } else {
+            values
+        };
         let service = builder.service(inbound.core, globals);
         if inbound.tls.enabled {
-            certificates.insert(certificate_name(inbound).to_owned());
+            certificates.extend(
+                listener
+                    .members
+                    .iter()
+                    .map(|member| certificate_name(graph.entries[member.entry].inbound).to_owned()),
+            );
         }
-        for port in inbound.ports()? {
-            for (part, listener) in listeners.iter().enumerate() {
-                let tag = format!("{}-{port}-{part}", inbound.uuid);
-                let mut listener = listener.clone();
-                match inbound.core {
-                    Core::Xray => {
-                        listener.insert("tag".to_owned(), json!(tag));
-                        listener.insert("port".to_owned(), json!(port));
+        let mut tags = Vec::new();
+        for (part, mut value) in values.into_iter().enumerate() {
+            progress.check()?;
+            let tag = format!("{}-{index}-{part}", inbound.uuid);
+            match inbound.core {
+                Core::Xray => {
+                    value.insert("tag".to_owned(), json!(tag));
+                    if listener.binding.ports.is_empty() {
+                        value.remove("port");
+                    } else {
+                        value.insert("port".to_owned(), json!(listener.binding.port_text()));
                     }
-                    Core::SingBox => {
-                        listener.insert("tag".to_owned(), json!(tag));
-                        listener.insert("listen_port".to_owned(), json!(port));
-                    }
-                    Core::Mihomo => {
-                        listener.insert("name".to_owned(), json!(tag));
-                        listener.insert("port".to_owned(), json!(port.to_string()));
+                    if inbound.tls.enabled {
+                        let paths: BTreeSet<_> = listener
+                            .members
+                            .iter()
+                            .map(|member| {
+                                certificate_paths(store, graph.entries[member.entry].inbound)
+                            })
+                            .collect();
+                        value.get_mut("streamSettings").unwrap()["tlsSettings"]["certificates"] = json!(
+                            paths
+                                .into_iter()
+                                .map(|(certificate, key)| json!({
+                                    "certificateFile": certificate, "keyFile": key,
+                                }))
+                                .collect::<Vec<_>>()
+                        );
                     }
                 }
-                builder.services[service].listeners.push(json!(listener));
-                for account in &entry.accounts {
-                    let user = account.user.map(|user| user.uuid.to_string()).or_else(|| {
-                        account
-                            .network
-                            .identity(inbound)
-                            .then(|| {
-                                inbound
-                                    .credentials
-                                    .as_ref()
-                                    .map(|credentials| credentials.uuid.to_string())
-                            })
-                            .flatten()
+                Core::SingBox => {
+                    value.insert("tag".to_owned(), json!(tag));
+                }
+                Core::Mihomo => {
+                    value.insert("name".to_owned(), json!(tag));
+                    value.insert("port".to_owned(), json!(listener.binding.port_text()));
+                }
+            }
+            tags.push(tag);
+            builder.services[service].listeners.push(json!(value));
+        }
+        for member in &listener.members {
+            let entry = &graph.entries[member.entry];
+            for account in entry
+                .accounts
+                .iter()
+                .filter(|account| member.carries(account.network))
+            {
+                let user = account.identity(entry.inbound).map(|user| user.to_string());
+                for rule in &account.rules {
+                    let outbound = match rule.destination {
+                        Destination::Block => "block".to_owned(),
+                        Destination::Direct => "direct".to_owned(),
+                        Destination::Outbound(uuid) => {
+                            let endpoint = builder.outbound(uuid, inbound.core, account.network)?;
+                            builder.bridge(service, &endpoint)?
+                        }
+                    };
+                    builder.services[service].rules.push(routing::Rule {
+                        inbound: tags.clone(),
+                        user: user.clone(),
+                        protocol: member.protocol(),
+                        network: Some(account.network),
+                        condition: rule.condition.clone(),
+                        outbound,
                     });
-                    for rule in &account.rules {
-                        let outbound = match rule.destination {
-                            Destination::Block => "block".to_owned(),
-                            Destination::Direct => "direct".to_owned(),
-                            Destination::Outbound(uuid) => {
-                                let endpoint =
-                                    builder.outbound(uuid, inbound.core, account.network)?;
-                                builder.bridge(service, &endpoint)?
-                            }
-                        };
-                        builder.services[service].rules.push(routing::Rule {
-                            inbound: tag.clone(),
-                            user: user.clone(),
-                            network: Some(account.network),
-                            condition: rule.condition.clone(),
-                            outbound,
-                        });
-                    }
                 }
             }
         }
@@ -519,27 +531,86 @@ impl Builder<'_> {
         let port = if let Some(&port) = self.ports.get(&tag) {
             port
         } else {
-            let port = if let Some(&port) = self
-                .previous
-                .get(&tag)
-                .filter(|port| !self.reserved.contains(port))
-            {
-                port
-            } else {
-                loop {
-                    let tcp = TcpListener::bind(("127.0.0.1", 0))?;
-                    let port = tcp.local_addr()?.port();
-                    if self.reserved.contains(&port) {
-                        continue;
-                    }
-                    let udp = UdpSocket::bind(("127.0.0.1", port))?;
-                    self.sockets.push((tcp, udp));
-                    break port;
+            let core = self.services[target.service].core;
+            let mut networks = BTreeSet::from([graph::Network::Tcp]);
+            if core == Core::Mihomo {
+                networks.insert(graph::Network::Udp);
+            }
+            let previous = self.previous.get(&tag).copied();
+            let initial = match previous {
+                Some(port) => port,
+                None => {
+                    let mut bytes = [0; 2];
+                    getrandom::fill(&mut bytes)
+                        .map_err(|error| format!("分配核心转交端口失败：{error}"))?;
+                    u16::from_ne_bytes(bytes)
                 }
             };
-            self.reserved.insert(port);
+            let mut binding = binding::Binding::local(initial, networks)?;
+            let reserved: BTreeSet<_> = self
+                .reserved
+                .iter()
+                .filter(|reserved| reserved.intersects(&binding))
+                .flat_map(|reserved| reserved.ports.iter().copied())
+                .collect();
+            let mut selected = previous.filter(|port| *port != 0 && !reserved.contains(port));
+            if selected.is_none() {
+                let mut last_error = None;
+                for offset in 0..u32::from(u16::MAX) {
+                    self.progress.check()?;
+                    let port = ((u32::from(initial) + offset) % u32::from(u16::MAX) + 1) as u16;
+                    if reserved.contains(&port) {
+                        continue;
+                    }
+                    let tcp = match TcpListener::bind(("127.0.0.1", port)) {
+                        Ok(socket) => socket,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                ErrorKind::AddrInUse | ErrorKind::PermissionDenied
+                            ) =>
+                        {
+                            last_error = Some(error);
+                            continue;
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let udp = if core == Core::Mihomo {
+                        match UdpSocket::bind(("127.0.0.1", port)) {
+                            Ok(socket) => Some(socket),
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    ErrorKind::AddrInUse | ErrorKind::PermissionDenied
+                                ) =>
+                            {
+                                last_error = Some(error);
+                                continue;
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    } else {
+                        None
+                    };
+                    self.sockets.push((tcp, udp));
+                    selected = Some(port);
+                    break;
+                }
+                if selected.is_none() {
+                    return Err(format!(
+                        "核心转交没有可用的本机端口：{}",
+                        last_error.map_or_else(
+                            || "端口均被监听配置占用".to_owned(),
+                            |error| error.to_string()
+                        )
+                    )
+                    .into());
+                }
+            }
+            let port = selected.unwrap();
+            binding.ports = BTreeSet::from([port]);
+            self.reserved.push(binding);
             self.ports.insert(tag.clone(), port);
-            let core = self.services[target.service].core;
             let listener = match core {
                 Core::Xray => json!({
                     "tag": tag, "listen": "127.0.0.1", "port": port,
@@ -557,8 +628,9 @@ impl Builder<'_> {
             self.services[target.service].rules.insert(
                 0,
                 routing::Rule {
-                    inbound: tag.clone(),
+                    inbound: vec![tag.clone()],
                     user: None,
+                    protocol: None,
                     network: None,
                     condition: Condition::Always,
                     outbound: target.tag.clone(),

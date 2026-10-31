@@ -18,8 +18,9 @@ use crate::{
 };
 
 pub struct Rule {
-    pub inbound: String,
+    pub inbound: Vec<String>,
     pub user: Option<String>,
+    pub protocol: Option<&'static str>,
     pub network: Option<Network>,
     pub condition: Condition,
     pub outbound: String,
@@ -175,7 +176,7 @@ impl<'a> Matchers<'a> {
             if condition == Condition::Never {
                 continue;
             }
-            let mut context = Map::from_iter([("inbound".to_owned(), json!([rule.inbound]))]);
+            let mut context = Map::from_iter([("inbound".to_owned(), json!(rule.inbound))]);
             if let Some(user) = &rule.user {
                 context.insert("auth_user".to_owned(), json!([user]));
             }
@@ -221,12 +222,15 @@ impl<'a> Matchers<'a> {
             if condition == Condition::Never {
                 continue;
             }
-            let mut fields = vec![format!("(IN-NAME,{})", rule.inbound)];
+            let mut fields = vec![format!("(IN-NAME,{})", rule.inbound.join("/"))];
             if let Some(user) = &rule.user {
                 fields.push(format!("(IN-USER,{user})"));
             }
             if let Some(network) = rule.network {
                 fields.push(format!("(NETWORK,{})", network.name()));
+            }
+            if let Some(protocol) = rule.protocol {
+                fields.push(format!("(IN-TYPE,{protocol})"));
             }
             if condition != Condition::Always {
                 fields.push(format!("({})", self.mihomo_condition(&condition)));
@@ -282,7 +286,14 @@ impl<'a> Matchers<'a> {
             if condition == Condition::Never {
                 continue;
             }
-            let mut clauses = vec![format!("inbound == {}", lua(&rule.inbound))];
+            let mut clauses = vec![format!(
+                "({})",
+                rule.inbound
+                    .iter()
+                    .map(|tag| format!("inbound == {}", lua(tag)))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )];
             if let Some(user) = &rule.user {
                 clauses.push(format!("user == {}", lua(user)));
             }

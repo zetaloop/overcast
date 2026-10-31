@@ -33,7 +33,7 @@ varisat = "0.2.2"
 zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2"] }
 
 [target."cfg(unix)".dependencies]
-nix = { version = "0.31.3", features = ["user"] }
+nix = { version = "0.31.3", features = ["sched", "user"] }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Networking_WinSock", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Threading"] }
