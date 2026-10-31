@@ -32,24 +32,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
     {
         output.insert("sendThrough".to_owned(), value);
     }
-    let mut sockopt = socket(&mut options)?;
-    if let Some(strategy) = network.address_strategy {
-        options.take("address_strategy");
-        let value = match strategy {
-            AddressStrategy::AsIs => "AsIs",
-            AddressStrategy::Resolve => "ForceIP",
-            AddressStrategy::Ipv4Only => "ForceIPv4",
-            AddressStrategy::Ipv6Only => "ForceIPv6",
-            AddressStrategy::PreferIpv4 => "ForceIPv4v6",
-            AddressStrategy::PreferIpv6 => "ForceIPv6v4",
-            AddressStrategy::TryIp => "UseIP",
-            AddressStrategy::TryIpv4 => "UseIPv4",
-            AddressStrategy::TryIpv6 => "UseIPv6",
-            AddressStrategy::TryIpv4Ipv6 => "UseIPv4v6",
-            AddressStrategy::TryIpv6Ipv4 => "UseIPv6v4",
-        };
-        sockopt.insert("domainStrategy".to_owned(), json!(value));
-    }
+    let sockopt = dialer(network, &mut options)?;
     options.finish("Xray 连接")?;
     if !sockopt.is_empty() {
         stream.insert("sockopt".to_owned(), json!(sockopt));
@@ -108,7 +91,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         stream.insert("tlsSettings".to_owned(), client_tls(tls, store)?);
     }
     if let Some(transport) = source.transport() {
-        stream.extend(transport::xray(transport, false)?);
+        stream.extend(transport::xray(transport, false, store)?);
     }
     output.insert("settings".to_owned(), json!(settings));
     if !stream.is_empty() {
@@ -122,6 +105,9 @@ pub fn listeners(
     users: &[(String, String)],
     store: &Store,
 ) -> Result<Vec<Map<String, Value>>> {
+    if source.transport.udp(source.tls.enabled, &source.tls.alpn) && source.listen.proxy_protocol {
+        return unsupported("XHTTP/3 的 UDP 监听没有 PROXY protocol 支持");
+    }
     let mut output = Map::from_iter([
         ("listen".to_owned(), json!(source.listen.address)),
         ("port".to_owned(), json!(source.ports)),
@@ -229,7 +215,7 @@ pub fn listeners(
         {
             use nix::libc::{SO_BINDTODEVICE, SOL_SOCKET};
             custom.push(json!({
-                "network": "tcp", "level": SOL_SOCKET.to_string(),
+                "level": SOL_SOCKET.to_string(),
                 "opt": SO_BINDTODEVICE.to_string(), "type": "str", "value": interface,
             }));
         }
@@ -257,12 +243,34 @@ pub fn listeners(
         stream.insert("security".to_owned(), json!("tls"));
         stream.insert("tlsSettings".to_owned(), server_tls(source, store)?);
     }
-    stream.extend(transport::xray(&source.transport, true)?);
+    stream.extend(transport::xray(&source.transport, true, store)?);
     output.insert("settings".to_owned(), json!(settings));
     if !stream.is_empty() {
         output.insert("streamSettings".to_owned(), json!(stream));
     }
     Ok(vec![output])
+}
+
+pub fn dialer(source: &connection::Network, options: &mut Options) -> Result<Map<String, Value>> {
+    let mut output = socket(options)?;
+    if let Some(strategy) = source.address_strategy {
+        options.take("address_strategy");
+        let value = match strategy {
+            AddressStrategy::AsIs => "AsIs",
+            AddressStrategy::Resolve => "ForceIP",
+            AddressStrategy::Ipv4Only => "ForceIPv4",
+            AddressStrategy::Ipv6Only => "ForceIPv6",
+            AddressStrategy::PreferIpv4 => "ForceIPv4v6",
+            AddressStrategy::PreferIpv6 => "ForceIPv6v4",
+            AddressStrategy::TryIp => "UseIP",
+            AddressStrategy::TryIpv4 => "UseIPv4",
+            AddressStrategy::TryIpv6 => "UseIPv6",
+            AddressStrategy::TryIpv4Ipv6 => "UseIPv4v6",
+            AddressStrategy::TryIpv6Ipv4 => "UseIPv6v4",
+        };
+        output.insert("domainStrategy".to_owned(), json!(value));
+    }
+    Ok(output)
 }
 
 fn socket(options: &mut Options) -> Result<Map<String, Value>> {
@@ -344,7 +352,7 @@ fn socket(options: &mut Options) -> Result<Map<String, Value>> {
     Ok(output)
 }
 
-fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
+pub fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
     let mut options = Options::new(source)?;
     options.take("enabled");
     let mut output = Map::new();

@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Result,
+    config::Store,
     graph::{Entry, Graph, Network},
     inbound::{Core, HttpVersion, Inbound, Protocol},
     progress::Progress,
@@ -83,7 +84,7 @@ pub struct Listener {
     pub binding: Binding,
 }
 
-pub fn build(graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>> {
+pub fn build(store: &Store, graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>> {
     let step = progress.activity("分配监听资源");
     let mut groups: BTreeMap<Option<u16>, Vec<Vec<Member>>> = BTreeMap::new();
     for (index, entry) in graph.entries.iter().enumerate() {
@@ -107,9 +108,13 @@ pub fn build(graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>
             return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
         }
         let Protocol::Mixed(protocol) = &source.protocol;
-        if unix && protocol.socks.enabled {
+        let transport_udp = source.transport.udp(source.tls.enabled, &source.tls.alpn);
+        if unix && transport_udp {
+            return Err(format!("入站 {} 的 XHTTP/3 使用 UDP 监听地址", source.name).into());
+        }
+        if (unix || transport_udp) && source.core == Core::Xray && protocol.socks.enabled {
             return Err(format!(
-                "入站 {} 的 Xray SOCKS 处理器需要 TCP 地址，HTTP 可以使用 Unix socket",
+                "入站 {} 的 Xray SOCKS 处理器需要 TCP 地址，HTTP 可使用当前传输",
                 source.name
             )
             .into());
@@ -163,7 +168,7 @@ pub fn build(graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>
                 protocol.socks.enabled = false;
             }
             protocol.http.versions = versions(&modes);
-            if modes.iter().all(|mode| mode.wire() == Network::Udp) {
+            if transport_udp || modes.iter().all(|mode| mode.wire() == Network::Udp) {
                 source.listen.tcp_fast_open = None;
                 source.listen.tcp_multi_path = None;
                 source.listen.tcp_keep_alive = None;
@@ -183,7 +188,11 @@ pub fn build(graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>
             let binding = Binding::new(
                 &source,
                 ports[0],
-                modes.iter().map(|mode| mode.wire()).collect(),
+                if transport_udp {
+                    BTreeSet::from([Network::Udp])
+                } else {
+                    modes.iter().map(|mode| mode.wire()).collect()
+                },
             )?;
             if binding.current_namespace()? {
                 source.listen.namespace = None;
@@ -251,7 +260,10 @@ pub fn build(graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>
             .flat_map(|member| member.modes.iter())
             .copied()
             .collect();
-        binding.networks = modes.iter().map(|mode| mode.wire()).collect();
+        binding.networks = members
+            .iter()
+            .flat_map(|member| member.binding.networks.iter().copied())
+            .collect();
         let mut users = BTreeMap::new();
         for member in &members {
             if member.source.core != source.core {
@@ -281,8 +293,8 @@ pub fn build(graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>
             }
             if source.core == Core::Xray {
                 same(
-                    &super::transport::xray(&source.transport, true)?,
-                    &super::transport::xray(&member.source.transport, true)?,
+                    &super::transport::xray(&source.transport, true, store)?,
+                    &super::transport::xray(&member.source.transport, true, store)?,
                     &[],
                     "传输",
                     &members,

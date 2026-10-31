@@ -141,7 +141,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         )?;
         builder.previous = serde_json::from_slice::<State>(&bytes)?.ports;
     }
-    let listeners = listener::build(&mut graph, progress)?;
+    let listeners = listener::build(store, &mut graph, progress)?;
     builder.reserved = listeners
         .iter()
         .map(|listener| listener.binding.clone())
@@ -498,16 +498,25 @@ impl Builder<'_> {
                         value.insert("dialer-proxy".to_owned(), json!(parent));
                     }
                     Core::Xray => {
-                        let stream = value.entry("streamSettings").or_insert_with(|| json!({}));
-                        let socket = stream
-                            .as_object_mut()
-                            .unwrap()
-                            .entry("sockopt")
-                            .or_insert_with(|| json!({}));
-                        socket
-                            .as_object_mut()
-                            .unwrap()
-                            .insert("dialerProxy".to_owned(), json!(parent));
+                        let mut stream = value.entry("streamSettings").or_insert_with(|| json!({}));
+                        loop {
+                            let socket = stream
+                                .as_object_mut()
+                                .unwrap()
+                                .entry("sockopt")
+                                .or_insert_with(|| json!({}));
+                            socket
+                                .as_object_mut()
+                                .unwrap()
+                                .insert("dialerProxy".to_owned(), json!(parent));
+                            match stream
+                                .get_mut("xhttpSettings")
+                                .and_then(|http| http.get_mut("downloadSettings"))
+                            {
+                                Some(download) => stream = download,
+                                None => break,
+                            }
+                        }
                     }
                 }
             }
@@ -688,18 +697,27 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
             let transport =
                 if core == Core::SingBox && value.http.version == connection::HttpVersion::Http3 {
                     parent[1] || !value.http.fixed_version && parent[0]
+                } else if core == Core::Xray {
+                    value.transport.supported(&value.tls, parent)
                 } else {
                     parent[0]
                 };
             [transport, transport && core == Core::SingBox]
         }
-        Connection::Socks(value) => [
-            parent[0] && value.socks.tcp.unwrap_or(true),
-            parent[0]
-                && (parent[1] || value.socks.udp_over_tcp.is_some())
-                && value.socks.version == connection::SocksVersion::V5
-                && value.socks.udp.unwrap_or(true),
-        ],
+        Connection::Socks(value) => {
+            let transport = if core == Core::Xray {
+                value.transport.supported(&value.tls, parent)
+            } else {
+                parent[0]
+            };
+            [
+                transport && value.socks.tcp.unwrap_or(true),
+                transport
+                    && (parent[1] || value.socks.udp_over_tcp.is_some())
+                    && value.socks.version == connection::SocksVersion::V5
+                    && value.socks.udp.unwrap_or(true),
+            ]
+        }
     }
 }
 

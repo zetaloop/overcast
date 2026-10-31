@@ -219,7 +219,7 @@ macro_rules! scalar {
     };
 }
 
-scalar!(String, u8, u16, u32, u64, uuid::Uuid);
+scalar!(String, u8, u16, u32, u64, i32, i64, uuid::Uuid);
 
 impl Value for bool {
     fn text(&self) -> String {
