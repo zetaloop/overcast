@@ -29,6 +29,7 @@ enum Mode {
     SocksUdp,
     Vless,
     Vmess,
+    Trojan,
 }
 
 impl Mode {
@@ -45,6 +46,7 @@ impl Mode {
             Self::Socks | Self::SocksUdp => "SOCKS",
             Self::Vless => "VLESS",
             Self::Vmess => "VMess",
+            Self::Trojan => "Trojan",
         }
     }
 
@@ -52,7 +54,7 @@ impl Mode {
         match self {
             Self::SocksUdp => network == Network::Udp,
             Self::Socks => network == Network::Tcp || core != Core::Mihomo,
-            Self::Vless | Self::Vmess => true,
+            Self::Vless | Self::Vmess | Self::Trojan => true,
             _ => network == Network::Tcp || core == Core::SingBox,
         }
     }
@@ -62,7 +64,7 @@ pub struct Member {
     pub entry: usize,
     source: Rc<Inbound>,
     modes: BTreeSet<Mode>,
-    users: Rc<BTreeMap<Uuid, String>>,
+    pub(super) users: Rc<BTreeMap<Uuid, String>>,
     binding: Binding,
 }
 
@@ -240,6 +242,9 @@ pub fn build(
             }
             Protocol::Vmess(_) => {
                 modes.insert(Mode::Vmess);
+            }
+            Protocol::Trojan(_) => {
+                modes.insert(Mode::Trojan);
             }
         }
         let parts =
@@ -524,6 +529,9 @@ pub fn build(
                 (Protocol::Vmess(current), Protocol::Vmess(other)) => {
                     same(current, other, &[], "VMess", &members)?
                 }
+                (Protocol::Trojan(current), Protocol::Trojan(other)) => {
+                    same(current, other, &[], "Trojan", &members)?
+                }
                 _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
             }
         }
@@ -539,6 +547,16 @@ pub fn build(
         } else if users.is_empty() {
             return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
         }
+        let password_identity = matches!(source.protocol, Protocol::Trojan(_));
+        let credentials: BTreeSet<_> = members
+            .iter()
+            .flat_map(|member| {
+                member
+                    .users
+                    .iter()
+                    .map(|(uuid, password)| (*uuid, password.clone()))
+            })
+            .collect();
         let mut addresses: BTreeSet<_> = members
             .iter()
             .map(|member| member.binding.address.clone())
@@ -558,7 +576,7 @@ pub fn build(
                     let identities: Vec<_> = if users.is_empty() || mode == Mode::SocksUdp {
                         vec![None]
                     } else {
-                        users.keys().map(|user| Some(*user)).collect()
+                        credentials.iter().map(Some).collect()
                     };
                     for identity in identities {
                         progress.check()?;
@@ -567,7 +585,13 @@ pub fn build(
                             .filter(|member| {
                                 member.binding.accepts(address, interface)
                                     && member.modes.contains(&mode)
-                                    && identity.is_none_or(|user| member.users.contains_key(&user))
+                                    && identity.is_none_or(|(user, password)| {
+                                        if password_identity {
+                                            member.users.values().any(|value| value == password)
+                                        } else {
+                                            member.users.contains_key(user)
+                                        }
+                                    })
                             })
                             .collect();
                         if eligible.is_empty() {
@@ -583,9 +607,6 @@ pub fn build(
         }
         for (position, left) in members.iter().enumerate() {
             for right in &members[position + 1..] {
-                if !left.binding.overlaps(&right.binding) {
-                    continue;
-                }
                 for network in [Network::Tcp, Network::Udp] {
                     if !left.carries(network) || !right.carries(network) {
                         continue;
@@ -602,19 +623,38 @@ pub fn build(
                         continue;
                     }
                     let identities: Vec<_> = if !network.identity(&source) || users.is_empty() {
-                        vec![None]
+                        vec![(None, None)]
+                    } else if password_identity {
+                        left.users
+                            .iter()
+                            .flat_map(|(left_user, password)| {
+                                right
+                                    .users
+                                    .iter()
+                                    .filter(move |(_, other)| *other == password)
+                                    .map(move |(right_user, _)| {
+                                        (Some(*left_user), Some(*right_user))
+                                    })
+                            })
+                            .collect()
                     } else {
                         left.users
                             .keys()
                             .filter(|user| right.users.contains_key(user))
-                            .map(|user| Some(*user))
+                            .map(|user| (Some(*user), Some(*user)))
                             .collect()
                     };
-                    for identity in identities {
-                        if identity.is_some() && left.source.users != right.source.users {
+                    for (left_identity, right_identity) in identities {
+                        if left_identity.is_some() && left.source.users != right.source.users {
                             return Err(conflict(&members, "相同凭据对应不同的系统用户归属").into());
                         }
-                        if !graph.equivalent(left.entry, right.entry, network, identity)? {
+                        if !graph.equivalent(
+                            left.entry,
+                            right.entry,
+                            network,
+                            left_identity,
+                            right_identity,
+                        )? {
                             return Err(conflict(
                                 &members,
                                 &format!(
@@ -627,6 +667,37 @@ pub fn build(
                     }
                 }
             }
+        }
+        if password_identity {
+            let mut identities: BTreeMap<String, (Uuid, bool)> = BTreeMap::new();
+            for member in &members {
+                for (&uuid, password) in member.users.iter() {
+                    identities
+                        .entry(password.clone())
+                        .and_modify(|(current, system)| {
+                            if member.source.users {
+                                *current = uuid;
+                                *system = true;
+                            } else if !*system {
+                                *current = (*current).min(uuid);
+                            }
+                        })
+                        .or_insert((uuid, member.source.users));
+                }
+            }
+            users = identities
+                .into_iter()
+                .map(|(password, (uuid, system))| {
+                    (
+                        if system {
+                            uuid
+                        } else {
+                            Uuid::new_v5(&uuid, password.as_bytes())
+                        },
+                        password,
+                    )
+                })
+                .collect();
         }
         result.push(Listener {
             source,

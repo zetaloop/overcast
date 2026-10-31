@@ -32,7 +32,7 @@ use crate::{
     config::{Config, Store},
     connection::{self, Connection},
     graph,
-    inbound::Core,
+    inbound::{Core, Protocol},
     progress::Progress,
     route::Destination,
 };
@@ -194,6 +194,10 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         } else {
             values
         };
+        let fallback = inbound.core == Core::SingBox
+            && values.iter().any(|value| {
+                value.contains_key("fallback") || value.contains_key("fallback_for_alpn")
+            });
         let service = builder.service(inbound.core, globals, BTreeMap::new());
         if inbound.tls.enabled && !inbound.tls.reality.enabled {
             certificates.extend(
@@ -261,6 +265,17 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
             tags.push(tag);
             builder.services[service].listeners.push(json!(value));
         }
+        if fallback {
+            builder.services[service].rules.push(routing::Rule {
+                inbound: tags.clone(),
+                user: Some(String::new()),
+                protocol: None,
+                network: Some(graph::Network::Tcp),
+                condition: Condition::Always,
+                outbound: "direct".to_owned(),
+                resolve_udp: false,
+            });
+        }
         for member in &listener.members {
             let entry = &graph.entries[member.entry];
             for account in entry
@@ -268,7 +283,19 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 .iter()
                 .filter(|account| member.carries(account.network))
             {
-                let user = account.identity(entry.inbound).map(|user| user.to_string());
+                let user = account.identity(entry.inbound).map(|user| {
+                    if matches!(inbound.protocol, Protocol::Trojan(_)) {
+                        listener
+                            .users
+                            .iter()
+                            .find(|(_, password)| *password == &member.users[&user])
+                            .unwrap()
+                            .0
+                            .to_string()
+                    } else {
+                        user.to_string()
+                    }
+                });
                 for rule in &account.rules {
                     let outbound = match rule.destination {
                         Destination::Block => "block".to_owned(),
@@ -483,6 +510,7 @@ impl Builder<'_> {
                 Connection::Socks(value) => value.proxy.core,
                 Connection::Vless(value) => value.core,
                 Connection::Vmess(value) => value.core,
+                Connection::Trojan(value) => value.core,
             };
             let mut candidates = vec![preferred];
             candidates.extend(
@@ -848,6 +876,13 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
             [
                 transport && value.vmess.tcp.unwrap_or(true),
                 transport && value.vmess.udp.unwrap_or(true),
+            ]
+        }
+        Connection::Trojan(value) => {
+            let transport = value.transport.supported(&value.tls, parent);
+            [
+                transport && value.trojan.tcp.unwrap_or(true),
+                transport && value.trojan.udp.unwrap_or(true),
             ]
         }
     }

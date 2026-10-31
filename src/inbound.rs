@@ -47,7 +47,7 @@ impl Inbound {
             address: String::new(),
             ports: match kind {
                 Kind::Mixed => "1080",
-                Kind::Vless | Kind::Vmess => "443",
+                Kind::Vless | Kind::Vmess | Kind::Trojan => "443",
             }
             .to_owned(),
             core: kind.core(),
@@ -142,12 +142,13 @@ enum Kind {
     Mixed,
     Vless,
     Vmess,
+    Trojan,
 }
 
 impl Kind {
     fn core(self) -> Core {
         match self {
-            Self::Mixed | Self::Vmess => Core::SingBox,
+            Self::Mixed | Self::Vmess | Self::Trojan => Core::SingBox,
             Self::Vless => Core::Xray,
         }
     }
@@ -157,6 +158,7 @@ impl Kind {
             Self::Mixed => Protocol::Mixed(Mixed::default()),
             Self::Vless => Protocol::Vless(crate::vless::Server::default()),
             Self::Vmess => Protocol::Vmess(crate::vmess::Server::default()),
+            Self::Trojan => Protocol::Trojan(crate::trojan::Server::default()),
         }
     }
 }
@@ -167,6 +169,7 @@ pub enum Protocol {
     Mixed(Mixed),
     Vless(crate::vless::Server),
     Vmess(crate::vmess::Server),
+    Trojan(crate::trojan::Server),
 }
 
 impl Protocol {
@@ -175,6 +178,7 @@ impl Protocol {
             Self::Mixed(_) => Kind::Mixed,
             Self::Vless(_) => Kind::Vless,
             Self::Vmess(_) => Kind::Vmess,
+            Self::Trojan(_) => Kind::Trojan,
         }
     }
 
@@ -202,10 +206,37 @@ impl Protocol {
                 Rc::new(move |value, screen| apply(&Self::Vmess(value.clone()), screen)),
                 false,
             ),
+            Self::Trojan(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Trojan(value.clone()), screen)),
+                false,
+            ),
         }
         .map(|_| ())
     }
 }
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Fallback {
+    pub server_name: Option<String>,
+    pub alpn: Option<String>,
+    pub path: Option<String>,
+    pub target: String,
+    pub network: Option<String>,
+    pub proxy_protocol: Option<u8>,
+}
+
+fields!(Fallback {
+    server_name: "服务名",
+    alpn: "ALPN",
+    path: "路径",
+    target: "目标",
+    network: "网络类型",
+    proxy_protocol: "PROXY protocol 版本",
+});
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -712,6 +743,7 @@ choices!(Kind {
     Mixed: "mixed" => "HTTP/SOCKS",
     Vless: "vless" => "VLESS",
     Vmess: "vmess" => "VMess",
+    Trojan: "trojan" => "Trojan",
 });
 
 choices!(HttpVersion {

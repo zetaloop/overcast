@@ -18,10 +18,12 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    if !matches!(source, Connection::Vless(_) | Connection::Vmess(_))
-        && source
-            .transport()
-            .is_some_and(|transport| !transport.is_default())
+    if !matches!(
+        source,
+        Connection::Vless(_) | Connection::Vmess(_) | Connection::Trojan(_)
+    ) && source
+        .transport()
+        .is_some_and(|transport| !transport.is_default())
     {
         return unsupported("Mihomo 的 HTTP/SOCKS 出站没有传输封装配置");
     }
@@ -31,6 +33,7 @@ pub fn outbound(
         Connection::Socks(value) => ("socks5", Some(&value.proxy), &value.network),
         Connection::Vless(value) => ("vless", None, &value.network),
         Connection::Vmess(value) => ("vmess", None, &value.network),
+        Connection::Trojan(value) => ("trojan", None, &value.network),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     let mut options = Options::new(network)?;
@@ -78,6 +81,45 @@ pub fn outbound(
         }
     }
     let tls = match source {
+        Connection::Trojan(value) => {
+            if !value.tls.enabled {
+                return unsupported("Mihomo Trojan 出站使用 TLS");
+            }
+            if !matches!(
+                value.transport,
+                crate::transport::Transport::Default
+                    | crate::transport::Transport::WebSocket(_)
+                    | crate::transport::Transport::HttpUpgrade(_)
+                    | crate::transport::Transport::Grpc(_)
+            ) {
+                return unsupported("Mihomo Trojan 使用原生 TCP、WebSocket、HTTPUpgrade 或 gRPC");
+            }
+            if value.tls.reality.enabled
+                && matches!(
+                    value.transport,
+                    crate::transport::Transport::WebSocket(_)
+                        | crate::transport::Transport::HttpUpgrade(_)
+                )
+            {
+                return unsupported("Mihomo 的 WebSocket 连接没有 REALITY 握手支持");
+            }
+            let mut options = Options::new(&value.trojan)?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("port".to_owned(), json!(value.port));
+            output.insert("password".to_owned(), json!(value.password));
+            output.insert("udp".to_owned(), json!(value.trojan.udp.unwrap_or(true)));
+            options.take("tcp");
+            options.take("udp");
+            options.finish("Mihomo Trojan")?;
+            output.extend(super::transport::mihomo_client(
+                &value.transport,
+                &value.network,
+                value.tls.enabled,
+                store,
+                globals,
+            )?);
+            Some(&value.tls)
+        }
         Connection::Direct(_) => None,
         Connection::Http(value) => {
             let mut options = Options::new(&value.http)?;
@@ -299,6 +341,7 @@ pub fn listeners(
                             }
                             json!(user)
                         }
+                        Protocol::Trojan(_) => json!({"username": name, "password": password}),
                     })
                     .collect::<Vec<_>>()
             ),
@@ -371,6 +414,36 @@ pub fn listeners(
         output.extend(super::transport::mihomo_server(&source.transport)?);
         return Ok(vec![output]);
     }
+    if let Protocol::Trojan(value) = &source.protocol {
+        if users.is_empty() {
+            return unsupported("Trojan 入口需要认证用户");
+        }
+        if !matches!(
+            source.transport,
+            crate::transport::Transport::Default
+                | crate::transport::Transport::WebSocket(_)
+                | crate::transport::Transport::Grpc(_)
+        ) {
+            return unsupported("Mihomo Trojan 入站使用原生 TCP、WebSocket 或 gRPC");
+        }
+        let mut options = Options::new(value)?;
+        options.take("multiplex");
+        options.finish("Mihomo Trojan 入站")?;
+        output.insert("type".to_owned(), json!("trojan"));
+        if let Some(multiplex) = &value.multiplex {
+            output.insert(
+                "mux-option".to_owned(),
+                super::multiplex::server(multiplex, inbound::Core::Mihomo)?,
+            );
+        }
+        if source.tls.enabled {
+            server_tls(source, store, &mut output)?;
+        } else {
+            output.insert("allow-insecure".to_owned(), json!(true));
+        }
+        output.extend(super::transport::mihomo_server(&source.transport)?);
+        return Ok(vec![output]);
+    }
     let Protocol::Mixed(value) = &source.protocol else {
         unreachable!()
     };
@@ -433,17 +506,27 @@ pub fn client_tls(
     globals: &mut Map<String, Value>,
     kind: &str,
 ) -> Result<()> {
-    let v2ray = matches!(kind, "vless" | "vmess");
+    let v2ray = matches!(kind, "vless" | "vmess" | "trojan");
     if source.reality.enabled && !v2ray {
         return unsupported("Mihomo HTTP/SOCKS 出站没有 REALITY 配置");
     }
     let mut options = Options::new(source)?;
     options.take("reality");
+    if kind == "trojan" {
+        options.take("enabled");
+    }
     options.rename(
         output,
         &[
             ("enabled", "tls"),
-            ("server_name", if v2ray { "servername" } else { "sni" }),
+            (
+                "server_name",
+                if matches!(kind, "vless" | "vmess") {
+                    "servername"
+                } else {
+                    "sni"
+                },
+            ),
         ],
     );
     if v2ray {

@@ -121,9 +121,6 @@ pub fn vmess(text: &str) -> Result<crate::vmess::Client> {
         if let Some(security) = query.remove("tls") {
             query.insert("security".to_owned(), security);
         }
-        if let Some(insecure) = query.remove("insecure") {
-            query.insert("allowInsecure".to_owned(), insecure);
-        }
     }
     client.tls = tls(&mut query, false)?;
     client.transport = transport(&mut query)?;
@@ -165,6 +162,33 @@ pub fn vless(url: &Url) -> Result<Client> {
     Ok(client)
 }
 
+pub fn trojan(url: &Url) -> Result<crate::trojan::Client> {
+    let mut query = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let mut password = percent_decode_str(url.username())
+        .decode_utf8()?
+        .into_owned();
+    if let Some(value) = url.password() {
+        password.push(':');
+        password.push_str(&percent_decode_str(value).decode_utf8()?);
+    }
+    let client = crate::trojan::Client {
+        name: percent_decode_str(url.fragment().unwrap_or_default())
+            .decode_utf8()?
+            .into_owned(),
+        server: host(url)?,
+        port: url.port().unwrap_or(443),
+        password,
+        tls: tls(&mut query, true)?,
+        transport: transport(&mut query)?,
+        ..crate::trojan::Client::default()
+    };
+    remaining(query.keys(), "链接参数")?;
+    Ok(client)
+}
+
 pub fn host(url: &Url) -> Result<String> {
     Ok(
         match Host::parse(url.host_str().ok_or("链接缺少服务器地址")?)? {
@@ -201,12 +225,18 @@ pub fn tls(query: &mut BTreeMap<String, String>, default: bool) -> Result<Tls> {
     if let Some(value) = query.remove("pcs") {
         tls.certificate_sha256 = value.split(',').map(str::to_owned).collect();
     }
-    if let Some(value) = query.remove("allowInsecure") {
-        tls.verify_certificate = Some(!match value.as_str() {
-            "1" | "true" => true,
-            "0" | "false" => false,
-            _ => return Err("allowInsecure 需要使用布尔值".into()),
-        });
+    for key in ["allowInsecure", "insecure"] {
+        if let Some(value) = query.remove(key) {
+            let verify = match value.as_str() {
+                "1" | "true" => false,
+                "0" | "false" => true,
+                _ => return Err(format!("{key} 需要使用布尔值").into()),
+            };
+            if tls.verify_certificate.is_some_and(|value| value != verify) {
+                return Err("链接中的证书验证参数相互冲突".into());
+            }
+            tls.verify_certificate = Some(verify);
+        }
     }
     if let Some(value) = query.remove("ech") {
         tls.ech.enabled = true;
@@ -264,6 +294,7 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
                 Some(value) => serde_json::from_value(json!(value))?,
             };
             Ok(Transport::Kcp(Kcp {
+                mtu: query.remove("mtu").map(|value| value.parse()).transpose()?,
                 seed: query.remove("seed"),
                 domain: query.remove("host"),
                 header,

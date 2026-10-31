@@ -30,6 +30,7 @@ pub enum Connection {
     Socks(Socks),
     Vless(crate::vless::Client),
     Vmess(crate::vmess::Client),
+    Trojan(crate::trojan::Client),
 }
 
 impl Connection {
@@ -45,6 +46,11 @@ impl Connection {
         let url = Url::parse(text)?;
         if url.scheme() == "vless" {
             let value = Self::Vless(crate::link::vless(&url)?);
+            value.validate()?;
+            return Ok(value);
+        }
+        if url.scheme() == "trojan" {
+            let value = Self::Trojan(crate::link::trojan(&url)?);
             value.validate()?;
             return Ok(value);
         }
@@ -139,6 +145,7 @@ impl Connection {
             Self::Socks(value) => &value.proxy.name,
             Self::Vless(value) => &value.name,
             Self::Vmess(value) => &value.name,
+            Self::Trojan(value) => &value.name,
         }
     }
 
@@ -149,6 +156,7 @@ impl Connection {
             Self::Socks(value) => Some(&value.transport),
             Self::Vless(value) => Some(&value.transport),
             Self::Vmess(value) => Some(&value.transport),
+            Self::Trojan(value) => Some(&value.transport),
         }
     }
 
@@ -159,6 +167,7 @@ impl Connection {
             Self::Socks(value) => value.multiplex.as_ref(),
             Self::Vless(value) => value.multiplex.as_ref(),
             Self::Vmess(value) => value.multiplex.as_ref(),
+            Self::Trojan(value) => value.multiplex.as_ref(),
         }
     }
 
@@ -180,6 +189,7 @@ impl Connection {
             Self::Socks(value) => format!("SOCKS {}", value.proxy.address()),
             Self::Vless(value) => format!("VLESS {}", address(&value.server, value.port)),
             Self::Vmess(value) => format!("VMess {}", address(&value.server, value.port)),
+            Self::Trojan(value) => format!("Trojan {}", address(&value.server, value.port)),
         }
     }
 
@@ -230,6 +240,13 @@ impl Connection {
                 Rc::new(move |value, screen| apply(&Self::Vmess(value.clone()), screen)),
                 creating,
             ),
+            Self::Trojan(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Trojan(value.clone()), screen)),
+                creating,
+            ),
         }
     }
 
@@ -247,6 +264,12 @@ impl Connection {
             Self::Vmess(value) => {
                 if value.uuid.is_empty() {
                     return Err("请填写 VMess 用户标识".into());
+                }
+                (value.server.as_str(), value.port)
+            }
+            Self::Trojan(value) => {
+                if value.password.is_empty() {
+                    return Err("请填写 Trojan 密码".into());
                 }
                 (value.server.as_str(), value.port)
             }
@@ -270,6 +293,7 @@ pub fn create(
         Item::new("socks", "SOCKS".stylized()),
         Item::new("vless", "VLESS".stylized()),
         Item::new("vmess", "VMess".stylized()),
+        Item::new("trojan", "Trojan".stylized()),
         Item::new("direct", "直连".stylized()),
         Item::new("back", "返回".stylized()),
     ];
@@ -289,7 +313,8 @@ pub fn create(
                     1 => Connection::Socks(Socks::default()),
                     2 => Connection::Vless(crate::vless::Client::default()),
                     3 => Connection::Vmess(crate::vmess::Client::default()),
-                    4 => Connection::Direct(Direct::default()),
+                    4 => Connection::Trojan(crate::trojan::Client::default()),
+                    5 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
                 let accepted = connection.form(screen, apply, true)?;

@@ -54,10 +54,11 @@ impl Graph<'_> {
         left: usize,
         right: usize,
         network: Network,
-        identity: Option<Uuid>,
+        left_identity: Option<Uuid>,
+        right_identity: Option<Uuid>,
     ) -> Result<bool> {
         let mut outcomes = Vec::new();
-        for index in [left, right] {
+        for (index, identity) in [(left, left_identity), (right, right_identity)] {
             let entry = &self.entries[index];
             let rules = entry
                 .accounts
@@ -188,7 +189,7 @@ pub fn build<'a>(
                             && (value.socks.enabled
                                 || value.http.enabled && inbound.core == Core::SingBox)
                     }
-                    Protocol::Vless(_) | Protocol::Vmess(_) => true,
+                    Protocol::Vless(_) | Protocol::Vmess(_) | Protocol::Trojan(_) => true,
                 }
             {
                 continue;

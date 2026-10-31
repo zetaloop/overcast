@@ -30,7 +30,7 @@ unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 ureq = { version = "3.5.0", features = ["socks-proxy"] }
 url = "2.5.8"
-uuid = { version = "1.29.0", features = ["serde", "v4"] }
+uuid = { version = "1.29.0", features = ["serde", "v4", "v5"] }
 varisat = "0.2.2"
 x25519-dalek = "3.0.0"
 zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2"] }

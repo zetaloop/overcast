@@ -20,6 +20,7 @@ mod resource;
 mod route;
 mod target;
 mod transport;
+mod trojan;
 pub mod tui;
 mod user;
 mod vless;

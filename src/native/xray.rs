@@ -20,6 +20,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Socks(value) => ("socks", Some(&value.proxy), &value.network),
         Connection::Vless(value) => ("vless", None, &value.network),
         Connection::Vmess(value) => ("vmess", None, &value.network),
+        Connection::Trojan(value) => ("trojan", None, &value.network),
     };
     let mut output = Map::from_iter([("protocol".to_owned(), json!(kind))]);
     if let Some(multiplex) = source.multiplex() {
@@ -196,6 +197,20 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
                 )?;
             }
             options.finish("Xray VMess")?;
+            Some(&value.tls)
+        }
+        Connection::Trojan(value) => {
+            let mut options = Options::new(&value.trojan)?;
+            settings.insert("address".to_owned(), json!(value.server));
+            settings.insert("port".to_owned(), json!(value.port));
+            settings.insert("password".to_owned(), json!(value.password));
+            options.rename(
+                &mut settings,
+                &[("user_level", "level"), ("user_label", "email")],
+            );
+            options.take("tcp");
+            options.take("udp");
+            options.finish("Xray Trojan")?;
             Some(&value.tls)
         }
     };
@@ -375,27 +390,7 @@ pub fn listeners(
                 if value.encryption.is_some() {
                     return unsupported("VLESS Encryption 与协议回落无法同时使用");
                 }
-                let mut fallbacks = Vec::new();
-                for fallback in &value.fallbacks {
-                    if fallback.target.is_empty() {
-                        return Err("请填写 VLESS 回落目标".into());
-                    }
-                    let mut options = Options::new(fallback)?;
-                    let mut output = Map::new();
-                    options.copy(&mut output, &["alpn", "path"]);
-                    options.rename(
-                        &mut output,
-                        &[
-                            ("server_name", "name"),
-                            ("target", "dest"),
-                            ("network", "type"),
-                            ("proxy_protocol", "xver"),
-                        ],
-                    );
-                    options.finish("Xray VLESS 回落")?;
-                    fallbacks.push(output);
-                }
-                settings.insert("fallbacks".to_owned(), json!(fallbacks));
+                settings.insert("fallbacks".to_owned(), fallbacks(&value.fallbacks)?);
             }
             options.finish("Xray VLESS 入站")?;
         }
@@ -435,6 +430,41 @@ pub fn listeners(
                 ),
             );
             options.finish("Xray VMess 入站")?;
+        }
+        Protocol::Trojan(value) => {
+            if users.is_empty() {
+                return unsupported("Trojan 入口需要认证用户");
+            }
+            output.insert("protocol".to_owned(), json!("trojan"));
+            let mut options = Options::new(value)?;
+            options.take("user_level");
+            options.take("fallbacks");
+            options.take("multiplex");
+            if let Some(multiplex) = &value.multiplex {
+                super::multiplex::server(multiplex, inbound::Core::Xray)?;
+            }
+            settings.insert(
+                "clients".to_owned(),
+                json!(
+                    users
+                        .iter()
+                        .map(|(name, password)| {
+                            let mut user = Map::from_iter([
+                                ("email".to_owned(), json!(name)),
+                                ("password".to_owned(), json!(password)),
+                            ]);
+                            if let Some(level) = value.user_level {
+                                user.insert("level".to_owned(), json!(level));
+                            }
+                            user
+                        })
+                        .collect::<Vec<_>>()
+                ),
+            );
+            if !value.fallbacks.is_empty() {
+                settings.insert("fallbacks".to_owned(), fallbacks(&value.fallbacks)?);
+            }
+            options.finish("Xray Trojan 入站")?;
         }
     }
     let mut options = Options::new(&source.listen)?;
@@ -647,6 +677,30 @@ pub fn security(source: &connection::Tls, store: &Store) -> Result<Map<String, V
         ("security".to_owned(), json!(kind)),
         (name.to_owned(), value),
     ]))
+}
+
+fn fallbacks(source: &[inbound::Fallback]) -> Result<Value> {
+    let mut fallbacks = Vec::new();
+    for fallback in source {
+        if fallback.target.is_empty() {
+            return Err("请填写回落目标".into());
+        }
+        let mut options = Options::new(fallback)?;
+        let mut output = Map::new();
+        options.copy(&mut output, &["alpn", "path"]);
+        options.rename(
+            &mut output,
+            &[
+                ("server_name", "name"),
+                ("target", "dest"),
+                ("network", "type"),
+                ("proxy_protocol", "xver"),
+            ],
+        );
+        options.finish("Xray 协议回落")?;
+        fallbacks.push(output);
+    }
+    Ok(json!(fallbacks))
 }
 
 fn reality_transport(source: &crate::transport::Transport) -> Result<()> {

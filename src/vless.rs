@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     connection::{Core, Network, PacketEncoding, Tls},
     form::{choices, fields},
+    inbound::Fallback,
     transport::Transport,
 };
 
@@ -67,17 +68,6 @@ pub struct Server {
     pub multiplex: Option<crate::multiplex::Server>,
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Fallback {
-    pub server_name: Option<String>,
-    pub alpn: Option<String>,
-    pub path: Option<String>,
-    pub target: String,
-    pub network: Option<String>,
-    pub proxy_protocol: Option<u8>,
-}
-
 #[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Flow {
@@ -124,13 +114,4 @@ fields!(Server {
     padding: "Vision 填充参数",
     fallbacks: "回落",
     multiplex: "S-Mux",
-});
-
-fields!(Fallback {
-    server_name: "服务名",
-    alpn: "ALPN",
-    path: "路径",
-    target: "目标",
-    network: "网络类型",
-    proxy_protocol: "PROXY protocol 版本",
 });

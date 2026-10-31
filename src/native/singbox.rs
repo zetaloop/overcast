@@ -15,14 +15,19 @@ pub fn outbound(
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
     if source.multiplex().is_some()
-        && !matches!(source, Connection::Vless(_) | Connection::Vmess(_))
+        && !matches!(
+            source,
+            Connection::Vless(_) | Connection::Vmess(_) | Connection::Trojan(_)
+        )
     {
         return unsupported("sing-box HTTP/SOCKS 出站没有流复用配置");
     }
-    if !matches!(source, Connection::Vless(_) | Connection::Vmess(_))
-        && source
-            .transport()
-            .is_some_and(|transport| !transport.is_default())
+    if !matches!(
+        source,
+        Connection::Vless(_) | Connection::Vmess(_) | Connection::Trojan(_)
+    ) && source
+        .transport()
+        .is_some_and(|transport| !transport.is_default())
     {
         return unsupported("sing-box 的 HTTP/SOCKS 出站没有传输封装配置");
     }
@@ -32,6 +37,7 @@ pub fn outbound(
         Connection::Socks(value) => ("socks", Some(&value.proxy), &value.network),
         Connection::Vless(value) => ("vless", None, &value.network),
         Connection::Vmess(value) => ("vmess", None, &value.network),
+        Connection::Trojan(value) => ("trojan", None, &value.network),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     dialer(network, &mut output)?;
@@ -232,6 +238,43 @@ pub fn outbound(
                 output.insert("transport".to_owned(), transport);
             }
         }
+        Connection::Trojan(value) => {
+            let mut options = Options::new(&value.trojan)?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("server_port".to_owned(), json!(value.port));
+            output.insert("password".to_owned(), json!(value.password));
+            options.take("tcp");
+            options.take("udp");
+            let mut networks = Vec::new();
+            if value.trojan.tcp.unwrap_or(true) {
+                networks.push("tcp");
+            }
+            if value.trojan.udp.unwrap_or(true) {
+                networks.push("udp");
+            }
+            output.insert("network".to_owned(), json!(networks));
+            options.finish("sing-box Trojan")?;
+            if let Some(multiplex) = &value.multiplex {
+                output.insert(
+                    "multiplex".to_owned(),
+                    super::multiplex::client(multiplex, inbound::Core::SingBox)?,
+                );
+            }
+            if value.tls.enabled {
+                output.insert(
+                    "tls".to_owned(),
+                    client_tls(&value.transport.client_tls(&value.tls), store, globals)?,
+                );
+            }
+            if let Some(transport) = super::transport::singbox(
+                &value.transport,
+                false,
+                value.tls.enabled,
+                value.tls.reality.enabled,
+            )? {
+                output.insert("transport".to_owned(), transport);
+            }
+        }
     }
     Ok(output)
 }
@@ -273,6 +316,7 @@ pub fn listeners(
                             }
                             json!(user)
                         }
+                        Protocol::Trojan(_) => json!({"name": name, "password": password}),
                     })
                     .collect::<Vec<_>>()
             ),
@@ -366,6 +410,35 @@ pub fn listeners(
         )? {
             output.insert("transport".to_owned(), transport);
         }
+        return Ok(vec![output]);
+    }
+    if let Protocol::Trojan(value) = &source.protocol {
+        if users.is_empty() {
+            return unsupported("Trojan 入口需要认证用户");
+        }
+        let mut options = Options::new(value)?;
+        options.take("fallbacks");
+        options.take("multiplex");
+        options.finish("sing-box Trojan 入站")?;
+        output.insert("type".to_owned(), json!("trojan"));
+        if let Some(multiplex) = &value.multiplex {
+            output.insert(
+                "multiplex".to_owned(),
+                super::multiplex::server(multiplex, inbound::Core::SingBox)?,
+            );
+        }
+        if source.tls.enabled {
+            output.insert("tls".to_owned(), server_tls(source, store)?);
+        }
+        if let Some(transport) = super::transport::singbox(
+            &source.transport,
+            true,
+            source.tls.enabled,
+            source.tls.reality.enabled,
+        )? {
+            output.insert("transport".to_owned(), transport);
+        }
+        fallbacks(source, &value.fallbacks, &mut output)?;
         return Ok(vec![output]);
     }
     let Protocol::Mixed(value) = &source.protocol else {
@@ -525,6 +598,88 @@ pub fn dialer(source: &connection::Network, output: &mut Map<String, Value>) -> 
         );
     }
     options.finish("sing-box 连接")
+}
+
+fn fallbacks(
+    source: &Inbound,
+    rules: &[inbound::Fallback],
+    output: &mut Map<String, Value>,
+) -> Result<()> {
+    let mut default = None;
+    let mut protocols = Map::new();
+    for rule in rules {
+        let mut options = Options::new(rule)?;
+        options.take("target");
+        options.take("alpn");
+        if rule.network.as_deref() == Some("tcp") {
+            options.take("network");
+        }
+        if rule.proxy_protocol == Some(0) {
+            options.take("proxy_protocol");
+        }
+        if rule.server_name.as_deref() == Some("") {
+            options.take("server_name");
+        }
+        if rule.path.as_deref() == Some("") {
+            options.take("path");
+        }
+        options.finish("sing-box 协议回落")?;
+        let (host, port) = if let Ok(port) = rule.target.parse::<u16>() {
+            ("localhost".to_owned(), port)
+        } else {
+            let address = url::Url::parse(&format!("tcp://{}", rule.target))?;
+            if address.path() != "" && address.path() != "/" {
+                return unsupported("sing-box 回落使用 TCP 地址");
+            }
+            (
+                crate::link::host(&address)?,
+                address.port().ok_or("回落目标缺少端口")?,
+            )
+        };
+        if port == 0 {
+            return Err("请填写回落目标端口".into());
+        }
+        let target = json!({"server": host, "server_port": port});
+        if let Some(alpn) = rule.alpn.as_ref().filter(|value| !value.is_empty()) {
+            if source.tls.enabled {
+                if source.tls.reality.enabled {
+                    return unsupported("sing-box REALITY 不提供 ALPN 协商结果");
+                }
+                protocols.insert(alpn.clone(), target);
+            }
+        } else {
+            default = Some(target);
+        }
+    }
+    if let Some(default) = &default
+        && !protocols.is_empty()
+    {
+        let mut alpn = source.tls.alpn.clone();
+        match &source.transport {
+            crate::transport::Transport::Http(_) => {
+                if alpn.is_empty() {
+                    alpn.push("http/1.1".to_owned());
+                }
+                alpn.push("h2".to_owned());
+            }
+            crate::transport::Transport::Grpc(_) => alpn.push("h2".to_owned()),
+            crate::transport::Transport::HttpUpgrade(_) if alpn.is_empty() => {
+                alpn.push("http/1.1".to_owned())
+            }
+            crate::transport::Transport::Quic if alpn.is_empty() => alpn.push("h3".to_owned()),
+            _ => {}
+        }
+        for alpn in alpn {
+            protocols.entry(alpn).or_insert_with(|| default.clone());
+        }
+    }
+    if let Some(default) = default {
+        output.insert("fallback".to_owned(), default);
+    }
+    if !protocols.is_empty() {
+        output.insert("fallback_for_alpn".to_owned(), json!(protocols));
+    }
+    Ok(())
 }
 
 fn client_tls(
