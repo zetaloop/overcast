@@ -17,6 +17,7 @@ pub struct Client {
     pub vless: ClientOptions,
     pub tls: Tls,
     pub transport: Transport,
+    pub multiplex: Option<crate::multiplex::Client>,
     pub network: Network,
 }
 
@@ -34,6 +35,7 @@ impl Default for Client {
                 ..Tls::default()
             },
             transport: Transport::default(),
+            multiplex: None,
             network: Network::default(),
         }
     }
@@ -62,6 +64,7 @@ pub struct Server {
     pub user_level: Option<u32>,
     pub padding: Vec<u32>,
     pub fallbacks: Vec<Fallback>,
+    pub multiplex: Option<crate::multiplex::Server>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -114,6 +117,7 @@ fields!(Client {
     vless: "VLESS",
     tls: "TLS",
     transport: "传输",
+    multiplex: "多路复用",
     network: "网络",
 });
 
@@ -136,6 +140,7 @@ fields!(Server {
     user_level: "用户等级",
     padding: "Vision 填充参数",
     fallbacks: "回落",
+    multiplex: "S-Mux",
 });
 
 fields!(Fallback {

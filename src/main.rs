@@ -8,6 +8,7 @@ mod graph;
 mod inbound;
 pub mod input;
 mod link;
+mod multiplex;
 mod native;
 mod outbound;
 mod pattern;

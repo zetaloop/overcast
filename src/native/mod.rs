@@ -1,6 +1,7 @@
 mod binding;
 mod listener;
 mod mihomo;
+mod multiplex;
 mod options;
 mod reality;
 mod routing;
@@ -505,6 +506,7 @@ impl Builder<'_> {
                     Ok(value) => {
                         let mut environment = BTreeMap::new();
                         if core == Core::Xray
+                            && connection.multiplex().is_none_or(|mux| mux.tcp_only)
                             && matches!(connection, Connection::Vless(value)
                                 if value.vless.packet_encoding == crate::vless::PacketEncoding::Packet)
                         {
@@ -516,6 +518,7 @@ impl Builder<'_> {
                             environment,
                             value,
                             resolve_udp: core == Core::SingBox
+                                && connection.multiplex().is_none_or(|mux| mux.tcp_only)
                                 && matches!(connection, Connection::Vless(value)
                                     if value.vless.packet_encoding == crate::vless::PacketEncoding::PacketAddr),
                         }));
@@ -797,6 +800,7 @@ fn key(core: Core) -> &'static str {
 }
 
 fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
+    let multiplex = source.multiplex().is_some_and(|mux| !mux.tcp_only);
     match source {
         Connection::Direct(_) => parent,
         Connection::Http(value) => {
@@ -812,7 +816,7 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
                 } else {
                     parent[0]
                 };
-            [transport, transport && core == Core::SingBox]
+            [transport, transport && (core == Core::SingBox || multiplex)]
         }
         Connection::Socks(value) => {
             let transport = if core == Core::Xray {
@@ -823,8 +827,8 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
             [
                 transport && value.socks.tcp.unwrap_or(true),
                 transport
-                    && (parent[1] || value.socks.udp_over_tcp.is_some())
-                    && value.socks.version == connection::SocksVersion::V5
+                    && (parent[1] || value.socks.udp_over_tcp.is_some() || multiplex)
+                    && (value.socks.version == connection::SocksVersion::V5 || multiplex)
                     && value.socks.udp.unwrap_or(true),
             ]
         }

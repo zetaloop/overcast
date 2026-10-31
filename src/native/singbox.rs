@@ -14,6 +14,9 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
+    if source.multiplex().is_some() && !matches!(source, Connection::Vless(_)) {
+        return unsupported("sing-box HTTP/SOCKS 出站没有流复用配置");
+    }
     if !matches!(source, Connection::Vless(_))
         && source
             .transport()
@@ -122,18 +125,28 @@ pub fn outbound(
             }
             output.insert("network".to_owned(), json!(networks));
             options.take("packet_encoding");
-            match value.vless.packet_encoding {
-                crate::vless::PacketEncoding::Default => {}
-                encoding => {
-                    output.insert(
-                        "packet_encoding".to_owned(),
-                        json!(match encoding {
-                            crate::vless::PacketEncoding::Packet => "",
-                            crate::vless::PacketEncoding::PacketAddr => "packetaddr",
-                            _ => "xudp",
-                        }),
-                    );
+            if value.multiplex.as_ref().is_some_and(|mux| !mux.tcp_only) {
+                options.take("udp_concurrency");
+            } else {
+                match value.vless.packet_encoding {
+                    crate::vless::PacketEncoding::Default => {}
+                    encoding => {
+                        output.insert(
+                            "packet_encoding".to_owned(),
+                            json!(match encoding {
+                                crate::vless::PacketEncoding::Packet => "",
+                                crate::vless::PacketEncoding::PacketAddr => "packetaddr",
+                                _ => "xudp",
+                            }),
+                        );
+                    }
                 }
+            }
+            if let Some(multiplex) = &value.multiplex {
+                output.insert(
+                    "multiplex".to_owned(),
+                    super::multiplex::client(multiplex, inbound::Core::SingBox)?,
+                );
             }
             options.finish("sing-box VLESS")?;
             if value.tls.enabled {
@@ -219,6 +232,13 @@ pub fn listeners(
         }
         let mut options = Options::new(value)?;
         options.take("flow");
+        options.take("multiplex");
+        if let Some(multiplex) = &value.multiplex {
+            output.insert(
+                "multiplex".to_owned(),
+                super::multiplex::server(multiplex, inbound::Core::SingBox)?,
+            );
+        }
         if value.encryption.as_deref() == Some("none") {
             options.take("encryption");
         }

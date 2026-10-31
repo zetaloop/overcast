@@ -111,6 +111,9 @@ pub fn outbound(
             options.take("udp");
             output.insert("udp".to_owned(), json!(value.socks.udp.unwrap_or(true)));
             options.take("tcp");
+            if source.multiplex().is_some_and(|mux| !mux.tcp_only) {
+                options.take("udp_over_tcp");
+            }
             options.finish("Mihomo SOCKS")?;
             Some(&value.tls)
         }
@@ -145,16 +148,20 @@ pub fn outbound(
             options.take("tcp");
             options.take("udp");
             options.take("packet_encoding");
-            match value.vless.packet_encoding {
-                crate::vless::PacketEncoding::Default => {}
-                crate::vless::PacketEncoding::Packet => {
-                    return unsupported("Mihomo VLESS 的 UDP 编码使用 XUDP 或 PacketAddr");
-                }
-                crate::vless::PacketEncoding::PacketAddr => {
-                    output.insert("packet-encoding".to_owned(), json!("packetaddr"));
-                }
-                crate::vless::PacketEncoding::Xudp => {
-                    output.insert("packet-encoding".to_owned(), json!("xudp"));
+            if value.multiplex.as_ref().is_some_and(|mux| !mux.tcp_only) {
+                options.take("udp_concurrency");
+            } else {
+                match value.vless.packet_encoding {
+                    crate::vless::PacketEncoding::Default => {}
+                    crate::vless::PacketEncoding::Packet => {
+                        return unsupported("Mihomo VLESS 的 UDP 编码使用 XUDP 或 PacketAddr");
+                    }
+                    crate::vless::PacketEncoding::PacketAddr => {
+                        output.insert("packet-encoding".to_owned(), json!("packetaddr"));
+                    }
+                    crate::vless::PacketEncoding::Xudp => {
+                        output.insert("packet-encoding".to_owned(), json!("xudp"));
+                    }
                 }
             }
             options.finish("Mihomo VLESS")?;
@@ -172,6 +179,12 @@ pub fn outbound(
         if matches!(source, Connection::Socks(_)) {
             output.remove("sni");
         }
+    }
+    if let Some(multiplex) = source.multiplex() {
+        output.insert(
+            "smux".to_owned(),
+            super::multiplex::client(multiplex, inbound::Core::Mihomo)?,
+        );
     }
     Ok(output)
 }
@@ -226,6 +239,13 @@ pub fn listeners(
         }
         let mut options = Options::new(value)?;
         options.take("flow");
+        options.take("multiplex");
+        if let Some(multiplex) = &value.multiplex {
+            output.insert(
+                "mux-option".to_owned(),
+                super::multiplex::server(multiplex, inbound::Core::Mihomo)?,
+            );
+        }
         options.rename(&mut output, &[("encryption", "decryption")]);
         options.finish("Mihomo VLESS 入站")?;
         output.insert("type".to_owned(), json!("vless"));

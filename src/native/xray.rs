@@ -21,6 +21,12 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Vless(value) => ("vless", None, &value.network),
     };
     let mut output = Map::from_iter([("protocol".to_owned(), json!(kind))]);
+    if let Some(multiplex) = source.multiplex() {
+        output.insert(
+            "mux".to_owned(),
+            super::multiplex::client(multiplex, inbound::Core::Xray)?,
+        );
+    }
     let mut settings = Map::new();
     let mut stream = Map::new();
     let mut options = Options::new(network)?;
@@ -86,10 +92,16 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             );
             options.take("tcp");
             options.take("udp");
+            if source.multiplex().is_some_and(|mux| !mux.tcp_only) {
+                options.take("udp_over_tcp");
+            }
             options.finish("Xray SOCKS")?;
             Some(&value.tls)
         }
         Connection::Vless(value) => {
+            if value.multiplex.is_some() && value.vless.flow == crate::vless::Flow::Vision {
+                return unsupported("Vision 与 Mux.Cool TCP 流复用无法同时使用");
+            }
             let mut options = Options::new(&value.vless)?;
             settings.insert("address".to_owned(), json!(value.server));
             settings.insert("port".to_owned(), json!(value.port));
@@ -116,31 +128,39 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             options.take("udp");
             options.take("packet_encoding");
             options.take("udp_concurrency");
-            if let Some(concurrency) = value.vless.udp_concurrency {
-                i16::try_from(concurrency).map_err(|_| "Xray UDP 并发流数超过支持范围")?;
-                if concurrency == 0
-                    && value.vless.packet_encoding == crate::vless::PacketEncoding::Xudp
-                {
-                    return Err("XUDP 并发流数需要大于零".into());
+            if value.multiplex.as_ref().is_none_or(|mux| mux.tcp_only) {
+                if let Some(concurrency) = value.vless.udp_concurrency {
+                    i16::try_from(concurrency).map_err(|_| "Xray UDP 并发流数超过支持范围")?;
+                    if concurrency == 0
+                        && value.vless.packet_encoding == crate::vless::PacketEncoding::Xudp
+                    {
+                        return Err("XUDP 并发流数需要大于零".into());
+                    }
                 }
-            }
-            match value.vless.packet_encoding {
-                crate::vless::PacketEncoding::PacketAddr => {
-                    return unsupported("Xray VLESS 没有 PacketAddr 编码配置");
+                match value.vless.packet_encoding {
+                    crate::vless::PacketEncoding::PacketAddr => {
+                        return unsupported("Xray VLESS 没有 PacketAddr 编码配置");
+                    }
+                    crate::vless::PacketEncoding::Packet
+                        if value.vless.udp_concurrency.is_some()
+                            || value.vless.flow == crate::vless::Flow::Vision =>
+                    {
+                        return unsupported(
+                            "原生 VLESS 数据包与 Vision、XUDP 并发设置无法同时使用",
+                        );
+                    }
+                    crate::vless::PacketEncoding::Xudp | crate::vless::PacketEncoding::Default
+                        if value.vless.packet_encoding == crate::vless::PacketEncoding::Xudp
+                            || value.vless.udp_concurrency.is_some() =>
+                    {
+                        let mux = output.entry("mux").or_insert_with(|| json!({"enabled": true, "concurrency": -1, "xudpProxyUDP443": "allow"}));
+                        if mux["xudpConcurrency"] == -1 {
+                            return unsupported("仅 TCP 流复用与 XUDP 并发配置无法同时使用");
+                        }
+                        mux["xudpConcurrency"] = json!(value.vless.udp_concurrency.unwrap_or(8));
+                    }
+                    _ => {}
                 }
-                crate::vless::PacketEncoding::Packet
-                    if value.vless.udp_concurrency.is_some()
-                        || value.vless.flow == crate::vless::Flow::Vision =>
-                {
-                    return unsupported("原生 VLESS 数据包与 Vision、XUDP 并发设置无法同时使用");
-                }
-                crate::vless::PacketEncoding::Xudp => {
-                    output.insert("mux".to_owned(), json!({"enabled": true, "concurrency": -1, "xudpConcurrency": value.vless.udp_concurrency.unwrap_or(8), "xudpProxyUDP443": "allow"}));
-                }
-                _ if value.vless.udp_concurrency.is_some() => {
-                    output.insert("mux".to_owned(), json!({"enabled": true, "concurrency": -1, "xudpConcurrency": value.vless.udp_concurrency, "xudpProxyUDP443": "allow"}));
-                }
-                _ => {}
             }
             options.finish("Xray VLESS")?;
             Some(&value.tls)
@@ -243,6 +263,10 @@ pub fn listeners(
             options.take("flow");
             options.take("encryption");
             options.take("user_level");
+            options.take("multiplex");
+            if let Some(multiplex) = &value.multiplex {
+                super::multiplex::server(multiplex, inbound::Core::Xray)?;
+            }
             settings.insert(
                 "decryption".to_owned(),
                 json!(value.encryption.as_deref().unwrap_or("none")),

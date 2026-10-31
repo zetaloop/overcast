@@ -105,6 +105,7 @@ impl Connection {
                 },
                 network: Network::default(),
                 transport: Transport::default(),
+                multiplex: None,
             }),
             "socks" | "socks4" | "socks4a" | "socks5" => {
                 if !url.path().is_empty() && url.path() != "/" {
@@ -123,6 +124,7 @@ impl Connection {
                     tls: Tls::default(),
                     network: Network::default(),
                     transport: Transport::default(),
+                    multiplex: None,
                 })
             }
             protocol => return Err(format!("不支持的连接链接：{protocol}").into()),
@@ -145,6 +147,15 @@ impl Connection {
             Self::Http(value) => Some(&value.transport),
             Self::Socks(value) => Some(&value.transport),
             Self::Vless(value) => Some(&value.transport),
+        }
+    }
+
+    pub fn multiplex(&self) -> Option<&crate::multiplex::Client> {
+        match self {
+            Self::Direct(_) => None,
+            Self::Http(value) => value.multiplex.as_ref(),
+            Self::Socks(value) => value.multiplex.as_ref(),
+            Self::Vless(value) => value.multiplex.as_ref(),
         }
     }
 
@@ -295,6 +306,7 @@ pub struct Http {
     pub http: HttpOptions,
     pub network: Network,
     pub transport: Transport,
+    pub multiplex: Option<crate::multiplex::Client>,
 }
 
 impl Default for Http {
@@ -308,6 +320,7 @@ impl Default for Http {
             http: HttpOptions::default(),
             network: Network::default(),
             transport: Transport::default(),
+            multiplex: None,
         }
     }
 }
@@ -320,6 +333,7 @@ pub struct Socks {
     pub socks: SocksOptions,
     pub network: Network,
     pub transport: Transport,
+    pub multiplex: Option<crate::multiplex::Client>,
 }
 
 impl Default for Socks {
@@ -333,6 +347,7 @@ impl Default for Socks {
             socks: SocksOptions::default(),
             network: Network::default(),
             transport: Transport::default(),
+            multiplex: None,
         }
     }
 }
@@ -641,6 +656,7 @@ fields!(Http {
     tls: "TLS",
     http: "HTTP",
     transport: "传输",
+    multiplex: "多路复用",
     network: "网络",
 });
 
@@ -649,6 +665,7 @@ fields!(Socks {
     tls: "TLS",
     socks: "SOCKS",
     transport: "传输",
+    multiplex: "多路复用",
     network: "网络",
 });
 
