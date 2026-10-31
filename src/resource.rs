@@ -84,7 +84,14 @@ pub fn json<T: DeserializeOwned>(
     retry(progress, step, || {
         step.detail(url);
         let mut response = request(client, url)?;
-        Ok(serde_json::from_reader(response.body_mut().as_reader())?)
+        let reader = io::BufReader::new(Reader {
+            source: response.body_mut().as_reader(),
+            progress,
+        });
+        match serde_json::from_reader(reader) {
+            Err(error) if error.is_io() => Err(io::Error::from(error).into()),
+            result => Ok(result?),
+        }
     })
 }
 
@@ -183,7 +190,9 @@ fn delay(error: &(dyn Error + 'static), backoff: Duration) -> Option<Duration> {
             ureq::Error::Timeout(_) | ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => {
                 return Some(backoff);
             }
-            ureq::Error::Io(error) => return delay(error, backoff),
+            ureq::Error::Io(error) | ureq::Error::Decompress(_, error) => {
+                return delay(error, backoff);
+            }
             _ => {}
         }
     }
