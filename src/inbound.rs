@@ -47,14 +47,18 @@ impl Inbound {
             address: String::new(),
             ports: match kind {
                 Kind::Mixed => "1080",
+                Kind::Vless => "443",
             }
             .to_owned(),
-            core: Core::default(),
+            core: kind.core(),
             users: true,
             credentials: None,
             protocol: kind.protocol(),
             transport: Transport::default(),
-            tls: Tls::default(),
+            tls: Tls {
+                enabled: kind == Kind::Vless,
+                ..Tls::default()
+            },
             listen: Listen::default(),
         }
     }
@@ -136,12 +140,21 @@ pub enum Core {
 enum Kind {
     #[default]
     Mixed,
+    Vless,
 }
 
 impl Kind {
+    fn core(self) -> Core {
+        match self {
+            Self::Mixed => Core::SingBox,
+            Self::Vless => Core::Xray,
+        }
+    }
+
     fn protocol(self) -> Protocol {
         match self {
             Self::Mixed => Protocol::Mixed(Mixed::default()),
+            Self::Vless => Protocol::Vless(crate::vless::Server::default()),
         }
     }
 }
@@ -150,12 +163,14 @@ impl Kind {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Protocol {
     Mixed(Mixed),
+    Vless(crate::vless::Server),
 }
 
 impl Protocol {
     fn kind(&self) -> Kind {
         match self {
             Self::Mixed(_) => Kind::Mixed,
+            Self::Vless(_) => Kind::Vless,
         }
     }
 
@@ -167,6 +182,13 @@ impl Protocol {
                 &title,
                 value,
                 Rc::new(move |value, screen| apply(&Self::Mixed(value.clone()), screen)),
+                false,
+            ),
+            Self::Vless(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Vless(value.clone()), screen)),
                 false,
             ),
         }
@@ -486,7 +508,7 @@ fn edit(
                     let candidate = |kind: Kind| {
                         let mut edited = inbound.clone();
                         if kind != inbound.protocol.kind() {
-                            edited.core = Core::default();
+                            edited.core = kind.core();
                         }
                         edited.protocol = protocols
                             .get(&kind)
@@ -680,6 +702,7 @@ choices!(Core {
 
 choices!(Kind {
     Mixed: "mixed" => "HTTP/SOCKS",
+    Vless: "vless" => "VLESS",
 });
 
 choices!(HttpVersion {

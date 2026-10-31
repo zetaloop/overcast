@@ -27,6 +27,7 @@ enum Mode {
     Http3,
     Socks,
     SocksUdp,
+    Vless,
 }
 
 impl Mode {
@@ -41,6 +42,7 @@ impl Mode {
         match self {
             Self::Http1 | Self::Http2 | Self::Http3 => "HTTP/HTTPS",
             Self::Socks | Self::SocksUdp => "SOCKS",
+            Self::Vless => "VLESS",
         }
     }
 
@@ -48,6 +50,7 @@ impl Mode {
         match self {
             Self::SocksUdp => network == Network::Udp,
             Self::Socks => network == Network::Tcp || core != Core::Mihomo,
+            Self::Vless => true,
             _ => network == Network::Tcp || core == Core::SingBox,
         }
     }
@@ -63,7 +66,7 @@ pub struct Member {
 
 impl Member {
     pub fn protocol(&self) -> Option<&'static str> {
-        if self.source.core != Core::Mihomo {
+        if self.source.core != Core::Mihomo || matches!(self.source.protocol, Protocol::Vless(_)) {
             return None;
         }
         let families: BTreeSet<_> = self.modes.iter().map(|mode| mode.family()).collect();
@@ -143,7 +146,6 @@ pub fn build(
         if unix && source.core != Core::Xray {
             return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
         }
-        let Protocol::Mixed(protocol) = &source.protocol;
         let transport_udp = source.transport.udp(
             source.tls.enabled && !source.tls.reality.enabled,
             &source.tls.alpn,
@@ -151,7 +153,10 @@ pub fn build(
         if unix && transport_udp {
             return Err(format!("入站 {} 的 XHTTP/3 使用 UDP 监听地址", source.name).into());
         }
-        if (unix || transport_udp) && source.core == Core::Xray && protocol.socks.enabled {
+        if (unix || transport_udp)
+            && source.core == Core::Xray
+            && matches!(&source.protocol, Protocol::Mixed(protocol) if protocol.socks.enabled)
+        {
             return Err(format!(
                 "入站 {} 的 Xray SOCKS 处理器需要 TCP 地址，HTTP 可使用当前传输",
                 source.name
@@ -159,32 +164,36 @@ pub fn build(
             .into());
         }
         let mut modes = BTreeSet::new();
-        if protocol.http.enabled {
-            let versions = if protocol.http.versions.is_empty() {
-                if source.core == Core::SingBox {
-                    vec![HttpVersion::Http1, HttpVersion::Http2]
+        if let Protocol::Mixed(protocol) = &source.protocol {
+            if protocol.http.enabled {
+                let versions = if protocol.http.versions.is_empty() {
+                    if source.core == Core::SingBox {
+                        vec![HttpVersion::Http1, HttpVersion::Http2]
+                    } else {
+                        vec![HttpVersion::Http1]
+                    }
                 } else {
-                    vec![HttpVersion::Http1]
-                }
-            } else {
-                protocol.http.versions.clone()
-            };
-            modes.extend(versions.into_iter().map(|version| match version {
-                HttpVersion::Http1 => Mode::Http1,
-                HttpVersion::Http2 => Mode::Http2,
-                HttpVersion::Http3 => Mode::Http3,
-            }));
-        }
-        if protocol.socks.enabled {
-            modes.insert(Mode::Socks);
-            if source.core == Core::Mihomo
-                && entry
-                    .accounts
-                    .iter()
-                    .any(|account| account.network == Network::Udp)
-            {
-                modes.insert(Mode::SocksUdp);
+                    protocol.http.versions.clone()
+                };
+                modes.extend(versions.into_iter().map(|version| match version {
+                    HttpVersion::Http1 => Mode::Http1,
+                    HttpVersion::Http2 => Mode::Http2,
+                    HttpVersion::Http3 => Mode::Http3,
+                }));
             }
+            if protocol.socks.enabled {
+                modes.insert(Mode::Socks);
+                if source.core == Core::Mihomo
+                    && entry
+                        .accounts
+                        .iter()
+                        .any(|account| account.network == Network::Udp)
+                {
+                    modes.insert(Mode::SocksUdp);
+                }
+            }
+        } else {
+            modes.insert(Mode::Vless);
         }
         let parts =
             if source.core == Core::SingBox && modes.contains(&Mode::Http3) && modes.len() > 1 {
@@ -202,11 +211,18 @@ pub fn build(
         let users = Rc::new(credentials(entry));
         for modes in parts {
             let mut source = source.clone();
-            let Protocol::Mixed(protocol) = &mut source.protocol;
-            if modes == BTreeSet::from([Mode::Http3]) {
-                protocol.socks.enabled = false;
+            if let Protocol::Mixed(protocol) = &mut source.protocol {
+                if modes == BTreeSet::from([Mode::Http3]) {
+                    protocol.socks.enabled = false;
+                }
+                protocol.http.versions = versions(&modes);
+                if source.core != Core::SingBox {
+                    protocol.udp = entry
+                        .accounts
+                        .iter()
+                        .any(|account| account.network == Network::Udp);
+                }
             }
-            protocol.http.versions = versions(&modes);
             if transport_udp || modes.iter().all(|mode| mode.wire() == Network::Udp) {
                 source.listen.tcp_fast_open = None;
                 source.listen.tcp_multi_path = None;
@@ -217,12 +233,6 @@ pub fn build(
                 source.listen.tcp_window = None;
                 source.listen.tcp_max_segment = None;
                 source.listen.tcp_user_timeout = None;
-            }
-            if source.core != Core::SingBox {
-                protocol.udp = entry
-                    .accounts
-                    .iter()
-                    .any(|account| account.network == Network::Udp);
             }
             let binding = Binding::new(
                 &source,
@@ -327,7 +337,9 @@ pub fn build(
                 return Err(conflict(&members, "认证与无凭据连接无法共用原生认证表").into());
             }
             for (&user, password) in member.users.iter() {
-                if users.get(&user).is_some_and(|other| other != password) {
+                if matches!(source.protocol, Protocol::Mixed(_))
+                    && users.get(&user).is_some_and(|other| other != password)
+                {
                     return Err(conflict(&members, &format!("凭据 {user} 对应不同密码")).into());
                 }
                 users.insert(user, password.clone());
@@ -353,10 +365,20 @@ pub fn build(
                     "传输",
                     &members,
                 )?;
+            } else if source.core == Core::SingBox {
+                same(
+                    &super::transport::singbox(&source.transport, true)?
+                        .unwrap_or(serde_json::json!({})),
+                    &super::transport::singbox(&member.source.transport, true)?
+                        .unwrap_or(serde_json::json!({})),
+                    &[],
+                    "传输",
+                    &members,
+                )?;
             } else {
                 same(
-                    &source.transport,
-                    &member.source.transport,
+                    &super::transport::mihomo_server(&source.transport)?,
+                    &super::transport::mihomo_server(&member.source.transport)?,
                     &[],
                     "传输",
                     &members,
@@ -390,43 +412,52 @@ pub fn build(
                     return Err(conflict(&members, "这个核心的监听使用一组证书与私钥").into());
                 }
             }
-            let Protocol::Mixed(current) = &mut source.protocol;
-            let Protocol::Mixed(other) = &member.source.protocol;
-            if current.user_level != other.user_level {
-                return Err(conflict(&members, "用户等级不同").into());
-            }
-            current.udp |= other.udp;
-            if current.http.enabled && other.http.enabled {
-                same(
-                    &current.http,
-                    &other.http,
-                    &["enabled", "versions"],
-                    "HTTP",
-                    &members,
-                )?;
-            } else if other.http.enabled {
-                current.http = other.http.clone();
-            }
-            if current.socks.enabled && other.socks.enabled {
-                same(
-                    &current.socks,
-                    &other.socks,
-                    &["enabled"],
-                    "SOCKS",
-                    &members,
-                )?;
-            } else if other.socks.enabled {
-                current.socks = other.socks.clone();
+            match (&mut source.protocol, &member.source.protocol) {
+                (Protocol::Mixed(current), Protocol::Mixed(other)) => {
+                    if current.user_level != other.user_level {
+                        return Err(conflict(&members, "用户等级不同").into());
+                    }
+                    current.udp |= other.udp;
+                    if current.http.enabled && other.http.enabled {
+                        same(
+                            &current.http,
+                            &other.http,
+                            &["enabled", "versions"],
+                            "HTTP",
+                            &members,
+                        )?;
+                    } else if other.http.enabled {
+                        current.http = other.http.clone();
+                    }
+                    if current.socks.enabled && other.socks.enabled {
+                        same(
+                            &current.socks,
+                            &other.socks,
+                            &["enabled"],
+                            "SOCKS",
+                            &members,
+                        )?;
+                    } else if other.socks.enabled {
+                        current.socks = other.socks.clone();
+                    }
+                }
+                (Protocol::Vless(current), Protocol::Vless(other)) => {
+                    same(current, other, &[], "VLESS", &members)?
+                }
+                _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
             }
         }
-        let Protocol::Mixed(protocol) = &mut source.protocol;
-        protocol.http.enabled = modes
-            .iter()
-            .any(|mode| matches!(mode, Mode::Http1 | Mode::Http2 | Mode::Http3));
-        protocol.http.versions = versions(&modes);
-        protocol.socks.enabled = modes.contains(&Mode::Socks);
-        if source.core == Core::Mihomo {
-            protocol.udp = modes.contains(&Mode::SocksUdp);
+        if let Protocol::Mixed(protocol) = &mut source.protocol {
+            protocol.http.enabled = modes
+                .iter()
+                .any(|mode| matches!(mode, Mode::Http1 | Mode::Http2 | Mode::Http3));
+            protocol.http.versions = versions(&modes);
+            protocol.socks.enabled = modes.contains(&Mode::Socks);
+            if source.core == Core::Mihomo {
+                protocol.udp = modes.contains(&Mode::SocksUdp);
+            }
+        } else if users.is_empty() {
+            return Err(format!("入站 {} 的 VLESS 需要用户或入口凭据", source.name).into());
         }
         let mut addresses: BTreeSet<_> = members
             .iter()

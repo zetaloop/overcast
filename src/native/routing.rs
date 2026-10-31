@@ -24,6 +24,7 @@ pub struct Rule {
     pub network: Option<Network>,
     pub condition: Condition,
     pub outbound: String,
+    pub resolve_udp: bool,
 }
 
 pub struct Matchers<'a> {
@@ -192,6 +193,13 @@ impl<'a> Matchers<'a> {
                     "rules": [context, self.singbox_condition(&condition)],
                 })
             };
+            if rule.resolve_udp {
+                result.push(json!({
+                    "type": "logical", "mode": "and",
+                    "rules": [value.clone(), {"network": "udp"}],
+                    "action": "resolve",
+                }));
+            }
             let fields = value.as_object_mut().unwrap();
             if rule.outbound == "block" {
                 fields.insert("action".to_owned(), json!("reject"));

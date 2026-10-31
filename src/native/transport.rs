@@ -6,6 +6,7 @@ use url::form_urlencoded;
 use crate::{
     Result,
     config::Store,
+    connection::Network,
     transport::{Mode, PaddingPlacement, Placement, Pool, Quic, Transport, XHttp, XHttpOptions},
 };
 
@@ -79,6 +80,9 @@ pub fn xray(source: &Transport, inbound: bool, store: &Store) -> Result<Map<Stri
                     "permit_without_stream",
                     "receive_window",
                     "user_agent",
+                    "connections",
+                    "min_streams",
+                    "max_streams",
                 ] {
                     options.take(field);
                 }
@@ -130,6 +134,444 @@ pub fn xray(source: &Transport, inbound: bool, store: &Store) -> Result<Map<Stri
     if !settings.is_empty() {
         output.insert(name.to_owned(), json!(settings));
     }
+    Ok(output)
+}
+
+pub fn singbox(source: &Transport, inbound: bool) -> Result<Option<Value>> {
+    let mut output = Map::new();
+    match source {
+        Transport::Default => return Ok(None),
+        Transport::WebSocket(value) => {
+            let mut options = Options::new(value)?;
+            output.insert("type".to_owned(), json!("ws"));
+            options.copy(&mut output, &["path"]);
+            options.rename(&mut output, &[("early_data", "max_early_data")]);
+            options.take("early_data_header");
+            output.insert(
+                "early_data_header_name".to_owned(),
+                json!(
+                    value
+                        .early_data_header
+                        .as_deref()
+                        .unwrap_or("Sec-WebSocket-Protocol")
+                ),
+            );
+            options.take("headers");
+            if !inbound {
+                options.take("host");
+                let mut headers = value.headers.clone();
+                if let Some(host) = &value.host {
+                    headers.insert("Host".to_owned(), vec![host.clone()]);
+                }
+                if !headers.is_empty() {
+                    output.insert("headers".to_owned(), json!(headers));
+                }
+            } else if let Some(Value::String(path)) = output.get_mut("path") {
+                *path = path.split('?').next().unwrap().to_owned();
+            }
+            options.finish("sing-box WebSocket")?;
+        }
+        Transport::HttpUpgrade(value) => {
+            let mut options = Options::new(value)?;
+            output.insert("type".to_owned(), json!("httpupgrade"));
+            options.copy(&mut output, &["host", "path"]);
+            if inbound {
+                options.take("headers");
+                options.take("early_data");
+            } else {
+                options.copy(&mut output, &["headers"]);
+                if value.early_data == Some(false) {
+                    options.take("early_data");
+                }
+            }
+            options.finish("sing-box HTTPUpgrade")?;
+        }
+        Transport::Grpc(value) => {
+            let mut options = Options::new(value)?;
+            output.insert("type".to_owned(), json!("grpc"));
+            options.copy(&mut output, &["service_name"]);
+            if inbound {
+                for field in [
+                    "authority",
+                    "user_agent",
+                    "receive_window",
+                    "permit_without_stream",
+                    "connections",
+                    "min_streams",
+                    "max_streams",
+                ] {
+                    options.take(field);
+                }
+            } else {
+                options.copy(&mut output, &["permit_without_stream"]);
+            }
+            options.durations(
+                &mut output,
+                &[
+                    ("keep_alive", "idle_timeout"),
+                    ("ping_timeout", "ping_timeout"),
+                ],
+                None,
+            )?;
+            options.finish("sing-box gRPC")?;
+        }
+        Transport::XHttp(_) => return unsupported("sing-box 没有 XHTTP 传输配置"),
+    }
+    Ok(Some(json!(output)))
+}
+
+pub fn mihomo_client(
+    source: &Transport,
+    network: &Network,
+    store: &Store,
+    globals: &mut Map<String, Value>,
+) -> Result<Map<String, Value>> {
+    let mut output = Map::new();
+    match source {
+        Transport::Default => {}
+        Transport::WebSocket(value) => {
+            let mut options = Options::new(value)?;
+            let mut ws = Map::new();
+            options.copy(&mut ws, &["path"]);
+            options.rename(&mut ws, &[("early_data", "max-early-data")]);
+            options.take("early_data_header");
+            ws.insert(
+                "early-data-header-name".to_owned(),
+                json!(
+                    value
+                        .early_data_header
+                        .as_deref()
+                        .unwrap_or("Sec-WebSocket-Protocol")
+                ),
+            );
+            options.take("host");
+            options.take("headers");
+            let mut headers = single_headers(&value.headers)?;
+            if let Some(host) = &value.host {
+                headers.insert("Host".to_owned(), host.clone());
+            }
+            if !headers.is_empty() {
+                ws.insert("headers".to_owned(), json!(headers));
+            }
+            options.finish("Mihomo WebSocket")?;
+            output.insert("network".to_owned(), json!("ws"));
+            output.insert("ws-opts".to_owned(), json!(ws));
+        }
+        Transport::HttpUpgrade(value) => {
+            let mut options = Options::new(value)?;
+            let mut ws = Map::from_iter([("v2ray-http-upgrade".to_owned(), json!(true))]);
+            options.copy(&mut ws, &["path"]);
+            options.rename(&mut ws, &[("early_data", "v2ray-http-upgrade-fast-open")]);
+            options.take("host");
+            options.take("headers");
+            let mut headers = single_headers(&value.headers)?;
+            if let Some(host) = &value.host {
+                headers.insert("Host".to_owned(), host.clone());
+            }
+            if !headers.is_empty() {
+                ws.insert("headers".to_owned(), json!(headers));
+            }
+            options.finish("Mihomo HTTPUpgrade")?;
+            output.insert("network".to_owned(), json!("ws"));
+            output.insert("ws-opts".to_owned(), json!(ws));
+        }
+        Transport::Grpc(value) => {
+            let mut options = Options::new(value)?;
+            let mut grpc = Map::new();
+            options.rename(
+                &mut grpc,
+                &[
+                    ("service_name", "grpc-service-name"),
+                    ("user_agent", "grpc-user-agent"),
+                    ("connections", "max-connections"),
+                    ("min_streams", "min-streams"),
+                    ("max_streams", "max-streams"),
+                ],
+            );
+            options.durations(
+                &mut grpc,
+                &[("keep_alive", "ping-interval")],
+                Some(Duration::from_secs(1)),
+            )?;
+            options.finish("Mihomo gRPC")?;
+            output.insert("network".to_owned(), json!("grpc"));
+            output.insert("grpc-opts".to_owned(), json!(grpc));
+        }
+        Transport::XHttp(value) => {
+            Options::new(&value.quic)?.finish("Mihomo XHTTP QUIC")?;
+            let mut http = mihomo_http(&value.http, false)?;
+            if let Some(download) = &value.download {
+                if download.tls.enabled
+                    && download.tls.reality.enabled
+                    && download.tls.alpn == ["h3"]
+                {
+                    return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
+                }
+                if value.http.mode == Mode::StreamOne {
+                    return unsupported("XHTTP 单流模式与独立下载连接无法同时使用");
+                }
+                if download.server.is_empty() || download.port == 0 {
+                    return Err("请填写 XHTTP 下载连接的地址与端口".into());
+                }
+                if serde_json::to_value(&download.network)? != serde_json::to_value(network)? {
+                    Options::new(&download.network)?.finish("Mihomo XHTTP 下载连接")?;
+                }
+                Options::new(&download.quic)?.finish("Mihomo XHTTP 下载 QUIC")?;
+                let mut options = Options::new(&download.http)?;
+                let mut settings = Map::from_iter([
+                    ("server".to_owned(), json!(download.server)),
+                    ("port".to_owned(), json!(download.port)),
+                    ("tls".to_owned(), json!(download.tls.enabled)),
+                    ("alpn".to_owned(), json!([])),
+                    ("servername".to_owned(), json!("")),
+                    ("skip-cert-verify".to_owned(), json!(false)),
+                    ("name-cert-verify".to_owned(), json!("")),
+                    ("fingerprint".to_owned(), json!("")),
+                    ("certificate".to_owned(), json!("")),
+                    ("private-key".to_owned(), json!("")),
+                    ("client-fingerprint".to_owned(), json!("")),
+                    ("reality-opts".to_owned(), json!({})),
+                    ("ech-opts".to_owned(), json!({})),
+                ]);
+                options.copy(&mut settings, &["host", "path"]);
+                if options.take("headers").is_some() {
+                    settings.insert(
+                        "headers".to_owned(),
+                        json!(single_headers(&download.http.headers)?),
+                    );
+                }
+                options.take("pool");
+                let pool = mihomo_pool(&download.http.pool)?;
+                if !pool.is_empty() {
+                    settings.insert("reuse-settings".to_owned(), json!(pool));
+                }
+                let parent = serde_json::to_value(&value.http)?;
+                let child = serde_json::to_value(&download.http)?;
+                for (name, value) in child.as_object().unwrap() {
+                    if parent.get(name) == Some(value) {
+                        options.take(name);
+                    }
+                }
+                options.finish("Mihomo XHTTP 下载参数")?;
+                if download.tls.enabled {
+                    super::mihomo::client_tls(
+                        &download.tls,
+                        store,
+                        &mut settings,
+                        globals,
+                        "vless",
+                    )?;
+                }
+                http.insert("download-settings".to_owned(), json!(settings));
+            }
+            output.insert("network".to_owned(), json!("xhttp"));
+            output.insert("xhttp-opts".to_owned(), json!(http));
+        }
+    }
+    Ok(output)
+}
+
+pub fn mihomo_server(source: &Transport) -> Result<Map<String, Value>> {
+    let mut output = Map::new();
+    match source {
+        Transport::Default => {}
+        Transport::WebSocket(value) => {
+            let mut options = Options::new(value)?;
+            options.take("path");
+            output.insert(
+                "ws-path".to_owned(),
+                json!(
+                    value
+                        .path
+                        .as_deref()
+                        .filter(|path| !path.is_empty())
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap()
+                ),
+            );
+            options.take("headers");
+            options.take("early_data");
+            if value
+                .early_data_header
+                .as_deref()
+                .is_none_or(|header| header.eq_ignore_ascii_case("Sec-WebSocket-Protocol"))
+            {
+                options.take("early_data_header");
+            }
+            options.finish("Mihomo WebSocket 入站")?;
+        }
+        Transport::HttpUpgrade(_) => {
+            return unsupported("Mihomo VLESS 入站没有 HTTPUpgrade 接收器");
+        }
+        Transport::Grpc(value) => {
+            let mut options = Options::new(value)?;
+            if value.service_name.as_deref().is_none_or(str::is_empty) {
+                return unsupported("Mihomo gRPC 入站通过非空服务名启用");
+            }
+            options.rename(&mut output, &[("service_name", "grpc-service-name")]);
+            for field in [
+                "authority",
+                "user_agent",
+                "receive_window",
+                "permit_without_stream",
+                "connections",
+                "min_streams",
+                "max_streams",
+            ] {
+                options.take(field);
+            }
+            options.finish("Mihomo gRPC 入站")?;
+        }
+        Transport::XHttp(value) => {
+            Options::new(&value.quic)?.finish("Mihomo XHTTP 入站 QUIC")?;
+            let mut http = mihomo_http(&value.http, true)?;
+            http.entry("mode").or_insert(json!("auto"));
+            output.insert("xhttp-config".to_owned(), json!(http));
+        }
+    }
+    Ok(output)
+}
+
+fn mihomo_http(source: &XHttpOptions, inbound: bool) -> Result<Map<String, Value>> {
+    let mut options = Options::new(source)?;
+    let mut output = Map::new();
+    options.copy(&mut output, &["host", "path", "mode"]);
+    options.take("headers");
+    if !inbound && !source.headers.is_empty() {
+        output.insert(
+            "headers".to_owned(),
+            json!(single_headers(&source.headers)?),
+        );
+    }
+    options.rename(
+        &mut output,
+        &[
+            ("padding_obfuscation", "x-padding-obfs-mode"),
+            ("padding_key", "x-padding-key"),
+            ("padding_header", "x-padding-header"),
+            ("padding_method", "x-padding-method"),
+            ("upload_method", "uplink-http-method"),
+            ("session_placement", "session-placement"),
+            ("session_key", "session-key"),
+            ("sequence_placement", "seq-placement"),
+            ("sequence_key", "seq-key"),
+            ("data_placement", "uplink-data-placement"),
+            ("data_key", "uplink-data-key"),
+        ],
+    );
+    if options.take("padding_placement").is_some() {
+        output.insert(
+            "x-padding-placement".to_owned(),
+            json!(match source.padding_placement {
+                PaddingPlacement::QueryInHeader => "queryInHeader",
+                PaddingPlacement::Cookie => "cookie",
+                PaddingPlacement::Header => "header",
+                PaddingPlacement::Query => "query",
+            }),
+        );
+    }
+    ranges(
+        &mut options,
+        &mut output,
+        &[
+            ("padding_size", "x-padding-bytes"),
+            ("upload_size", "sc-max-each-post-bytes"),
+            ("chunk_size", "uplink-chunk-size"),
+        ],
+        None,
+    )?;
+    options.take("pool");
+    if inbound {
+        for field in [
+            "session_alphabet",
+            "session_length",
+            "grpc_header",
+            "upload_interval",
+        ] {
+            options.take(field);
+        }
+        options.invert(&mut output, "sse_header", "no-sse-header");
+        options.rename(
+            &mut output,
+            &[("buffered_uploads", "sc-max-buffered-posts")],
+        );
+        ranges(
+            &mut options,
+            &mut output,
+            &[("stream_keep_alive", "sc-stream-up-server-secs")],
+            Some(Duration::from_secs(1)),
+        )?;
+    } else {
+        for field in [
+            "sse_header",
+            "stream_keep_alive",
+            "header_limit",
+            "buffered_uploads",
+        ] {
+            options.take(field);
+        }
+        options.invert(&mut output, "grpc_header", "no-grpc-header");
+        options.rename(&mut output, &[("session_alphabet", "session-table")]);
+        ranges(
+            &mut options,
+            &mut output,
+            &[("session_length", "session-length")],
+            None,
+        )?;
+        ranges(
+            &mut options,
+            &mut output,
+            &[("upload_interval", "sc-min-posts-interval-ms")],
+            Some(Duration::from_millis(1)),
+        )?;
+        let pool = mihomo_pool(&source.pool)?;
+        if !pool.is_empty() {
+            output.insert("reuse-settings".to_owned(), json!(pool));
+        }
+    }
+    options.finish("Mihomo XHTTP")?;
+    for value in output.values_mut() {
+        if value.is_number() {
+            *value = json!(value.to_string());
+        }
+    }
+    Ok(output)
+}
+
+fn mihomo_pool(source: &Pool) -> Result<Map<String, Value>> {
+    let mut options = Options::new(source)?;
+    let mut output = Map::new();
+    ranges(
+        &mut options,
+        &mut output,
+        &[
+            ("concurrency", "max-concurrency"),
+            ("connections", "max-connections"),
+            ("reuse_limit", "c-max-reuse-times"),
+            ("request_limit", "h-max-request-times"),
+        ],
+        None,
+    )?;
+    ranges(
+        &mut options,
+        &mut output,
+        &[("lifetime", "h-max-reusable-secs")],
+        Some(Duration::from_secs(1)),
+    )?;
+    for value in output.values_mut() {
+        if value.is_number() {
+            *value = json!(value.to_string());
+        }
+    }
+    if let Some(value) = options.take("keep_alive") {
+        output.insert(
+            "h-keep-alive-period".to_owned(),
+            json!(duration(value.as_str().unwrap(), Duration::from_secs(1))?),
+        );
+    }
+    options.finish("Mihomo XHTTP 连接复用")?;
     Ok(output)
 }
 

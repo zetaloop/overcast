@@ -32,11 +32,17 @@ pub enum Connection {
     Direct(Direct),
     Http(Http),
     Socks(Socks),
+    Vless(crate::vless::Client),
 }
 
 impl Connection {
     pub fn parse(text: &str) -> Result<Self> {
         let url = Url::parse(text)?;
+        if url.scheme() == "vless" {
+            let value = Self::Vless(crate::link::vless(&url)?);
+            value.validate()?;
+            return Ok(value);
+        }
         if url.query().is_some() {
             return Err("不支持此链接的查询参数".into());
         }
@@ -129,6 +135,7 @@ impl Connection {
             Self::Direct(value) => &value.name,
             Self::Http(value) => &value.proxy.name,
             Self::Socks(value) => &value.proxy.name,
+            Self::Vless(value) => &value.name,
         }
     }
 
@@ -137,6 +144,7 @@ impl Connection {
             Self::Direct(_) => None,
             Self::Http(value) => Some(&value.transport),
             Self::Socks(value) => Some(&value.transport),
+            Self::Vless(value) => Some(&value.transport),
         }
     }
 
@@ -148,6 +156,7 @@ impl Connection {
             Self::Direct(_) => "直连".to_owned(),
             Self::Http(value) => format!("HTTP {}", value.proxy.address()),
             Self::Socks(value) => format!("SOCKS {}", value.proxy.address()),
+            Self::Vless(value) => format!("VLESS {}", address(&value.server, value.port)),
         }
     }
 
@@ -184,19 +193,32 @@ impl Connection {
                 Rc::new(move |value, screen| apply(&Self::Socks(value.clone()), screen)),
                 creating,
             ),
+            Self::Vless(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Vless(value.clone()), screen)),
+                creating,
+            ),
         }
     }
 
     pub fn validate(&self) -> Result<()> {
-        let proxy = match self {
+        let (server, port) = match self {
             Self::Direct(_) => return Ok(()),
-            Self::Http(value) => &value.proxy,
-            Self::Socks(value) => &value.proxy,
+            Self::Http(value) => (value.proxy.server.as_str(), value.proxy.port),
+            Self::Socks(value) => (value.proxy.server.as_str(), value.proxy.port),
+            Self::Vless(value) => {
+                if value.uuid.is_empty() {
+                    return Err("请填写 VLESS 用户标识".into());
+                }
+                (value.server.as_str(), value.port)
+            }
         };
-        if proxy.server.trim().is_empty() {
+        if server.trim().is_empty() {
             return Err("连接地址不能为空".into());
         }
-        if proxy.port == 0 {
+        if port == 0 {
             return Err("请填写连接端口".into());
         }
         Ok(())
@@ -210,6 +232,7 @@ pub fn create(
     let items = [
         Item::new("http", "HTTP".stylized()),
         Item::new("socks", "SOCKS".stylized()),
+        Item::new("vless", "VLESS".stylized()),
         Item::new("direct", "直连".stylized()),
         Item::new("back", "返回".stylized()),
     ];
@@ -227,7 +250,8 @@ pub fn create(
                 let mut connection = match selected {
                     0 => Connection::Http(Http::default()),
                     1 => Connection::Socks(Socks::default()),
-                    2 => Connection::Direct(Direct::default()),
+                    2 => Connection::Vless(crate::vless::Client::default()),
+                    3 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
                 let accepted = connection.form(screen, apply, true)?;
@@ -251,11 +275,15 @@ pub struct Proxy {
 
 impl Proxy {
     pub fn address(&self) -> String {
-        if self.server.contains(':') && !self.server.starts_with('[') {
-            format!("[{}]:{}", self.server, self.port)
-        } else {
-            format!("{}:{}", self.server, self.port)
-        }
+        address(&self.server, self.port)
+    }
+}
+
+fn address(server: &str, port: u16) -> String {
+    if server.contains(':') && !server.starts_with('[') {
+        format!("[{server}]:{port}")
+    } else {
+        format!("{server}:{port}")
     }
 }
 

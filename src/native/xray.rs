@@ -18,6 +18,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Direct(value) => ("freedom", None, &value.network),
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
         Connection::Socks(value) => ("socks", Some(&value.proxy), &value.network),
+        Connection::Vless(value) => ("vless", None, &value.network),
     };
     let mut output = Map::from_iter([("protocol".to_owned(), json!(kind))]);
     let mut settings = Map::new();
@@ -48,7 +49,10 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         }
     }
     let tls = match source {
-        Connection::Direct(_) => None,
+        Connection::Direct(_) => {
+            settings.insert("finalRules".to_owned(), json!([{"action": "allow"}]));
+            None
+        }
         Connection::Http(value) => {
             let mut options = Options::new(&value.http)?;
             if matches!(
@@ -83,6 +87,62 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             options.take("tcp");
             options.take("udp");
             options.finish("Xray SOCKS")?;
+            Some(&value.tls)
+        }
+        Connection::Vless(value) => {
+            let mut options = Options::new(&value.vless)?;
+            settings.insert("address".to_owned(), json!(value.server));
+            settings.insert("port".to_owned(), json!(value.port));
+            settings.insert("id".to_owned(), json!(value.uuid));
+            settings.insert(
+                "encryption".to_owned(),
+                json!(value.vless.encryption.as_deref().unwrap_or("none")),
+            );
+            options.take("encryption");
+            options.take("flow");
+            if value.vless.flow == crate::vless::Flow::Vision {
+                settings.insert("flow".to_owned(), json!("xtls-rprx-vision-udp443"));
+            }
+            options.rename(
+                &mut settings,
+                &[
+                    ("user_level", "level"),
+                    ("user_label", "email"),
+                    ("preconnect", "testpre"),
+                    ("padding", "testseed"),
+                ],
+            );
+            options.take("tcp");
+            options.take("udp");
+            options.take("packet_encoding");
+            options.take("udp_concurrency");
+            if let Some(concurrency) = value.vless.udp_concurrency {
+                i16::try_from(concurrency).map_err(|_| "Xray UDP 并发流数超过支持范围")?;
+                if concurrency == 0
+                    && value.vless.packet_encoding == crate::vless::PacketEncoding::Xudp
+                {
+                    return Err("XUDP 并发流数需要大于零".into());
+                }
+            }
+            match value.vless.packet_encoding {
+                crate::vless::PacketEncoding::PacketAddr => {
+                    return unsupported("Xray VLESS 没有 PacketAddr 编码配置");
+                }
+                crate::vless::PacketEncoding::Packet
+                    if value.vless.udp_concurrency.is_some()
+                        || value.vless.flow == crate::vless::Flow::Vision =>
+                {
+                    return unsupported("原生 VLESS 数据包与 Vision、XUDP 并发设置无法同时使用");
+                }
+                crate::vless::PacketEncoding::Xudp => {
+                    output.insert("mux".to_owned(), json!({"enabled": true, "concurrency": -1, "xudpConcurrency": value.vless.udp_concurrency.unwrap_or(8), "xudpProxyUDP443": "allow"}));
+                }
+                _ if value.vless.udp_concurrency.is_some() => {
+                    output.insert("mux".to_owned(), json!({"enabled": true, "concurrency": -1, "xudpConcurrency": value.vless.udp_concurrency, "xudpProxyUDP443": "allow"}));
+                }
+                _ => {}
+            }
+            options.finish("Xray VLESS")?;
             Some(&value.tls)
         }
     };
@@ -120,7 +180,7 @@ pub fn listeners(
     ]);
     let mut settings = Map::new();
     let mut stream = Map::new();
-    if !users.is_empty() {
+    if matches!(source.protocol, Protocol::Mixed(_)) && !users.is_empty() {
         settings.insert(
             "accounts".to_owned(),
             json!(
@@ -131,46 +191,117 @@ pub fn listeners(
             ),
         );
     }
-    let Protocol::Mixed(value) = &source.protocol;
-    let mut options = Options::new(value)?;
-    options.take("http");
-    options.take("socks");
-    options.take("udp");
-    options.rename(&mut settings, &[("user_level", "userLevel")]);
-    options.finish("Xray HTTP/SOCKS")?;
-    if !value.http.enabled && value.socks.enabled {
-        return unsupported("Xray 的 SOCKS 入口同时接收 HTTP 请求");
-    }
-    let mut options = Options::new(&value.http)?;
-    options.take("enabled");
-    if value
-        .http
-        .versions
-        .iter()
-        .all(|version| *version == inbound::HttpVersion::Http1)
-    {
-        options.take("versions");
-    }
-    if value.socks.enabled {
-        options.finish("Xray HTTP/SOCKS 的 HTTP")?;
-        output.insert("protocol".to_owned(), json!("socks"));
-        settings.insert(
-            "auth".to_owned(),
-            json!(if users.is_empty() {
-                "noauth"
+    match &source.protocol {
+        Protocol::Mixed(value) => {
+            let mut options = Options::new(value)?;
+            options.take("http");
+            options.take("socks");
+            options.take("udp");
+            options.rename(&mut settings, &[("user_level", "userLevel")]);
+            options.finish("Xray HTTP/SOCKS")?;
+            if !value.http.enabled && value.socks.enabled {
+                return unsupported("Xray 的 SOCKS 入口同时接收 HTTP 请求");
+            }
+            let mut options = Options::new(&value.http)?;
+            options.take("enabled");
+            if value
+                .http
+                .versions
+                .iter()
+                .all(|version| *version == inbound::HttpVersion::Http1)
+            {
+                options.take("versions");
+            }
+            if value.socks.enabled {
+                options.finish("Xray HTTP/SOCKS 的 HTTP")?;
+                output.insert("protocol".to_owned(), json!("socks"));
+                settings.insert(
+                    "auth".to_owned(),
+                    json!(if users.is_empty() {
+                        "noauth"
+                    } else {
+                        "password"
+                    }),
+                );
+                settings.insert("udp".to_owned(), json!(value.udp));
+                let mut options = Options::new(&value.socks)?;
+                options.take("enabled");
+                options.rename(&mut settings, &[("udp_address", "ip")]);
+                options.finish("Xray SOCKS 入站")?;
             } else {
-                "password"
-            }),
-        );
-        settings.insert("udp".to_owned(), json!(value.udp));
-        let mut options = Options::new(&value.socks)?;
-        options.take("enabled");
-        options.rename(&mut settings, &[("udp_address", "ip")]);
-        options.finish("Xray SOCKS 入站")?;
-    } else {
-        output.insert("protocol".to_owned(), json!("http"));
-        options.rename(&mut settings, &[("transparent", "allowTransparent")]);
-        options.finish("Xray HTTP 入站")?;
+                output.insert("protocol".to_owned(), json!("http"));
+                options.rename(&mut settings, &[("transparent", "allowTransparent")]);
+                options.finish("Xray HTTP 入站")?;
+            }
+        }
+        Protocol::Vless(value) => {
+            if users.is_empty() {
+                return unsupported("VLESS 入口需要认证用户");
+            }
+            output.insert("protocol".to_owned(), json!("vless"));
+            let mut options = Options::new(value)?;
+            options.take("flow");
+            options.take("encryption");
+            options.take("user_level");
+            settings.insert(
+                "decryption".to_owned(),
+                json!(value.encryption.as_deref().unwrap_or("none")),
+            );
+            settings.insert(
+                "clients".to_owned(),
+                json!(
+                    users
+                        .iter()
+                        .map(|(name, _)| {
+                            let mut user = Map::from_iter([
+                                ("id".to_owned(), json!(name)),
+                                ("email".to_owned(), json!(name)),
+                            ]);
+                            if value.flow == crate::vless::Flow::Vision {
+                                user.insert("flow".to_owned(), json!("xtls-rprx-vision"));
+                            }
+                            if let Some(level) = value.user_level {
+                                user.insert("level".to_owned(), json!(level));
+                            }
+                            user
+                        })
+                        .collect::<Vec<_>>()
+                ),
+            );
+            options.rename(&mut settings, &[("padding", "testseed")]);
+            options.take("fallbacks");
+            if !value.fallbacks.is_empty() {
+                if value
+                    .encryption
+                    .as_deref()
+                    .is_some_and(|value| value != "none")
+                {
+                    return unsupported("VLESS Encryption 与协议回落无法同时使用");
+                }
+                let mut fallbacks = Vec::new();
+                for fallback in &value.fallbacks {
+                    if fallback.target.is_empty() {
+                        return Err("请填写 VLESS 回落目标".into());
+                    }
+                    let mut options = Options::new(fallback)?;
+                    let mut output = Map::new();
+                    options.copy(&mut output, &["alpn", "path"]);
+                    options.rename(
+                        &mut output,
+                        &[
+                            ("server_name", "name"),
+                            ("target", "dest"),
+                            ("network", "type"),
+                            ("proxy_protocol", "xver"),
+                        ],
+                    );
+                    options.finish("Xray VLESS 回落")?;
+                    fallbacks.push(output);
+                }
+                settings.insert("fallbacks".to_owned(), json!(fallbacks));
+            }
+            options.finish("Xray VLESS 入站")?;
+        }
     }
     let mut options = Options::new(&source.listen)?;
     options.take("address");

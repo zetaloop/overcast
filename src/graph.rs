@@ -122,7 +122,9 @@ impl Network {
     }
 
     pub fn identity(self, inbound: &Inbound) -> bool {
-        !(self == Self::Udp && inbound.core == Core::Mihomo)
+        !(self == Self::Udp
+            && inbound.core == Core::Mihomo
+            && matches!(inbound.protocol, Protocol::Mixed(_)))
     }
 }
 
@@ -170,8 +172,10 @@ pub fn build<'a>(
                 _ => {}
             }
         }
-        let Protocol::Mixed(protocol) = &inbound.protocol;
-        if !protocol.http.enabled && !protocol.socks.enabled {
+        if let Protocol::Mixed(protocol) = &inbound.protocol
+            && !protocol.http.enabled
+            && !protocol.socks.enabled
+        {
             continue;
         }
         let mut accounts = Vec::new();
@@ -184,6 +188,7 @@ pub fn build<'a>(
                             && (value.socks.enabled
                                 || value.http.enabled && inbound.core == Core::SingBox)
                     }
+                    Protocol::Vless(_) => true,
                 }
             {
                 continue;

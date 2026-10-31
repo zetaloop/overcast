@@ -52,6 +52,9 @@ pub struct Grpc {
     pub permit_without_stream: bool,
     pub receive_window: Option<u32>,
     pub user_agent: Option<String>,
+    pub connections: Option<u32>,
+    pub min_streams: Option<u32>,
+    pub max_streams: Option<u32>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -410,6 +413,9 @@ fields!(Grpc {
     permit_without_stream: "空闲连接保活",
     receive_window: "接收窗口",
     user_agent: "用户代理",
+    connections: "连接数",
+    min_streams: "最小并发流数",
+    max_streams: "最大并发流数",
 });
 
 choices!(Mode {

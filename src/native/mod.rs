@@ -58,11 +58,14 @@ pub struct State {
 pub struct Instance {
     pub core: Core,
     pub file: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, String>,
 }
 
 struct Service {
     core: Core,
     globals: Map<String, Value>,
+    environment: BTreeMap<String, String>,
     listeners: Vec<Value>,
     outbounds: Vec<Value>,
     rules: Vec<routing::Rule>,
@@ -72,12 +75,15 @@ struct Service {
 struct Endpoint {
     service: usize,
     tag: String,
+    resolve_udp: bool,
 }
 
 struct Node {
     core: Core,
     globals: Map<String, Value>,
+    environment: BTreeMap<String, String>,
     value: Map<String, Value>,
+    resolve_udp: bool,
 }
 
 #[derive(Clone)]
@@ -184,7 +190,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         } else {
             values
         };
-        let service = builder.service(inbound.core, globals);
+        let service = builder.service(inbound.core, globals, BTreeMap::new());
         if inbound.tls.enabled && !inbound.tls.reality.enabled {
             certificates.extend(
                 listener
@@ -275,6 +281,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                         network: Some(account.network),
                         condition: rule.condition.clone(),
                         outbound,
+                        resolve_udp: false,
                     });
                 }
             }
@@ -298,19 +305,30 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
     for (index, service) in builder.services.into_iter().enumerate() {
         progress.check()?;
         let mut matchers = routing::Matchers::new(&graph.targets);
-        let file = format!("{}-{index}.json", key(service.core));
+        let name = format!("{}-{index}", key(service.core));
+        let working = directory.path().join(&name);
+        store.create_dir(&working)?;
+        let file = format!("{name}/config.json");
         let mut output = service.globals;
+        let mut environment = service.environment;
         match service.core {
             Core::Xray => {
+                environment.insert(
+                    "XRAY_LOCATION_ASSET".to_owned(),
+                    working.to_string_lossy().into_owned(),
+                );
                 let script = matchers.xray(&service.rules);
-                let name = format!("xray-{index}.lua");
-                store.write(&directory.path().join(&name), |file| {
+                let script_path = working.join("routing.lua");
+                store.write(&script_path, |file| {
                     file.write_all(script.as_bytes())?;
                     Ok(())
                 })?;
+                let mut direct =
+                    xray::outbound(&Connection::Direct(connection::Direct::default()), store)?;
+                direct.insert("tag".to_owned(), json!("direct"));
                 let mut outbounds = vec![
                     json!({"tag": "block", "protocol": "blackhole"}),
-                    json!({"tag": "direct", "protocol": "freedom"}),
+                    json!(direct),
                 ];
                 outbounds.extend(service.outbounds);
                 output.insert("inbounds".to_owned(), json!(service.listeners));
@@ -319,7 +337,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 output.insert(
                     "routing".to_owned(),
                     json!({
-                        "script": directory.path().join(name),
+                        "script": script_path,
                     }),
                 );
             }
@@ -345,6 +363,12 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 );
             }
             Core::Mihomo => {
+                environment.insert(
+                    "SAFE_PATHS".to_owned(),
+                    std::env::join_paths([&store.directory])?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
                 let rules = matchers.mihomo(&service.rules);
                 let mut proxies = vec![json!({"name": "direct", "type": "direct"})];
                 proxies.extend(service.outbounds);
@@ -364,9 +388,21 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         state.instances.push(Instance {
             core: service.core,
             file,
+            environment,
         });
     }
     all_matchers.write(store, directory.path())?;
+    for instance in &state.instances {
+        let working = directory
+            .path()
+            .join(&instance.file)
+            .parent()
+            .unwrap()
+            .to_owned();
+        for name in ["geoip.dat", "geosite.dat"] {
+            fs::hard_link(directory.path().join(name), working.join(name))?;
+        }
+    }
     store.write(&directory.path().join("state.json"), |file| {
         serde_json::to_writer_pretty(file, &state)?;
         Ok(())
@@ -381,7 +417,12 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
 }
 
 impl Builder<'_> {
-    fn service(&mut self, core: Core, globals: Map<String, Value>) -> usize {
+    fn service(
+        &mut self,
+        core: Core,
+        globals: Map<String, Value>,
+        environment: BTreeMap<String, String>,
+    ) -> usize {
         if let Some(index) = self.services.iter().position(|service| {
             service.core == core
                 && globals.iter().all(|(name, value)| {
@@ -390,14 +431,22 @@ impl Builder<'_> {
                         .get(name)
                         .is_none_or(|current| current == value)
                 })
+                && environment.iter().all(|(name, value)| {
+                    service
+                        .environment
+                        .get(name)
+                        .is_none_or(|current| current == value)
+                })
         }) {
             self.services[index].globals.extend(globals);
+            self.services[index].environment.extend(environment);
             return index;
         }
         let index = self.services.len();
         self.services.push(Service {
             core,
             globals,
+            environment,
             listeners: Vec::new(),
             outbounds: Vec::new(),
             rules: Vec::new(),
@@ -428,6 +477,7 @@ impl Builder<'_> {
                 Connection::Direct(value) => value.core,
                 Connection::Http(value) => value.proxy.core,
                 Connection::Socks(value) => value.proxy.core,
+                Connection::Vless(value) => value.core,
             };
             let mut candidates = vec![preferred];
             candidates.extend(
@@ -441,9 +491,8 @@ impl Builder<'_> {
                 if !matches_core(requested, core) {
                     continue;
                 }
-                if index != 0 && core == Core::Mihomo && matches!(connection, Connection::Direct(_))
-                {
-                    errors.push("Mihomo 直连出站没有前置代理配置".to_owned());
+                if index != 0 && core != Core::Xray && matches!(connection, Connection::Direct(_)) {
+                    errors.push(format!("{} 直连出站没有前置代理配置", key(core)));
                     continue;
                 }
                 let mut globals = Map::new();
@@ -454,10 +503,21 @@ impl Builder<'_> {
                 };
                 match result {
                     Ok(value) => {
+                        let mut environment = BTreeMap::new();
+                        if core == Core::Xray
+                            && matches!(connection, Connection::Vless(value)
+                                if value.vless.packet_encoding == crate::vless::PacketEncoding::Packet)
+                        {
+                            environment.insert("XRAY_CONE_DISABLED".to_owned(), "true".to_owned());
+                        }
                         nodes.push(Rc::new(Node {
                             core,
                             globals,
+                            environment,
                             value,
+                            resolve_udp: core == Core::SingBox
+                                && matches!(connection, Connection::Vless(value)
+                                    if value.vless.packet_encoding == crate::vless::PacketEncoding::PacketAddr),
                         }));
                     }
                     Err(error) if error.is::<Unsupported>() => errors.push(error.to_string()),
@@ -514,7 +574,7 @@ impl Builder<'_> {
         let mut endpoint = None;
         for (index, node) in nodes.into_iter().enumerate() {
             let core = node.core;
-            let service = self.service(core, node.globals.clone());
+            let service = self.service(core, node.globals.clone(), node.environment.clone());
             let mut value = node.value.clone();
             let tag = format!("{uuid}-{}-{selected}-{index}", key(preferred));
             value.insert(
@@ -531,6 +591,13 @@ impl Builder<'_> {
                         value.insert("dialer-proxy".to_owned(), json!(parent));
                     }
                     Core::Xray => {
+                        if value
+                            .get("protocol")
+                            .is_some_and(|protocol| protocol == "freedom")
+                            && let Some(Value::Object(settings)) = value.get_mut("settings")
+                        {
+                            settings.remove("finalRules");
+                        }
                         let mut stream = value.entry("streamSettings").or_insert_with(|| json!({}));
                         loop {
                             let socket = stream
@@ -554,7 +621,11 @@ impl Builder<'_> {
                 }
             }
             self.services[service].outbounds.push(json!(value));
-            endpoint = Some(Endpoint { service, tag });
+            endpoint = Some(Endpoint {
+                service,
+                tag,
+                resolve_udp: node.resolve_udp,
+            });
         }
         let endpoint = endpoint.ok_or("出站中没有连接")?;
         self.outbounds
@@ -563,7 +634,7 @@ impl Builder<'_> {
     }
 
     fn bridge(&mut self, service: usize, target: &Endpoint) -> Result<String> {
-        if service == target.service {
+        if service == target.service && !target.resolve_udp {
             return Ok(target.tag.clone());
         }
         let tag = format!("relay-{}-{}", target.service, target.tag);
@@ -677,6 +748,7 @@ impl Builder<'_> {
                     network: None,
                     condition: Condition::Always,
                     outbound: target.tag.clone(),
+                    resolve_udp: target.resolve_udp,
                 },
             );
             port
@@ -699,6 +771,7 @@ impl Builder<'_> {
             Endpoint {
                 service,
                 tag: tag.clone(),
+                resolve_udp: false,
             },
         );
         Ok(tag)
@@ -753,6 +826,13 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
                     && (parent[1] || value.socks.udp_over_tcp.is_some())
                     && value.socks.version == connection::SocksVersion::V5
                     && value.socks.udp.unwrap_or(true),
+            ]
+        }
+        Connection::Vless(value) => {
+            let transport = value.transport.supported(&value.tls, parent);
+            [
+                transport && value.vless.tcp.unwrap_or(true),
+                transport && value.vless.udp.unwrap_or(true),
             ]
         }
     }

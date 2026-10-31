@@ -14,9 +14,10 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    if source
-        .transport()
-        .is_some_and(|transport| !transport.is_default())
+    if !matches!(source, Connection::Vless(_))
+        && source
+            .transport()
+            .is_some_and(|transport| !transport.is_default())
     {
         return unsupported("sing-box 的 HTTP/SOCKS 出站没有传输封装配置");
     }
@@ -24,6 +25,7 @@ pub fn outbound(
         Connection::Direct(value) => ("direct", None, &value.network),
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
         Connection::Socks(value) => ("socks", Some(&value.proxy), &value.network),
+        Connection::Vless(value) => ("vless", None, &value.network),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     dialer(network, &mut output)?;
@@ -97,6 +99,50 @@ pub fn outbound(
             output.insert("network".to_owned(), json!(network));
             options.finish("sing-box SOCKS")?;
         }
+        Connection::Vless(value) => {
+            let mut options = Options::new(&value.vless)?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("server_port".to_owned(), json!(value.port));
+            output.insert("uuid".to_owned(), json!(value.uuid));
+            options.take("flow");
+            if value.vless.flow == crate::vless::Flow::Vision {
+                output.insert("flow".to_owned(), json!("xtls-rprx-vision"));
+            }
+            if value.vless.encryption.as_deref() == Some("none") {
+                options.take("encryption");
+            }
+            options.take("tcp");
+            options.take("udp");
+            let mut networks = Vec::new();
+            if value.vless.tcp.unwrap_or(true) {
+                networks.push("tcp");
+            }
+            if value.vless.udp.unwrap_or(true) {
+                networks.push("udp");
+            }
+            output.insert("network".to_owned(), json!(networks));
+            options.take("packet_encoding");
+            match value.vless.packet_encoding {
+                crate::vless::PacketEncoding::Default => {}
+                encoding => {
+                    output.insert(
+                        "packet_encoding".to_owned(),
+                        json!(match encoding {
+                            crate::vless::PacketEncoding::Packet => "",
+                            crate::vless::PacketEncoding::PacketAddr => "packetaddr",
+                            _ => "xudp",
+                        }),
+                    );
+                }
+            }
+            options.finish("sing-box VLESS")?;
+            if value.tls.enabled {
+                output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+            }
+            if let Some(transport) = super::transport::singbox(&value.transport, false)? {
+                output.insert("transport".to_owned(), transport);
+            }
+        }
     }
     Ok(output)
 }
@@ -106,7 +152,7 @@ pub fn listeners(
     users: &[(String, String)],
     store: &Store,
 ) -> Result<Vec<Map<String, Value>>> {
-    if !source.transport.is_default() {
+    if matches!(source.protocol, Protocol::Mixed(_)) && !source.transport.is_default() {
         return unsupported("sing-box 的 HTTP/SOCKS 入站没有传输封装配置");
     }
     let mut output = Map::from_iter([
@@ -116,7 +162,19 @@ pub fn listeners(
             json!(
                 users
                     .iter()
-                    .map(|(name, password)| { json!({"username": name, "password": password}) })
+                    .map(|(name, password)| match &source.protocol {
+                        Protocol::Mixed(_) => json!({"username": name, "password": password}),
+                        Protocol::Vless(value) => {
+                            let mut user = Map::from_iter([
+                                ("name".to_owned(), json!(name)),
+                                ("uuid".to_owned(), json!(name)),
+                            ]);
+                            if value.flow == crate::vless::Flow::Vision {
+                                user.insert("flow".to_owned(), json!("xtls-rprx-vision"));
+                            }
+                            json!(user)
+                        }
+                    })
                     .collect::<Vec<_>>()
             ),
         ),
@@ -155,7 +213,28 @@ pub fn listeners(
         }
     }
     options.finish("sing-box 监听")?;
-    let Protocol::Mixed(value) = &source.protocol;
+    if let Protocol::Vless(value) = &source.protocol {
+        if users.is_empty() {
+            return unsupported("VLESS 入口需要认证用户");
+        }
+        let mut options = Options::new(value)?;
+        options.take("flow");
+        if value.encryption.as_deref() == Some("none") {
+            options.take("encryption");
+        }
+        options.finish("sing-box VLESS 入站")?;
+        output.insert("type".to_owned(), json!("vless"));
+        if source.tls.enabled {
+            output.insert("tls".to_owned(), server_tls(source, store)?);
+        }
+        if let Some(transport) = super::transport::singbox(&source.transport, true)? {
+            output.insert("transport".to_owned(), transport);
+        }
+        return Ok(vec![output]);
+    }
+    let Protocol::Mixed(value) = &source.protocol else {
+        unreachable!()
+    };
     let mut options = Options::new(value)?;
     options.take("http");
     options.take("socks");
@@ -420,11 +499,11 @@ fn client_tls(
 
 fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
     if source.tls.reality.enabled {
-        let Protocol::Mixed(protocol) = &source.protocol;
-        if protocol
-            .http
-            .versions
-            .contains(&inbound::HttpVersion::Http3)
+        if let Protocol::Mixed(protocol) = &source.protocol
+            && protocol
+                .http
+                .versions
+                .contains(&inbound::HttpVersion::Http3)
         {
             return unsupported("REALITY 握手使用 TCP，无法提供 HTTP/3 监听");
         }

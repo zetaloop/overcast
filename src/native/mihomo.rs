@@ -18,9 +18,10 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    if source
-        .transport()
-        .is_some_and(|transport| !transport.is_default())
+    if !matches!(source, Connection::Vless(_))
+        && source
+            .transport()
+            .is_some_and(|transport| !transport.is_default())
     {
         return unsupported("Mihomo 的 HTTP/SOCKS 出站没有传输封装配置");
     }
@@ -28,6 +29,7 @@ pub fn outbound(
         Connection::Direct(value) => ("direct", None, &value.network),
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
         Connection::Socks(value) => ("socks5", Some(&value.proxy), &value.network),
+        Connection::Vless(value) => ("vless", None, &value.network),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     let mut options = Options::new(network)?;
@@ -112,9 +114,61 @@ pub fn outbound(
             options.finish("Mihomo SOCKS")?;
             Some(&value.tls)
         }
+        Connection::Vless(value) => {
+            if value.tls.enabled
+                && value.tls.reality.enabled
+                && value.tls.alpn == ["h3"]
+                && matches!(value.transport, crate::transport::Transport::XHttp(_))
+            {
+                return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
+            }
+            if value.tls.enabled
+                && value.tls.reality.enabled
+                && matches!(
+                    value.transport,
+                    crate::transport::Transport::WebSocket(_)
+                        | crate::transport::Transport::HttpUpgrade(_)
+                )
+            {
+                return unsupported("Mihomo 的 WebSocket 连接没有 REALITY 握手支持");
+            }
+            let mut options = Options::new(&value.vless)?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("port".to_owned(), json!(value.port));
+            output.insert("uuid".to_owned(), json!(value.uuid));
+            output.insert("udp".to_owned(), json!(value.vless.udp.unwrap_or(true)));
+            options.take("flow");
+            if value.vless.flow == crate::vless::Flow::Vision {
+                output.insert("flow".to_owned(), json!("xtls-rprx-vision"));
+            }
+            options.copy(&mut output, &["encryption"]);
+            options.take("tcp");
+            options.take("udp");
+            options.take("packet_encoding");
+            match value.vless.packet_encoding {
+                crate::vless::PacketEncoding::Default => {}
+                crate::vless::PacketEncoding::Packet => {
+                    return unsupported("Mihomo VLESS 的 UDP 编码使用 XUDP 或 PacketAddr");
+                }
+                crate::vless::PacketEncoding::PacketAddr => {
+                    output.insert("packet-encoding".to_owned(), json!("packetaddr"));
+                }
+                crate::vless::PacketEncoding::Xudp => {
+                    output.insert("packet-encoding".to_owned(), json!("xudp"));
+                }
+            }
+            options.finish("Mihomo VLESS")?;
+            output.extend(super::transport::mihomo_client(
+                &value.transport,
+                &value.network,
+                store,
+                globals,
+            )?);
+            Some(&value.tls)
+        }
     };
     if let Some(tls) = tls.filter(|tls| tls.enabled) {
-        client_tls(tls, store, &mut output, globals)?;
+        client_tls(tls, store, &mut output, globals, kind)?;
         if matches!(source, Connection::Socks(_)) {
             output.remove("sni");
         }
@@ -128,7 +182,7 @@ pub fn listeners(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Vec<Map<String, Value>>> {
-    if !source.transport.is_default() {
+    if matches!(source.protocol, Protocol::Mixed(_)) && !source.transport.is_default() {
         return unsupported("Mihomo 的 HTTP/SOCKS 入站没有传输封装配置");
     }
     let mut output = Map::from_iter([
@@ -139,7 +193,19 @@ pub fn listeners(
             json!(
                 users
                     .iter()
-                    .map(|(name, password)| { json!({"username": name, "password": password}) })
+                    .map(|(name, password)| match &source.protocol {
+                        Protocol::Mixed(_) => json!({"username": name, "password": password}),
+                        Protocol::Vless(value) => {
+                            let mut user = Map::from_iter([
+                                ("username".to_owned(), json!(name)),
+                                ("uuid".to_owned(), json!(name)),
+                            ]);
+                            if value.flow == crate::vless::Flow::Vision {
+                                user.insert("flow".to_owned(), json!("xtls-rprx-vision"));
+                            }
+                            json!(user)
+                        }
+                    })
                     .collect::<Vec<_>>()
             ),
         ),
@@ -154,7 +220,30 @@ pub fn listeners(
     options.rename(globals, &[("tcp_multi_path", "inbound-mptcp")]);
     keep_alive(&mut options, globals)?;
     options.finish("Mihomo 监听")?;
-    let Protocol::Mixed(value) = &source.protocol;
+    if let Protocol::Vless(value) = &source.protocol {
+        if users.is_empty() {
+            return unsupported("VLESS 入口需要认证用户");
+        }
+        let mut options = Options::new(value)?;
+        options.take("flow");
+        options.rename(&mut output, &[("encryption", "decryption")]);
+        options.finish("Mihomo VLESS 入站")?;
+        output.insert("type".to_owned(), json!("vless"));
+        if source.tls.enabled {
+            server_tls(source, store, &mut output)?;
+        } else if value
+            .encryption
+            .as_deref()
+            .is_none_or(|value| value == "none")
+        {
+            output.insert("allow-insecure".to_owned(), json!(true));
+        }
+        output.extend(super::transport::mihomo_server(&source.transport)?);
+        return Ok(vec![output]);
+    }
+    let Protocol::Mixed(value) = &source.protocol else {
+        unreachable!()
+    };
     let mut options = Options::new(value)?;
     options.take("http");
     options.take("socks");
@@ -207,18 +296,48 @@ fn keep_alive(options: &mut Options, globals: &mut Map<String, Value>) -> Result
     )
 }
 
-fn client_tls(
+pub fn client_tls(
     source: &connection::Tls,
     store: &Store,
     output: &mut Map<String, Value>,
     globals: &mut Map<String, Value>,
+    kind: &str,
 ) -> Result<()> {
-    if source.reality.enabled {
+    if source.reality.enabled && kind != "vless" {
         return unsupported("Mihomo HTTP/SOCKS 出站没有 REALITY 配置");
     }
     let mut options = Options::new(source)?;
     options.take("reality");
-    options.rename(output, &[("enabled", "tls"), ("server_name", "sni")]);
+    options.rename(
+        output,
+        &[
+            ("enabled", "tls"),
+            (
+                "server_name",
+                if kind == "vless" { "servername" } else { "sni" },
+            ),
+        ],
+    );
+    if kind == "vless" {
+        options.copy(output, &["alpn"]);
+        options.rename(output, &[("fingerprint", "client-fingerprint")]);
+        if source.reality.enabled {
+            source.reality.validate()?;
+            let mut options = Options::new(&source.reality)?;
+            options.take("enabled");
+            let mut reality = Map::new();
+            options.rename(
+                &mut reality,
+                &[
+                    ("public_key", "public-key"),
+                    ("short_id", "short-id"),
+                    ("hybrid_key_exchange", "support-x25519mlkem768"),
+                ],
+            );
+            options.finish("Mihomo REALITY")?;
+            output.insert("reality-opts".to_owned(), json!(reality));
+        }
+    }
     options.invert(output, "verify_certificate", "skip-cert-verify");
     if source.send_sni == Some(true) {
         options.take("send_sni");
@@ -260,11 +379,30 @@ fn client_tls(
     options.take("certificate_files");
     let trust = pem(store, &source.certificates, &source.certificate_files)?;
     if !trust.is_empty() {
-        globals.insert("tls".to_owned(), json!({"custom-certifactes": trust}));
+        let value = json!({"custom-certifactes": trust});
+        if globals.get("tls").is_some_and(|current| current != &value) {
+            return unsupported("Mihomo 同一连接的上传与下载使用共同的证书信任库");
+        }
+        globals.insert("tls".to_owned(), value);
     }
     options.take("ech");
     if source.ech.enabled {
-        return unsupported("Mihomo HTTP/SOCKS 出站没有 ECH 配置");
+        if kind != "vless" {
+            return unsupported("Mihomo HTTP/SOCKS 出站没有 ECH 配置");
+        }
+        let mut ech = Map::from_iter([("enable".to_owned(), json!(true))]);
+        if let Some(file) = &source.ech.config_file {
+            ech.insert(
+                "config".to_owned(),
+                json!(std::fs::read_to_string(path(store, file))?.trim()),
+            );
+        } else if let Some(value) = &source.ech.config {
+            ech.insert("config".to_owned(), json!(value));
+        }
+        if let Some(value) = &source.ech.query_name {
+            ech.insert("query-server-name".to_owned(), json!(value));
+        }
+        output.insert("ech-opts".to_owned(), json!(ech));
     }
     options.finish("Mihomo TLS")
 }
