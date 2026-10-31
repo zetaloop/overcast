@@ -382,11 +382,16 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
 
 impl Builder<'_> {
     fn service(&mut self, core: Core, globals: Map<String, Value>) -> usize {
-        if let Some(index) = self
-            .services
-            .iter()
-            .position(|service| service.core == core && service.globals == globals)
-        {
+        if let Some(index) = self.services.iter().position(|service| {
+            service.core == core
+                && globals.iter().all(|(name, value)| {
+                    service
+                        .globals
+                        .get(name)
+                        .is_none_or(|current| current == value)
+                })
+        }) {
+            self.services[index].globals.extend(globals);
             return index;
         }
         let index = self.services.len();
