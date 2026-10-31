@@ -151,6 +151,7 @@ pub fn outbound(
             output.extend(super::transport::mihomo_client(
                 &value.transport,
                 &value.network,
+                value.tls.enabled,
                 store,
                 globals,
             )?);
@@ -178,6 +179,9 @@ pub fn outbound(
             Some(&value.tls)
         }
         Connection::Vless(value) => {
+            if matches!(value.transport, crate::transport::Transport::Kcp(_)) {
+                return unsupported("Mihomo VLESS 没有 KCP 传输配置");
+            }
             if value.tls.enabled
                 && value.tls.reality.enabled
                 && value.tls.alpn == ["h3"]
@@ -228,6 +232,7 @@ pub fn outbound(
             output.extend(super::transport::mihomo_client(
                 &value.transport,
                 &value.network,
+                value.tls.enabled,
                 store,
                 globals,
             )?);
@@ -235,7 +240,13 @@ pub fn outbound(
         }
     };
     if let Some(tls) = tls.filter(|tls| tls.enabled) {
-        client_tls(tls, store, &mut output, globals, kind)?;
+        client_tls(
+            &source.transport().unwrap().client_tls(tls),
+            store,
+            &mut output,
+            globals,
+            kind,
+        )?;
         if matches!(source, Connection::Socks(_)) {
             output.remove("sni");
         }
@@ -304,6 +315,9 @@ pub fn listeners(
     keep_alive(&mut options, globals)?;
     options.finish("Mihomo 监听")?;
     if let Protocol::Vless(value) = &source.protocol {
+        if matches!(source.transport, crate::transport::Transport::Kcp(_)) {
+            return unsupported("Mihomo VLESS 没有 KCP 传输配置");
+        }
         if users.is_empty() {
             return unsupported("VLESS 入口需要认证用户");
         }

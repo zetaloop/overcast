@@ -192,7 +192,7 @@ pub fn build(
             &source.tls.alpn,
         );
         if unix && transport_udp {
-            return Err(format!("入站 {} 的 XHTTP/3 使用 UDP 监听地址", source.name).into());
+            return Err(format!("入站 {} 的传输需要 UDP 监听地址", source.name).into());
         }
         if (unix || transport_udp)
             && source.core == Core::Xray
@@ -406,18 +406,33 @@ pub fn build(
             }
             if source.core == Core::Xray {
                 same(
-                    &super::transport::xray(&source.transport, true, store)?,
-                    &super::transport::xray(&member.source.transport, true, store)?,
+                    &super::transport::xray(&source.transport, true, store, source.tls.enabled)?,
+                    &super::transport::xray(
+                        &member.source.transport,
+                        true,
+                        store,
+                        member.source.tls.enabled,
+                    )?,
                     &[],
                     "传输",
                     &members,
                 )?;
             } else if source.core == Core::SingBox {
                 same(
-                    &super::transport::singbox(&source.transport, true)?
-                        .unwrap_or(serde_json::json!({})),
-                    &super::transport::singbox(&member.source.transport, true)?
-                        .unwrap_or(serde_json::json!({})),
+                    &super::transport::singbox(
+                        &source.transport,
+                        true,
+                        source.tls.enabled,
+                        source.tls.reality.enabled,
+                    )?
+                    .unwrap_or(serde_json::json!({})),
+                    &super::transport::singbox(
+                        &member.source.transport,
+                        true,
+                        member.source.tls.enabled,
+                        member.source.tls.reality.enabled,
+                    )?
+                    .unwrap_or(serde_json::json!({})),
                     &[],
                     "传输",
                     &members,

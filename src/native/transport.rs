@@ -1,18 +1,24 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
+use percent_encoding::percent_decode_str;
 use serde_json::{Map, Value, json};
 use url::form_urlencoded;
 
 use crate::{
     Result,
     config::Store,
-    connection::Network,
+    connection::{HttpVersion, Network},
     transport::{Mode, PaddingPlacement, Placement, Pool, Quic, Transport, XHttp, XHttpOptions},
 };
 
 use super::{options::Options, single_headers, unsupported};
 
-pub fn xray(source: &Transport, inbound: bool, store: &Store) -> Result<Map<String, Value>> {
+pub fn xray(
+    source: &Transport,
+    inbound: bool,
+    store: &Store,
+    tls: bool,
+) -> Result<Map<String, Value>> {
     let mut output = Map::new();
     let (network, name, mut options) = match source {
         Transport::Default => return Ok(output),
@@ -22,10 +28,99 @@ pub fn xray(source: &Transport, inbound: bool, store: &Store) -> Result<Map<Stri
         }
         Transport::Grpc(value) => ("grpc", "grpcSettings", Options::new(value)?),
         Transport::XHttp(value) => return xhttp(value, inbound, store),
+        Transport::Http(value) => ("raw", "rawSettings", Options::new(value)?),
+        Transport::Kcp(value) => ("kcp", "kcpSettings", Options::new(value)?),
+        Transport::Quic => return unsupported("Xray 没有独立 QUIC 传输配置"),
     };
     let mut settings = Map::new();
     match source {
-        Transport::Default | Transport::XHttp(_) => unreachable!(),
+        Transport::Default | Transport::XHttp(_) | Transport::Quic => unreachable!(),
+        Transport::Http(value) => {
+            if value.version(tls) != HttpVersion::Http1 {
+                return unsupported("Xray 的 HTTP 伪装使用 HTTP/1");
+            }
+            options.take("version");
+            options.take("random_headers");
+            if !value.random_headers && value.headers.values().any(|values| values.len() > 1) {
+                return unsupported("Xray HTTP 伪装从多个标头值中随机选择");
+            }
+            let mut request = Map::new();
+            let mut response = Map::new();
+            if let Some(path) = options.take("path") {
+                let mut path = if inbound {
+                    request_path(path.as_str().unwrap())?.0
+                } else {
+                    path.as_str().unwrap().split('#').next().unwrap().to_owned()
+                };
+                if !path.starts_with('/') {
+                    path.insert(0, '/');
+                }
+                request.insert("path".to_owned(), json!([path]));
+            }
+            options.take("headers");
+            if inbound {
+                if !value.headers.is_empty() {
+                    response.insert("headers".to_owned(), json!(value.headers));
+                }
+            } else {
+                options.copy(&mut request, &["method"]);
+                options.take("host");
+                let mut headers = value.headers.clone();
+                if !value.host.is_empty() {
+                    host(&mut headers, value.host.clone());
+                }
+                if !headers.is_empty() {
+                    request.insert("headers".to_owned(), json!(headers));
+                }
+            }
+            settings.insert(
+                "header".to_owned(),
+                json!({"type": "http", "request": request, "response": response}),
+            );
+        }
+        Transport::Kcp(value) => {
+            options.copy(&mut settings, &["mtu"]);
+            options.rename(
+                &mut settings,
+                &[
+                    ("upload", "uplinkCapacity"),
+                    ("download", "downlinkCapacity"),
+                    ("window_multiplier", "cwndMultiplier"),
+                    ("write_buffer", "maxSendingWindow"),
+                ],
+            );
+            options.durations(
+                &mut settings,
+                &[("interval", "tti")],
+                Some(Duration::from_millis(1)),
+            )?;
+            for field in ["checksum", "seed", "header", "domain"] {
+                options.take(field);
+            }
+            let mut masks = Vec::new();
+            if value.header != crate::transport::Header::None {
+                let header = if value.header == crate::transport::Header::WechatVideo {
+                    json!("wechat")
+                } else {
+                    serde_json::to_value(value.header)?
+                };
+                let mut settings = Map::from_iter([("header".to_owned(), header)]);
+                if value.header == crate::transport::Header::Dns
+                    && let Some(domain) = &value.domain
+                {
+                    settings.insert("value".to_owned(), json!(domain));
+                }
+                masks.push(json!({"type": "mkcp-legacy", "settings": settings}));
+            }
+            if let Some(seed) = value.seed.as_ref().filter(|seed| !seed.is_empty()) {
+                masks.push(json!({"type": "mkcp-legacy", "settings": {"value": seed}}));
+            } else if value.checksum {
+                masks.push(json!({"type": "mkcp-legacy"}));
+            }
+            if !masks.is_empty() {
+                output.insert("finalmask".to_owned(), json!({"udp": masks}));
+            }
+        }
         Transport::WebSocket(value) => {
             options.copy(&mut settings, &["host", "path"]);
             options.take("headers");
@@ -126,7 +221,7 @@ pub fn xray(source: &Transport, inbound: bool, store: &Store) -> Result<Map<Stri
     }
     settings.retain(|_, value| match value {
         Value::String(value) => !value.is_empty(),
-        Value::Number(value) => value.as_u64() != Some(0),
+        Value::Number(value) if !matches!(source, Transport::Kcp(_)) => value.as_u64() != Some(0),
         Value::Object(value) => !value.is_empty(),
         _ => true,
     });
@@ -137,10 +232,51 @@ pub fn xray(source: &Transport, inbound: bool, store: &Store) -> Result<Map<Stri
     Ok(output)
 }
 
-pub fn singbox(source: &Transport, inbound: bool) -> Result<Option<Value>> {
+pub fn singbox(
+    source: &Transport,
+    inbound: bool,
+    tls: bool,
+    reality: bool,
+) -> Result<Option<Value>> {
     let mut output = Map::new();
     match source {
         Transport::Default => return Ok(None),
+        Transport::Http(value) => {
+            let version = value.version(tls);
+            if version == HttpVersion::Http3 {
+                return unsupported("sing-box HTTP 传输使用 HTTP/1 或 HTTP/2");
+            }
+            if !inbound && (version == HttpVersion::Http2) != tls {
+                return unsupported("sing-box HTTP 客户端通过 TLS 选择 HTTP/2，明文使用 HTTP/1");
+            }
+            let mut options = Options::new(value)?;
+            options.take("version");
+            options.take("random_headers");
+            if value.random_headers && value.headers.values().any(|values| values.len() > 1) {
+                return unsupported("sing-box HTTP 传输发送全部标头值");
+            }
+            options.copy(&mut output, &["host", "path", "method", "headers"]);
+            if inbound && let Some(Value::String(path)) = output.get_mut("path") {
+                *path = request_path(path)?.0;
+            }
+            options.durations(
+                &mut output,
+                &[
+                    ("idle_timeout", "idle_timeout"),
+                    ("ping_timeout", "ping_timeout"),
+                ],
+                None,
+            )?;
+            options.finish("sing-box HTTP 传输")?;
+            output.insert("type".to_owned(), json!("http"));
+        }
+        Transport::Kcp(_) => return unsupported("sing-box 没有 KCP 传输配置"),
+        Transport::Quic => {
+            if !tls || reality {
+                return unsupported("QUIC 传输需要 TLS 握手");
+            }
+            output.insert("type".to_owned(), json!("quic"));
+        }
         Transport::WebSocket(value) => {
             let mut options = Options::new(value)?;
             output.insert("type".to_owned(), json!("ws"));
@@ -161,7 +297,7 @@ pub fn singbox(source: &Transport, inbound: bool) -> Result<Option<Value>> {
                 options.take("host");
                 let mut headers = value.headers.clone();
                 if let Some(host) = &value.host {
-                    headers.insert("Host".to_owned(), vec![host.clone()]);
+                    self::host(&mut headers, vec![host.clone()]);
                 }
                 if !headers.is_empty() {
                     output.insert("headers".to_owned(), json!(headers));
@@ -223,12 +359,70 @@ pub fn singbox(source: &Transport, inbound: bool) -> Result<Option<Value>> {
 pub fn mihomo_client(
     source: &Transport,
     network: &Network,
+    tls: bool,
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
     let mut output = Map::new();
     match source {
         Transport::Default => {}
+        Transport::Http(value) => {
+            let mut options = Options::new(value)?;
+            options.take("version");
+            options.take("random_headers");
+            let mut settings = Map::new();
+            let path = if let Some(path) = options.take("path") {
+                let (path, query) = request_path(path.as_str().unwrap())?;
+                if !query.is_empty() {
+                    return unsupported("Mihomo HTTP 传输路径没有查询参数配置");
+                }
+                Some(path)
+            } else {
+                None
+            };
+            match value.version(tls) {
+                HttpVersion::Http1 => {
+                    if !value.random_headers
+                        && value.headers.values().any(|values| values.len() > 1)
+                    {
+                        return unsupported("Mihomo HTTP 伪装从多个标头值中随机选择");
+                    }
+                    options.copy(&mut settings, &["method"]);
+                    if let Some(path) = path {
+                        settings.insert("path".to_owned(), json!([path]));
+                    }
+                    options.take("headers");
+                    options.take("host");
+                    let mut headers = value.headers.clone();
+                    if !value.host.is_empty() {
+                        host(&mut headers, value.host.clone());
+                    }
+                    if !headers.is_empty() {
+                        settings.insert("headers".to_owned(), json!(headers));
+                    }
+                    output.insert("network".to_owned(), json!("http"));
+                    output.insert("http-opts".to_owned(), json!(settings));
+                }
+                HttpVersion::Http2 => {
+                    options.copy(&mut settings, &["host"]);
+                    if let Some(path) = path {
+                        settings.insert("path".to_owned(), json!(path));
+                    }
+                    if value.method.as_deref() == Some("PUT") {
+                        options.take("method");
+                    }
+                    output.insert("network".to_owned(), json!("h2"));
+                    output.insert("h2-opts".to_owned(), json!(settings));
+                }
+                _ => return unsupported("Mihomo HTTP 传输使用 HTTP/1 或 HTTP/2"),
+            }
+            options.finish("Mihomo HTTP 传输")?;
+        }
+        Transport::Kcp(value) => {
+            output.insert("network".to_owned(), json!("kcp"));
+            output.insert("mkcp-opts".to_owned(), json!(mihomo_kcp(value)?));
+        }
+        Transport::Quic => return unsupported("Mihomo 没有独立 QUIC 传输配置"),
         Transport::WebSocket(value) => {
             let mut options = Options::new(value)?;
             let mut ws = Map::new();
@@ -248,7 +442,7 @@ pub fn mihomo_client(
             options.take("headers");
             let mut headers = single_headers(&value.headers)?;
             if let Some(host) = &value.host {
-                headers.insert("Host".to_owned(), host.clone());
+                self::host(&mut headers, host.clone());
             }
             if !headers.is_empty() {
                 ws.insert("headers".to_owned(), json!(headers));
@@ -266,7 +460,7 @@ pub fn mihomo_client(
             options.take("headers");
             let mut headers = single_headers(&value.headers)?;
             if let Some(host) = &value.host {
-                headers.insert("Host".to_owned(), host.clone());
+                self::host(&mut headers, host.clone());
             }
             if !headers.is_empty() {
                 ws.insert("headers".to_owned(), json!(headers));
@@ -375,6 +569,13 @@ pub fn mihomo_server(source: &Transport) -> Result<Map<String, Value>> {
     let mut output = Map::new();
     match source {
         Transport::Default => {}
+        Transport::Http(_) => return unsupported("Mihomo 没有 HTTP 服务端传输配置"),
+        Transport::Kcp(value) => {
+            let mut settings = mihomo_kcp(value)?;
+            settings.insert("enable".to_owned(), json!(true));
+            output.insert("mkcp-config".to_owned(), json!(settings));
+        }
+        Transport::Quic => return unsupported("Mihomo 没有独立 QUIC 传输配置"),
         Transport::WebSocket(value) => {
             let mut options = Options::new(value)?;
             options.take("path");
@@ -431,6 +632,54 @@ pub fn mihomo_server(source: &Transport) -> Result<Map<String, Value>> {
             output.insert("xhttp-config".to_owned(), json!(http));
         }
     }
+    Ok(output)
+}
+
+fn host<T>(headers: &mut BTreeMap<String, T>, value: T) {
+    headers.retain(|name, _| !name.eq_ignore_ascii_case("Host"));
+    headers.insert("Host".to_owned(), value);
+}
+
+fn request_path(value: &str) -> Result<(String, &str)> {
+    let value = value.split('#').next().unwrap();
+    let (path, query) = value.split_once('?').unwrap_or((value, ""));
+    let Ok(path) = percent_decode_str(path).decode_utf8() else {
+        return unsupported("请求路径无法表示为 UTF-8");
+    };
+    let mut path = path.into_owned();
+    if !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    Ok((path, query))
+}
+
+fn mihomo_kcp(source: &crate::transport::Kcp) -> Result<Map<String, Value>> {
+    if !source.checksum && source.seed.as_ref().is_none_or(String::is_empty) {
+        return unsupported("Mihomo KCP 使用帧校验或加密种子");
+    }
+    if source.header == crate::transport::Header::Dns {
+        return unsupported("Mihomo KCP 没有 DNS 数据包伪装");
+    }
+    let mut options = Options::new(source)?;
+    let mut output = Map::new();
+    options.copy(&mut output, &["mtu", "congestion", "seed", "header"]);
+    options.rename(
+        &mut output,
+        &[
+            ("upload", "uplink-capacity"),
+            ("download", "downlink-capacity"),
+            ("write_buffer", "write-buffer"),
+            ("read_buffer", "read-buffer"),
+        ],
+    );
+    options.durations(
+        &mut output,
+        &[("interval", "tti")],
+        Some(Duration::from_millis(1)),
+    )?;
+    options.take("checksum");
+    options.take("domain");
+    options.finish("Mihomo KCP")?;
     Ok(output)
 }
 

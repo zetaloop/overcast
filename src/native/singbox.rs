@@ -67,7 +67,10 @@ pub fn outbound(
             http(&mut options, &mut output)?;
             options.finish("sing-box HTTP")?;
             if value.tls.enabled {
-                output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+                output.insert(
+                    "tls".to_owned(),
+                    client_tls(&value.transport.client_tls(&value.tls), store, globals)?,
+                );
             }
         }
         Connection::Socks(value) => {
@@ -153,9 +156,17 @@ pub fn outbound(
             }
             options.finish("sing-box VLESS")?;
             if value.tls.enabled {
-                output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+                output.insert(
+                    "tls".to_owned(),
+                    client_tls(&value.transport.client_tls(&value.tls), store, globals)?,
+                );
             }
-            if let Some(transport) = super::transport::singbox(&value.transport, false)? {
+            if let Some(transport) = super::transport::singbox(
+                &value.transport,
+                false,
+                value.tls.enabled,
+                value.tls.reality.enabled,
+            )? {
                 output.insert("transport".to_owned(), transport);
             }
         }
@@ -207,9 +218,17 @@ pub fn outbound(
                 );
             }
             if value.tls.enabled {
-                output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+                output.insert(
+                    "tls".to_owned(),
+                    client_tls(&value.transport.client_tls(&value.tls), store, globals)?,
+                );
             }
-            if let Some(transport) = super::transport::singbox(&value.transport, false)? {
+            if let Some(transport) = super::transport::singbox(
+                &value.transport,
+                false,
+                value.tls.enabled,
+                value.tls.reality.enabled,
+            )? {
                 output.insert("transport".to_owned(), transport);
             }
         }
@@ -311,7 +330,12 @@ pub fn listeners(
         if source.tls.enabled {
             output.insert("tls".to_owned(), server_tls(source, store)?);
         }
-        if let Some(transport) = super::transport::singbox(&source.transport, true)? {
+        if let Some(transport) = super::transport::singbox(
+            &source.transport,
+            true,
+            source.tls.enabled,
+            source.tls.reality.enabled,
+        )? {
             output.insert("transport".to_owned(), transport);
         }
         return Ok(vec![output]);
@@ -334,7 +358,12 @@ pub fn listeners(
         if source.tls.enabled {
             output.insert("tls".to_owned(), server_tls(source, store)?);
         }
-        if let Some(transport) = super::transport::singbox(&source.transport, true)? {
+        if let Some(transport) = super::transport::singbox(
+            &source.transport,
+            true,
+            source.tls.enabled,
+            source.tls.reality.enabled,
+        )? {
             output.insert("transport".to_owned(), transport);
         }
         return Ok(vec![output]);

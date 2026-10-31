@@ -1,11 +1,11 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::{borrow::Cow, collections::BTreeMap, rc::Rc};
 
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
 
 use crate::{
     Result,
-    connection::{Network, Tls},
+    connection::{HttpVersion, Network, Tls},
     form::{self, Value, choices, fields},
     tui::{Action, Item, Menu, Screen},
 };
@@ -19,6 +19,81 @@ pub enum Transport {
     HttpUpgrade(HttpUpgrade),
     Grpc(Grpc),
     XHttp(Box<XHttp>),
+    Http(Http),
+    Kcp(Kcp),
+    Quic,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Http {
+    pub version: HttpVersion,
+    pub host: Vec<String>,
+    pub path: Option<String>,
+    pub method: Option<String>,
+    pub headers: BTreeMap<String, Vec<String>>,
+    pub random_headers: bool,
+    pub idle_timeout: Option<String>,
+    pub ping_timeout: Option<String>,
+}
+
+impl Http {
+    pub fn version(&self, tls: bool) -> HttpVersion {
+        match self.version {
+            HttpVersion::Auto if tls => HttpVersion::Http2,
+            HttpVersion::Auto => HttpVersion::Http1,
+            version => version,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Kcp {
+    pub mtu: Option<u32>,
+    pub interval: Option<String>,
+    pub upload: Option<u32>,
+    pub download: Option<u32>,
+    pub window_multiplier: Option<u32>,
+    pub congestion: Option<bool>,
+    pub write_buffer: Option<u32>,
+    pub read_buffer: Option<u32>,
+    pub checksum: bool,
+    pub seed: Option<String>,
+    pub header: Header,
+    pub domain: Option<String>,
+}
+
+impl Default for Kcp {
+    fn default() -> Self {
+        Self {
+            mtu: None,
+            interval: None,
+            upload: None,
+            download: None,
+            window_multiplier: None,
+            congestion: None,
+            write_buffer: None,
+            read_buffer: None,
+            checksum: true,
+            seed: None,
+            header: Header::default(),
+            domain: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Header {
+    #[default]
+    None,
+    Srtp,
+    Utp,
+    WechatVideo,
+    Dtls,
+    Wireguard,
+    Dns,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -226,12 +301,32 @@ pub enum BbrProfile {
 }
 
 impl Transport {
+    pub fn client_tls<'a>(&self, tls: &'a Tls) -> Cow<'a, Tls> {
+        let mut tls = Cow::Borrowed(tls);
+        if let Self::Http(http) = self
+            && tls.enabled
+            && !tls.reality.enabled
+            && tls.alpn.is_empty()
+        {
+            let alpn = match http.version(true) {
+                HttpVersion::Http1 => Some("http/1.1"),
+                HttpVersion::Http2 => Some("h2"),
+                _ => None,
+            };
+            if let Some(alpn) = alpn {
+                tls.to_mut().alpn.push(alpn.to_owned());
+            }
+        }
+        tls
+    }
+
     pub fn is_default(&self) -> bool {
         matches!(self, Self::Default)
     }
 
     pub fn udp(&self, tls: bool, alpn: &[String]) -> bool {
-        matches!(self, Self::XHttp(_)) && tls && alpn == ["h3"]
+        matches!(self, Self::Quic | Self::Kcp(_))
+            || matches!(self, Self::XHttp(_)) && tls && alpn == ["h3"]
     }
 
     pub fn supported(&self, tls: &Tls, networks: [bool; 2]) -> bool {
@@ -255,6 +350,9 @@ impl Transport {
             Self::HttpUpgrade(_) => 2,
             Self::Grpc(_) => 3,
             Self::XHttp(_) => 4,
+            Self::Http(_) => 5,
+            Self::Kcp(_) => 6,
+            Self::Quic => 7,
         }
     }
 }
@@ -267,6 +365,9 @@ impl Value for Transport {
             Self::HttpUpgrade(_) => "HTTPUpgrade",
             Self::Grpc(_) => "gRPC",
             Self::XHttp(_) => "XHTTP",
+            Self::Http(_) => "HTTP",
+            Self::Kcp(_) => "KCP",
+            Self::Quic => "QUIC",
         }
         .to_owned()
     }
@@ -291,6 +392,9 @@ impl Value for Transport {
                 ("httpupgrade", "HTTPUpgrade"),
                 ("grpc", "gRPC"),
                 ("xhttp", "XHTTP"),
+                ("http", "HTTP"),
+                ("kcp", "KCP"),
+                ("quic", "QUIC"),
                 ("back", "返回"),
             ]
             .into_iter()
@@ -317,11 +421,15 @@ impl Value for Transport {
                                 2 => Self::HttpUpgrade(HttpUpgrade::default()),
                                 3 => Self::Grpc(Grpc::default()),
                                 4 => Self::XHttp(Box::default()),
+                                5 => Self::Http(Http::default()),
+                                6 => Self::Kcp(Kcp::default()),
+                                7 => Self::Quic,
                                 _ => Self::Default,
                             });
                     let creating = selected != self.index();
                     let result = match &mut candidate {
                         Self::Default => form::set(screen, self, Self::Default, &apply),
+                        Self::Quic => form::set(screen, self, Self::Quic, &apply),
                         Self::WebSocket(value) => {
                             let apply = apply.clone();
                             form::edit(
@@ -370,6 +478,30 @@ impl Value for Transport {
                                 creating,
                             )
                         }
+                        Self::Http(value) => {
+                            let apply = apply.clone();
+                            form::edit(
+                                screen,
+                                &format!("{title} / HTTP"),
+                                value,
+                                Rc::new(move |value, screen| {
+                                    apply(&Self::Http(value.clone()), screen)
+                                }),
+                                creating,
+                            )
+                        }
+                        Self::Kcp(value) => {
+                            let apply = apply.clone();
+                            form::edit(
+                                screen,
+                                &format!("{title} / KCP"),
+                                value,
+                                Rc::new(move |value, screen| {
+                                    apply(&Self::Kcp(value.clone()), screen)
+                                }),
+                                creating,
+                            )
+                        }
                     };
                     match result {
                         Ok(accepted) => {
@@ -388,6 +520,41 @@ impl Value for Transport {
     }
 }
 
+fields!(Http {
+    version: "版本",
+    host: "主机",
+    path: "路径",
+    method: "方法",
+    headers: "标头",
+    random_headers: "随机标头值",
+    idle_timeout: "空闲超时",
+    ping_timeout: "心跳超时",
+});
+
+fields!(Kcp {
+    mtu: "MTU",
+    interval: "发送间隔",
+    upload: "上传容量 MiB/s",
+    download: "下载容量 MiB/s",
+    window_multiplier: "拥塞窗口倍率",
+    congestion: "拥塞控制",
+    write_buffer: "写缓冲字节数",
+    read_buffer: "读缓冲字节数",
+    checksum: "帧校验",
+    seed: "加密种子",
+    header: "数据包伪装",
+    domain: "DNS 域名",
+});
+
+choices!(Header {
+    None: "none" => "无",
+    Srtp: "srtp" => "SRTP",
+    Utp: "utp" => "uTP",
+    WechatVideo: "wechat-video" => "微信视频",
+    Dtls: "dtls" => "DTLS",
+    Wireguard: "wireguard" => "WireGuard",
+    Dns: "dns" => "DNS",
+});
 fields!(WebSocket {
     host: "主机名",
     path: "路径",

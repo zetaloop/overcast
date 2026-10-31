@@ -200,13 +200,19 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         }
     };
     if let Some(tls) = tls.filter(|tls| tls.enabled) {
+        let tls = source.transport().unwrap().client_tls(tls);
         if tls.reality.enabled {
             reality_transport(source.transport().unwrap())?;
         }
-        stream.extend(security(tls, store)?);
+        stream.extend(security(&tls, store)?);
     }
     if let Some(transport) = source.transport() {
-        stream.extend(transport::xray(transport, false, store)?);
+        stream.extend(transport::xray(
+            transport,
+            false,
+            store,
+            tls.is_some_and(|tls| tls.enabled),
+        )?);
     }
     output.insert("settings".to_owned(), json!(settings));
     if !stream.is_empty() {
@@ -256,7 +262,7 @@ pub fn listeners(
         &source.tls.alpn,
     ) && source.listen.proxy_protocol
     {
-        return unsupported("XHTTP/3 的 UDP 监听没有 PROXY protocol 支持");
+        return unsupported("UDP 传输监听没有 PROXY protocol 支持");
     }
     let mut output = Map::from_iter([
         ("listen".to_owned(), json!(source.listen.address)),
@@ -517,7 +523,12 @@ pub fn listeners(
             stream.insert("tlsSettings".to_owned(), server_tls(source, store)?);
         }
     }
-    stream.extend(transport::xray(&source.transport, true, store)?);
+    stream.extend(transport::xray(
+        &source.transport,
+        true,
+        store,
+        source.tls.enabled,
+    )?);
     output.insert("settings".to_owned(), json!(settings));
     if !stream.is_empty() {
         output.insert("streamSettings".to_owned(), json!(stream));
@@ -641,6 +652,7 @@ pub fn security(source: &connection::Tls, store: &Store) -> Result<Map<String, V
 fn reality_transport(source: &crate::transport::Transport) -> Result<()> {
     match source {
         crate::transport::Transport::Default
+        | crate::transport::Transport::Http(_)
         | crate::transport::Transport::Grpc(_)
         | crate::transport::Transport::XHttp(_) => Ok(()),
         _ => unsupported("Xray REALITY 可用于原生 TCP、XHTTP 和 gRPC 传输"),

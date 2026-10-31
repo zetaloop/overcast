@@ -10,8 +10,11 @@ use url::{Host, Url};
 
 use crate::{
     Result,
-    connection::Tls,
-    transport::{Download, Grpc, HttpUpgrade, Pool, Transport, WebSocket, XHttp, XHttpOptions},
+    connection::{HttpVersion, Tls},
+    transport::{
+        Download, Grpc, Header, Http, HttpUpgrade, Kcp, Pool, Transport, WebSocket, XHttp,
+        XHttpOptions,
+    },
     vless::{Client, Flow},
 };
 
@@ -221,6 +224,17 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
     let kind = query.remove("type").unwrap_or_else(|| "tcp".to_owned());
     match kind.as_str() {
         "tcp" | "raw" => {
+            if query.get("headerType").is_some_and(|value| value == "http") {
+                query.remove("headerType");
+                return Ok(Transport::Http(Http {
+                    version: HttpVersion::Http1,
+                    host: query.remove("host").map_or_else(Vec::new, |value| {
+                        value.split(',').map(str::to_owned).collect()
+                    }),
+                    path: query.remove("path"),
+                    ..Http::default()
+                }));
+            }
             if query
                 .get("headerType")
                 .is_none_or(|value| value == "none" || value.is_empty())
@@ -230,6 +244,42 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
                 query.remove("path");
             }
             Ok(Transport::Default)
+        }
+        "http" | "h2" => Ok(Transport::Http(Http {
+            version: if kind == "h2" {
+                HttpVersion::Http2
+            } else {
+                HttpVersion::Auto
+            },
+            host: query.remove("host").map_or_else(Vec::new, |value| {
+                value.split(',').map(str::to_owned).collect()
+            }),
+            path: query.remove("path"),
+            ..Http::default()
+        })),
+        "kcp" | "mkcp" => {
+            let header = match query.remove("headerType").as_deref() {
+                None | Some("" | "none") => Header::None,
+                Some("wechat") => Header::WechatVideo,
+                Some(value) => serde_json::from_value(json!(value))?,
+            };
+            Ok(Transport::Kcp(Kcp {
+                seed: query.remove("seed"),
+                domain: query.remove("host"),
+                header,
+                ..Kcp::default()
+            }))
+        }
+        "quic" => {
+            for key in ["headerType", "quicSecurity", "key"] {
+                if query
+                    .get(key)
+                    .is_some_and(|value| value.is_empty() || value == "none")
+                {
+                    query.remove(key);
+                }
+            }
+            Ok(Transport::Quic)
         }
         "ws" => {
             let mut value = WebSocket {
