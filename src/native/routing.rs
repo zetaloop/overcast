@@ -184,6 +184,26 @@ impl<'a> Matchers<'a> {
             if let Some(network) = rule.network {
                 context.insert("network".to_owned(), json!([network.name()]));
             }
+            let lower = self.domains(&condition, false);
+            let upper = self.domains(&condition, true);
+            if lower != upper {
+                let mut conditions = vec![
+                    json!(context),
+                    json!({"ip_cidr": ["0.0.0.0/0", "::/0"], "invert": true}),
+                ];
+                if upper != Condition::Always {
+                    conditions.push(self.singbox_condition(&upper));
+                }
+                if lower != Condition::Never {
+                    let mut condition = self.singbox_condition(&lower);
+                    condition["invert"] = json!(true);
+                    conditions.push(condition);
+                }
+                result.push(json!({
+                    "type": "logical", "mode": "and", "rules": conditions,
+                    "action": "resolve",
+                }));
+            }
             let mut value = if condition == Condition::Always {
                 json!(context)
             } else {
@@ -210,6 +230,30 @@ impl<'a> Matchers<'a> {
         }
         result.push(json!({"action": "reject"}));
         result
+    }
+
+    fn domains(&self, condition: &Condition, ip: bool) -> Condition {
+        match condition {
+            Condition::And(children) | Condition::Or(children) => Condition::combine(
+                matches!(condition, Condition::And(_)),
+                children
+                    .iter()
+                    .map(|child| self.domains(child, ip))
+                    .collect(),
+            ),
+            _ if self
+                .names
+                .get(condition)
+                .is_some_and(|name| name.starts_with('i')) =>
+            {
+                if ip {
+                    Condition::Always
+                } else {
+                    Condition::Never
+                }
+            }
+            _ => condition.clone(),
+        }
     }
 
     fn singbox_condition(&mut self, condition: &Condition) -> Value {
