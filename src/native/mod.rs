@@ -4,6 +4,7 @@ mod mihomo;
 mod options;
 mod routing;
 mod singbox;
+mod transport;
 mod xray;
 
 use std::{

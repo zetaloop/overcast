@@ -14,6 +14,12 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
+    if source
+        .transport()
+        .is_some_and(|transport| !transport.is_default())
+    {
+        return unsupported("sing-box 的 HTTP/SOCKS 出站没有传输封装配置");
+    }
     let (kind, proxy, network) = match source {
         Connection::Direct(value) => ("direct", None, &value.network),
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
@@ -100,6 +106,9 @@ pub fn listeners(
     users: &[(String, String)],
     store: &Store,
 ) -> Result<Vec<Map<String, Value>>> {
+    if !source.transport.is_default() {
+        return unsupported("sing-box 的 HTTP/SOCKS 入站没有传输封装配置");
+    }
     let mut output = Map::from_iter([
         ("listen".to_owned(), json!(source.listen.address)),
         (

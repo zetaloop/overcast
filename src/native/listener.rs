@@ -279,6 +279,23 @@ pub fn build(graph: &mut Graph<'_>, progress: &Progress) -> Result<Vec<Listener>
             if source.tls.enabled != member.source.tls.enabled {
                 return Err(conflict(&members, "TLS 与明文连接使用了同一监听资源").into());
             }
+            if source.core == Core::Xray {
+                same(
+                    &super::transport::xray(&source.transport, true)?,
+                    &super::transport::xray(&member.source.transport, true)?,
+                    &[],
+                    "传输",
+                    &members,
+                )?;
+            } else {
+                same(
+                    &source.transport,
+                    &member.source.transport,
+                    &[],
+                    "传输",
+                    &members,
+                )?;
+            }
             if source.tls.enabled {
                 same(
                     &source.tls,

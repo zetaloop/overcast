@@ -12,6 +12,7 @@ use url::{Host, Url};
 use crate::{
     Result,
     form::{self, Value, choices, fields},
+    transport::Transport,
     tui::{Action, Item, Menu, Screen},
 };
 
@@ -97,6 +98,7 @@ impl Connection {
                     ..HttpOptions::default()
                 },
                 network: Network::default(),
+                transport: Transport::default(),
             }),
             "socks" | "socks4" | "socks4a" | "socks5" => {
                 if !url.path().is_empty() && url.path() != "/" {
@@ -114,6 +116,7 @@ impl Connection {
                     },
                     tls: Tls::default(),
                     network: Network::default(),
+                    transport: Transport::default(),
                 })
             }
             protocol => return Err(format!("不支持的连接链接：{protocol}").into()),
@@ -126,6 +129,14 @@ impl Connection {
             Self::Direct(value) => &value.name,
             Self::Http(value) => &value.proxy.name,
             Self::Socks(value) => &value.proxy.name,
+        }
+    }
+
+    pub fn transport(&self) -> Option<&Transport> {
+        match self {
+            Self::Direct(_) => None,
+            Self::Http(value) => Some(&value.transport),
+            Self::Socks(value) => Some(&value.transport),
         }
     }
 
@@ -255,6 +266,7 @@ pub struct Http {
     pub tls: Tls,
     pub http: HttpOptions,
     pub network: Network,
+    pub transport: Transport,
 }
 
 impl Default for Http {
@@ -267,6 +279,7 @@ impl Default for Http {
             tls: Tls::default(),
             http: HttpOptions::default(),
             network: Network::default(),
+            transport: Transport::default(),
         }
     }
 }
@@ -278,6 +291,7 @@ pub struct Socks {
     pub tls: Tls,
     pub socks: SocksOptions,
     pub network: Network,
+    pub transport: Transport,
 }
 
 impl Default for Socks {
@@ -290,6 +304,7 @@ impl Default for Socks {
             tls: Tls::default(),
             socks: SocksOptions::default(),
             network: Network::default(),
+            transport: Transport::default(),
         }
     }
 }
@@ -596,6 +611,7 @@ fields!(Http {
     proxy: ..,
     tls: "TLS",
     http: "HTTP",
+    transport: "传输",
     network: "网络",
 });
 
@@ -603,6 +619,7 @@ fields!(Socks {
     proxy: ..,
     tls: "TLS",
     socks: "SOCKS",
+    transport: "传输",
     network: "网络",
 });
 

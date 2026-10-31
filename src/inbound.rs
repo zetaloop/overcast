@@ -17,6 +17,7 @@ use crate::{
     config::Store,
     connection::{FastOpen, SocketOption},
     form::{self, Value, choices, fields},
+    transport::Transport,
     tui::{Action, Item, Menu, Screen},
     user,
 };
@@ -32,6 +33,8 @@ pub struct Inbound {
     pub users: bool,
     pub credentials: Option<Credentials>,
     pub protocol: Protocol,
+    #[serde(default)]
+    pub transport: Transport,
     pub tls: Tls,
     pub listen: Listen,
 }
@@ -50,6 +53,7 @@ impl Inbound {
             users: true,
             credentials: None,
             protocol: kind.protocol(),
+            transport: Transport::default(),
             tls: Tls::default(),
             listen: Listen::default(),
         }
@@ -419,8 +423,11 @@ fn edit(
         }
         let mut tls = Item::new("tls", "TLS".stylized());
         tls.value = inbound.tls.enabled.text();
+        let mut transport = Item::new("transport", "传输".stylized());
+        transport.value = inbound.transport.text();
         items.extend([
             Item::new("options", "协议参数".stylized()),
+            transport,
             tls,
             Item::new("listen", "监听".stylized()),
         ]);
@@ -525,6 +532,7 @@ fn edit(
                     }),
                 ),
                 "tls" => edit!(tls),
+                "transport" => edit!(transport),
                 "listen" => edit!(listen),
                 "create" => {
                     let result = screen.work(

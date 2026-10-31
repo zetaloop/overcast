@@ -9,7 +9,9 @@ use crate::{
     inbound::{self, Inbound, Protocol},
 };
 
-use super::{certificate_paths, hex_hashes, options::Options, path, single_headers, unsupported};
+use super::{
+    certificate_paths, hex_hashes, options::Options, path, single_headers, transport, unsupported,
+};
 
 pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>> {
     let (kind, proxy, network) = match source {
@@ -104,6 +106,9 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
     if let Some(tls) = tls.filter(|tls| tls.enabled) {
         stream.insert("security".to_owned(), json!("tls"));
         stream.insert("tlsSettings".to_owned(), client_tls(tls, store)?);
+    }
+    if let Some(transport) = source.transport() {
+        stream.extend(transport::xray(transport, false)?);
     }
     output.insert("settings".to_owned(), json!(settings));
     if !stream.is_empty() {
@@ -252,6 +257,7 @@ pub fn listeners(
         stream.insert("security".to_owned(), json!("tls"));
         stream.insert("tlsSettings".to_owned(), server_tls(source, store)?);
     }
+    stream.extend(transport::xray(&source.transport, true)?);
     output.insert("settings".to_owned(), json!(settings));
     if !stream.is_empty() {
         output.insert("streamSettings".to_owned(), json!(stream));

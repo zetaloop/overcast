@@ -14,6 +14,7 @@ pub mod progress;
 mod resource;
 mod route;
 mod target;
+mod transport;
 pub mod tui;
 mod user;
 
