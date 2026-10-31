@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{Result, config::Config, geodata::Catalog, pattern};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
 pub enum Condition {
     #[default]

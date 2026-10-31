@@ -54,7 +54,7 @@ impl Rule {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
 pub enum Destination {
     Direct,

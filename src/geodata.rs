@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{BufReader, ErrorKind, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use maxminddb::{Reader, geoip2};
@@ -26,6 +26,13 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn directory(&self, store: &Store) -> PathBuf {
+        store
+            .directory
+            .join("geodata")
+            .join(self.release.to_string())
+    }
+
     pub fn load(store: &Store) -> Result<Option<Self>> {
         let path = store.directory.join("geodata/index.json");
         match File::open(&path) {
@@ -83,7 +90,7 @@ impl Catalog {
             &client,
             progress,
             |bytes| {
-                Ok(Names::decode(bytes)?
+                Ok(Geoips::decode(bytes)?
                     .entries
                     .into_iter()
                     .map(|entry| entry.name.to_ascii_lowercase())
@@ -177,39 +184,64 @@ fn load<T>(
 }
 
 #[derive(Message)]
-struct Sites {
+pub struct Sites {
     #[prost(message, repeated, tag = "1")]
-    entries: Vec<Site>,
+    pub entries: Vec<Site>,
 }
 
 #[derive(Message)]
-struct Site {
+pub struct Site {
     #[prost(string, tag = "1")]
-    name: String,
+    pub name: String,
     #[prost(message, repeated, tag = "2")]
-    domains: Vec<Domain>,
+    pub domains: Vec<Domain>,
 }
 
 #[derive(Message)]
-struct Domain {
+pub struct Domain {
+    #[prost(enumeration = "DomainType", tag = "1")]
+    pub kind: i32,
+    #[prost(string, tag = "2")]
+    pub value: String,
     #[prost(message, repeated, tag = "3")]
-    attributes: Vec<Attribute>,
+    pub attributes: Vec<Attribute>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum DomainType {
+    Keyword = 0,
+    Regex = 1,
+    Suffix = 2,
+    Domain = 3,
 }
 
 #[derive(Message)]
-struct Attribute {
+pub struct Attribute {
     #[prost(string, tag = "1")]
-    key: String,
+    pub key: String,
 }
 
 #[derive(Message)]
-struct Names {
+pub struct Geoips {
     #[prost(message, repeated, tag = "1")]
-    entries: Vec<Name>,
+    pub entries: Vec<Geoip>,
 }
 
 #[derive(Message)]
-struct Name {
+pub struct Geoip {
     #[prost(string, tag = "1")]
-    name: String,
+    pub name: String,
+    #[prost(message, repeated, tag = "2")]
+    pub networks: Vec<Cidr>,
+    #[prost(bool, tag = "3")]
+    pub reverse: bool,
+}
+
+#[derive(Message)]
+pub struct Cidr {
+    #[prost(bytes = "vec", tag = "1")]
+    pub ip: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub prefix: u32,
 }

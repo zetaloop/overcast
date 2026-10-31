@@ -4,6 +4,7 @@ mod config;
 mod connection;
 mod form;
 mod geodata;
+mod graph;
 mod inbound;
 pub mod input;
 mod outbound;
@@ -11,6 +12,7 @@ mod pattern;
 pub mod progress;
 mod resource;
 mod route;
+mod target;
 pub mod tui;
 mod user;
 

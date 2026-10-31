@@ -15,6 +15,7 @@ use tempfile::NamedTempFile;
 use crate::{
     Result,
     component::{Component, Settings},
+    graph,
     inbound::Inbound,
     outbound::Outbound,
     progress::Progress,
@@ -166,6 +167,7 @@ impl Store {
         let mut config = self.load()?;
         let result = change(&mut config)?;
         config.validate()?;
+        graph::validate(self, &config, progress)?;
         progress.check()?;
         let path = self.directory.join("config.json");
         self.write(&path, |file| {
