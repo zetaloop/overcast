@@ -189,6 +189,75 @@ pub fn trojan(url: &Url) -> Result<crate::trojan::Client> {
     Ok(client)
 }
 
+pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {
+    let source = text.split_once("://").ok_or("链接缺少协议")?.1;
+    let (source, tag) = source.split_once('#').unwrap_or((source, ""));
+    let (source, query) = source.split_once('?').unwrap_or((source, ""));
+    let (url, credentials) = if source.contains('@') {
+        let url = Url::parse(&format!("ss://{source}"))?;
+        let username = percent_decode_str(url.username())
+            .decode_utf8()?
+            .into_owned();
+        let credentials = if let Some(password) = url.password() {
+            format!("{username}:{}", percent_decode_str(password).decode_utf8()?)
+        } else if username.contains(':') {
+            username
+        } else {
+            String::from_utf8(decode(&username)?)?
+        };
+        (url, credentials)
+    } else {
+        let decoded = String::from_utf8(decode(source.trim_end_matches('/'))?)?;
+        let (credentials, address) = decoded
+            .rsplit_once('@')
+            .ok_or("Shadowsocks 链接缺少服务器地址")?;
+        (
+            Url::parse(&format!("ss://{address}"))?,
+            credentials.to_owned(),
+        )
+    };
+    if !url.path().is_empty() && url.path() != "/" {
+        return Err("Shadowsocks 链接中包含路径".into());
+    }
+    let (cipher, password) = credentials
+        .split_once(':')
+        .ok_or("Shadowsocks 链接缺少算法或密码")?;
+    let cipher = cipher.to_ascii_lowercase();
+    let cipher = cipher
+        .strip_prefix("aead_")
+        .unwrap_or(&cipher)
+        .replace('_', "-");
+    let mut query: BTreeMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let plugin = query.remove("plugin").map(|value| {
+        let (name, options) = value.split_once(';').unwrap_or((&value, ""));
+        crate::shadowsocks::Plugin {
+            name: if name == "simple-obfs" {
+                "obfs-local"
+            } else {
+                name
+            }
+            .to_owned(),
+            options: options.to_owned(),
+        }
+    });
+    let client = crate::shadowsocks::Client {
+        name: percent_decode_str(tag).decode_utf8()?.into_owned(),
+        server: host(&url)?,
+        port: url.port().ok_or("Shadowsocks 链接缺少端口")?,
+        password: password.to_owned(),
+        shadowsocks: crate::shadowsocks::ClientOptions {
+            cipher: serde_json::from_value(json!(cipher))?,
+            plugin,
+            ..crate::shadowsocks::ClientOptions::default()
+        },
+        ..crate::shadowsocks::Client::default()
+    };
+    remaining(query.keys(), "链接参数")?;
+    Ok(client)
+}
+
 pub fn host(url: &Url) -> Result<String> {
     Ok(
         match Host::parse(url.host_str().ok_or("链接缺少服务器地址")?)? {

@@ -126,6 +126,7 @@ impl Network {
         !(self == Self::Udp
             && inbound.core == Core::Mihomo
             && matches!(inbound.protocol, Protocol::Mixed(_)))
+            && !matches!(&inbound.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
     }
 }
 
@@ -182,6 +183,11 @@ pub fn build<'a>(
         let mut accounts = Vec::new();
         let mut users = HashSet::new();
         for network in [Network::Tcp, Network::Udp] {
+            if network == Network::Tcp
+                && matches!(&inbound.protocol, Protocol::Shadowsocks(value) if !value.tcp)
+            {
+                continue;
+            }
             if network == Network::Udp
                 && !match &inbound.protocol {
                     Protocol::Mixed(value) => {
@@ -190,6 +196,7 @@ pub fn build<'a>(
                                 || value.http.enabled && inbound.core == Core::SingBox)
                     }
                     Protocol::Vless(_) | Protocol::Vmess(_) | Protocol::Trojan(_) => true,
+                    Protocol::Shadowsocks(value) => value.tcp || value.udp,
                 }
             {
                 continue;

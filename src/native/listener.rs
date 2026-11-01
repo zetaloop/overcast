@@ -30,12 +30,14 @@ enum Mode {
     Vless,
     Vmess,
     Trojan,
+    Shadowsocks,
+    ShadowsocksUdp,
 }
 
 impl Mode {
     fn wire(self) -> Network {
         match self {
-            Self::Http3 | Self::SocksUdp => Network::Udp,
+            Self::Http3 | Self::SocksUdp | Self::ShadowsocksUdp => Network::Udp,
             _ => Network::Tcp,
         }
     }
@@ -47,14 +49,15 @@ impl Mode {
             Self::Vless => "VLESS",
             Self::Vmess => "VMess",
             Self::Trojan => "Trojan",
+            Self::Shadowsocks | Self::ShadowsocksUdp => "Shadowsocks",
         }
     }
 
     fn carries(self, core: Core, network: Network) -> bool {
         match self {
-            Self::SocksUdp => network == Network::Udp,
+            Self::SocksUdp | Self::ShadowsocksUdp => network == Network::Udp,
             Self::Socks => network == Network::Tcp || core != Core::Mihomo,
-            Self::Vless | Self::Vmess | Self::Trojan => true,
+            Self::Vless | Self::Vmess | Self::Trojan | Self::Shadowsocks => true,
             _ => network == Network::Tcp || core == Core::SingBox,
         }
     }
@@ -172,6 +175,25 @@ pub fn build(
         {
             encryption.private_keys = keys.private_keys.clone();
         }
+        if let Protocol::Shadowsocks(value) = &mut source.protocol {
+            if value.password.is_none()
+                && source.core != Core::Mihomo
+                && matches!(
+                    value.cipher,
+                    crate::shadowsocks::Cipher::Aes128Gcm2022
+                        | crate::shadowsocks::Cipher::Aes256Gcm2022
+                )
+                && let Some(material) = keys
+                    .get(&source.uuid)
+                    .and_then(|keys| keys.shadowsocks.as_ref())
+                && value.cipher.key_size() == material.cipher.key_size()
+            {
+                value.password = Some(material.password.clone());
+            }
+            if let Some(password) = &value.password {
+                value.password = Some(value.cipher.password(password)?);
+            }
+        }
         step.detail(&source.name);
         if source.listen.address == "localhost" {
             source.listen.address = "127.0.0.1".to_owned();
@@ -246,6 +268,26 @@ pub fn build(
             Protocol::Trojan(_) => {
                 modes.insert(Mode::Trojan);
             }
+            Protocol::Shadowsocks(value) => {
+                if value.tcp {
+                    modes.insert(Mode::Shadowsocks);
+                }
+                if value.udp
+                    && entry
+                        .accounts
+                        .iter()
+                        .any(|account| account.network == Network::Udp)
+                {
+                    if unix || transport_udp && value.tcp {
+                        return Err(format!(
+                            "入站 {} 的 Shadowsocks 数据报需要独立 UDP 套接字",
+                            source.name
+                        )
+                        .into());
+                    }
+                    modes.insert(Mode::ShadowsocksUdp);
+                }
+            }
         }
         let parts =
             if source.core == Core::SingBox && modes.contains(&Mode::Http3) && modes.len() > 1 {
@@ -263,6 +305,10 @@ pub fn build(
         let users = Rc::new(credentials(entry));
         for modes in parts {
             let mut source = source.clone();
+            if let Protocol::Shadowsocks(protocol) = &mut source.protocol {
+                protocol.tcp = modes.contains(&Mode::Shadowsocks);
+                protocol.udp = modes.contains(&Mode::ShadowsocksUdp);
+            }
             if let Protocol::Mixed(protocol) = &mut source.protocol {
                 if modes == BTreeSet::from([Mode::Http3]) {
                     protocol.socks.enabled = false;
@@ -532,6 +578,22 @@ pub fn build(
                 (Protocol::Trojan(current), Protocol::Trojan(other)) => {
                     same(current, other, &[], "Trojan", &members)?
                 }
+                (Protocol::Shadowsocks(current), Protocol::Shadowsocks(other)) => {
+                    same(
+                        current,
+                        other,
+                        &["tcp", "udp", "password"],
+                        "Shadowsocks",
+                        &members,
+                    )?;
+                    if current.password.is_none() {
+                        current.password = other.password.clone();
+                    } else if other.password.is_some() && current.password != other.password {
+                        return Err(conflict(&members, "Shadowsocks 入口共享密钥不同").into());
+                    }
+                    current.tcp |= other.tcp;
+                    current.udp |= other.udp;
+                }
                 _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
             }
         }
@@ -544,10 +606,15 @@ pub fn build(
             if source.core == Core::Mihomo {
                 protocol.udp = modes.contains(&Mode::SocksUdp);
             }
-        } else if users.is_empty() {
+        } else if users.is_empty()
+            && !matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
+        {
             return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
         }
-        let password_identity = matches!(source.protocol, Protocol::Trojan(_));
+        let password_identity = matches!(
+            source.protocol,
+            Protocol::Trojan(_) | Protocol::Shadowsocks(_)
+        );
         let credentials: BTreeSet<_> = members
             .iter()
             .flat_map(|member| {
@@ -711,7 +778,7 @@ pub fn build(
 }
 
 fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, String> {
-    if entry.inbound.users {
+    let mut values: BTreeMap<Uuid, String> = if entry.inbound.users {
         entry
             .users
             .iter()
@@ -724,7 +791,16 @@ fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, String> {
             .iter()
             .map(|value| (value.uuid, value.password.clone()))
             .collect()
+    };
+    if let Protocol::Shadowsocks(source) = &entry.inbound.protocol {
+        if source.cipher == crate::shadowsocks::Cipher::None {
+            return BTreeMap::new();
+        }
+        for password in values.values_mut() {
+            *password = source.cipher.credential(password);
+        }
     }
+    values
 }
 
 fn versions(modes: &BTreeSet<Mode>) -> Vec<HttpVersion> {

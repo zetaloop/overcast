@@ -14,12 +14,15 @@ pub struct Keys {
     pub reality: Option<crate::reality::Keys>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encryption: Option<crate::encryption::Keys>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowsocks: Option<crate::shadowsocks::Keys>,
 }
 
 impl Keys {
     pub fn needed(source: &Inbound) -> bool {
         source.tls.enabled && source.tls.reality.enabled
             || matches!(&source.protocol, Protocol::Vless(value) if value.encryption.is_some())
+            || crate::native::shadowsocks::shared(source, usize::from(source.credentials.is_some()))
     }
 
     pub fn resolve(source: &Inbound, previous: Option<&Self>) -> Result<Self> {
@@ -38,10 +41,19 @@ impl Keys {
                 keys.encryption.as_ref(),
             )?);
         }
+        if let Protocol::Shadowsocks(value) = &source.protocol
+            && crate::native::shadowsocks::shared(source, usize::from(source.credentials.is_some()))
+        {
+            keys.shadowsocks = Some(crate::shadowsocks::Keys::resolve(
+                value,
+                keys.shadowsocks.as_ref(),
+            )?);
+        }
         Ok(keys)
     }
 
-    pub fn apply(&self, source: &mut Inbound) {
+    pub fn apply(&self, source: &mut Inbound, users: usize) {
+        let shared = crate::native::shadowsocks::shared(source, users);
         if source.tls.enabled
             && source.tls.reality.enabled
             && let Some(keys) = &self.reality
@@ -54,10 +66,22 @@ impl Keys {
         {
             encryption.private_keys = keys.private_keys.clone();
         }
+        if shared
+            && let Protocol::Shadowsocks(value) = &mut source.protocol
+            && let Some(keys) = &self.shadowsocks
+        {
+            value.password = Some(keys.password.clone());
+        }
     }
 
     pub fn show(&self, source: &Inbound, screen: &mut Screen) -> Result<()> {
         let mut values = Vec::new();
+        if matches!(&source.protocol, Protocol::Shadowsocks(value) if matches!(value.cipher, crate::shadowsocks::Cipher::Aes128Gcm2022 | crate::shadowsocks::Cipher::Aes256Gcm2022))
+            && source.core != crate::inbound::Core::Mihomo
+            && let Some(keys) = &self.shadowsocks
+        {
+            values.push(("password", "入口共享密钥", keys.password.clone()));
+        }
         if source.tls.enabled
             && source.tls.reality.enabled
             && let Some(keys) = &self.reality

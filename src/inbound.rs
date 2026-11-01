@@ -48,6 +48,7 @@ impl Inbound {
             ports: match kind {
                 Kind::Mixed => "1080",
                 Kind::Vless | Kind::Vmess | Kind::Trojan => "443",
+                Kind::Shadowsocks => "8388",
             }
             .to_owned(),
             core: kind.core(),
@@ -56,7 +57,7 @@ impl Inbound {
             protocol: kind.protocol(),
             transport: Transport::default(),
             tls: Tls {
-                enabled: kind != Kind::Mixed,
+                enabled: !matches!(kind, Kind::Mixed | Kind::Shadowsocks),
                 ..Tls::default()
             },
             listen: Listen::default(),
@@ -143,12 +144,13 @@ enum Kind {
     Vless,
     Vmess,
     Trojan,
+    Shadowsocks,
 }
 
 impl Kind {
     fn core(self) -> Core {
         match self {
-            Self::Mixed | Self::Vmess | Self::Trojan => Core::SingBox,
+            Self::Mixed | Self::Vmess | Self::Trojan | Self::Shadowsocks => Core::SingBox,
             Self::Vless => Core::Xray,
         }
     }
@@ -159,6 +161,7 @@ impl Kind {
             Self::Vless => Protocol::Vless(crate::vless::Server::default()),
             Self::Vmess => Protocol::Vmess(crate::vmess::Server::default()),
             Self::Trojan => Protocol::Trojan(crate::trojan::Server::default()),
+            Self::Shadowsocks => Protocol::Shadowsocks(crate::shadowsocks::Server::default()),
         }
     }
 }
@@ -170,6 +173,7 @@ pub enum Protocol {
     Vless(crate::vless::Server),
     Vmess(crate::vmess::Server),
     Trojan(crate::trojan::Server),
+    Shadowsocks(crate::shadowsocks::Server),
 }
 
 impl Protocol {
@@ -179,6 +183,7 @@ impl Protocol {
             Self::Vless(_) => Kind::Vless,
             Self::Vmess(_) => Kind::Vmess,
             Self::Trojan(_) => Kind::Trojan,
+            Self::Shadowsocks(_) => Kind::Shadowsocks,
         }
     }
 
@@ -211,6 +216,13 @@ impl Protocol {
                 &title,
                 value,
                 Rc::new(move |value, screen| apply(&Self::Trojan(value.clone()), screen)),
+                false,
+            ),
+            Self::Shadowsocks(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Shadowsocks(value.clone()), screen)),
                 false,
             ),
         }
@@ -744,6 +756,7 @@ choices!(Kind {
     Vless: "vless" => "VLESS",
     Vmess: "vmess" => "VMess",
     Trojan: "trojan" => "Trojan",
+    Shadowsocks: "shadowsocks" => "Shadowsocks",
 });
 
 choices!(HttpVersion {

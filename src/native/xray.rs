@@ -21,6 +21,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Vless(value) => ("vless", None, &value.network),
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
+        Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
     };
     let mut output = Map::from_iter([("protocol".to_owned(), json!(kind))]);
     if let Some(multiplex) = source.multiplex() {
@@ -211,6 +212,30 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             options.take("tcp");
             options.take("udp");
             options.finish("Xray Trojan")?;
+            Some(&value.tls)
+        }
+        Connection::Shadowsocks(value) => {
+            let mut options = Options::new(&value.shadowsocks)?;
+            settings.insert("address".to_owned(), json!(value.server));
+            settings.insert("port".to_owned(), json!(value.port));
+            settings.insert(
+                "method".to_owned(),
+                super::shadowsocks::cipher(value.shadowsocks.cipher, inbound::Core::Xray, false)?,
+            );
+            settings.insert(
+                "password".to_owned(),
+                json!(value.shadowsocks.cipher.password(&value.password)?),
+            );
+            options.take("cipher");
+            options.take("tcp");
+            options.take("udp");
+            if value.shadowsocks.cipher.key_size().is_none() {
+                options.rename(
+                    &mut settings,
+                    &[("user_level", "level"), ("user_label", "email")],
+                );
+            }
+            options.finish("Xray Shadowsocks")?;
             Some(&value.tls)
         }
     };
@@ -465,6 +490,72 @@ pub fn listeners(
                 settings.insert("fallbacks".to_owned(), fallbacks(&value.fallbacks)?);
             }
             options.finish("Xray Trojan 入站")?;
+        }
+        Protocol::Shadowsocks(value) => {
+            let method = super::shadowsocks::cipher(value.cipher, inbound::Core::Xray, true)?;
+            let multi = super::shadowsocks::multi(source, users.len());
+            if users.is_empty() || !multi && users.len() > 1 {
+                return unsupported("当前 Shadowsocks 算法的入站需要单个认证密钥");
+            }
+            output.insert("protocol".to_owned(), json!("shadowsocks"));
+            let mut options = Options::new(value)?;
+            for name in ["cipher", "tcp", "udp", "multiplex", "user_level"] {
+                options.take(name);
+            }
+            settings.insert("method".to_owned(), method.clone());
+            let mut networks = Vec::new();
+            if value.tcp {
+                networks.push("tcp");
+            }
+            if value.udp {
+                networks.push("udp");
+            }
+            settings.insert("network".to_owned(), json!(networks.join(",")));
+            if let Some(multiplex) = &value.multiplex {
+                super::multiplex::server(multiplex, inbound::Core::Xray)?;
+            }
+            if multi {
+                if value.cipher.key_size().is_some() {
+                    options.take("password");
+                    settings.insert(
+                        "password".to_owned(),
+                        json!(
+                            value
+                                .password
+                                .as_ref()
+                                .ok_or("缺少 Shadowsocks 入口共享密钥")?
+                        ),
+                    );
+                }
+                settings.insert(
+                    "clients".to_owned(),
+                    json!(
+                        users
+                            .iter()
+                            .map(|(name, password)| {
+                                let mut user = Map::from_iter([
+                                    ("email".to_owned(), json!(name)),
+                                    ("password".to_owned(), json!(password)),
+                                ]);
+                                if value.cipher.key_size().is_none() {
+                                    user.insert("method".to_owned(), method.clone());
+                                }
+                                if let Some(level) = value.user_level {
+                                    user.insert("level".to_owned(), json!(level));
+                                }
+                                user
+                            })
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            } else {
+                settings.insert("email".to_owned(), json!(users[0].0));
+                settings.insert("password".to_owned(), json!(users[0].1));
+                if let Some(level) = value.user_level {
+                    settings.insert("level".to_owned(), json!(level));
+                }
+            }
+            options.finish("Xray Shadowsocks 入站")?;
         }
     }
     let mut options = Options::new(&source.listen)?;

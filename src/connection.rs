@@ -31,10 +31,19 @@ pub enum Connection {
     Vless(crate::vless::Client),
     Vmess(crate::vmess::Client),
     Trojan(crate::trojan::Client),
+    Shadowsocks(crate::shadowsocks::Client),
 }
 
 impl Connection {
     pub fn parse(text: &str) -> Result<Self> {
+        if text
+            .split_once("://")
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("ss"))
+        {
+            let value = Self::Shadowsocks(crate::link::shadowsocks(text)?);
+            value.validate()?;
+            return Ok(value);
+        }
         if text
             .split_once("://")
             .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("vmess"))
@@ -146,6 +155,7 @@ impl Connection {
             Self::Vless(value) => &value.name,
             Self::Vmess(value) => &value.name,
             Self::Trojan(value) => &value.name,
+            Self::Shadowsocks(value) => &value.name,
         }
     }
 
@@ -157,6 +167,7 @@ impl Connection {
             Self::Vless(value) => Some(&value.transport),
             Self::Vmess(value) => Some(&value.transport),
             Self::Trojan(value) => Some(&value.transport),
+            Self::Shadowsocks(value) => Some(&value.transport),
         }
     }
 
@@ -168,6 +179,7 @@ impl Connection {
             Self::Vless(value) => value.multiplex.as_ref(),
             Self::Vmess(value) => value.multiplex.as_ref(),
             Self::Trojan(value) => value.multiplex.as_ref(),
+            Self::Shadowsocks(value) => value.multiplex.as_ref(),
         }
     }
 
@@ -190,6 +202,9 @@ impl Connection {
             Self::Vless(value) => format!("VLESS {}", address(&value.server, value.port)),
             Self::Vmess(value) => format!("VMess {}", address(&value.server, value.port)),
             Self::Trojan(value) => format!("Trojan {}", address(&value.server, value.port)),
+            Self::Shadowsocks(value) => {
+                format!("Shadowsocks {}", address(&value.server, value.port))
+            }
         }
     }
 
@@ -247,6 +262,13 @@ impl Connection {
                 Rc::new(move |value, screen| apply(&Self::Trojan(value.clone()), screen)),
                 creating,
             ),
+            Self::Shadowsocks(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Shadowsocks(value.clone()), screen)),
+                creating,
+            ),
         }
     }
 
@@ -273,6 +295,15 @@ impl Connection {
                 }
                 (value.server.as_str(), value.port)
             }
+            Self::Shadowsocks(value) => {
+                if value.shadowsocks.cipher != crate::shadowsocks::Cipher::None
+                    && value.password.is_empty()
+                {
+                    return Err("请填写 Shadowsocks 密码".into());
+                }
+                value.shadowsocks.cipher.password(&value.password)?;
+                (value.server.as_str(), value.port)
+            }
         };
         if server.trim().is_empty() {
             return Err("连接地址不能为空".into());
@@ -294,6 +325,7 @@ pub fn create(
         Item::new("vless", "VLESS".stylized()),
         Item::new("vmess", "VMess".stylized()),
         Item::new("trojan", "Trojan".stylized()),
+        Item::new("shadowsocks", "Shadowsocks".stylized()),
         Item::new("direct", "直连".stylized()),
         Item::new("back", "返回".stylized()),
     ];
@@ -314,7 +346,8 @@ pub fn create(
                     2 => Connection::Vless(crate::vless::Client::default()),
                     3 => Connection::Vmess(crate::vmess::Client::default()),
                     4 => Connection::Trojan(crate::trojan::Client::default()),
-                    5 => Connection::Direct(Direct::default()),
+                    5 => Connection::Shadowsocks(crate::shadowsocks::Client::default()),
+                    6 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
                 let accepted = connection.form(screen, apply, true)?;

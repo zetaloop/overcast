@@ -6,6 +6,7 @@ mod multiplex;
 mod options;
 mod reality;
 mod routing;
+pub(crate) mod shadowsocks;
 mod singbox;
 mod transport;
 mod xray;
@@ -160,12 +161,13 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
     let mut keys = config.keys.clone();
     reality::prepare(&listeners, &graph, &mut keys, progress)?;
     encryption::prepare(&listeners, &graph, &mut keys, progress)?;
+    shadowsocks::prepare(&listeners, &graph, &mut keys, progress)?;
     let step = progress.activity("生成核心配置");
     for (index, listener) in listeners.iter().enumerate() {
         progress.check()?;
         let mut source = listener.source.clone();
         if let Some(keys) = keys.get(&source.uuid) {
-            keys.apply(&mut source);
+            keys.apply(&mut source, listener.users.len());
         }
         let inbound = &source;
         step.detail(&inbound.name);
@@ -283,19 +285,29 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 .iter()
                 .filter(|account| member.carries(account.network))
             {
-                let user = account.identity(entry.inbound).map(|user| {
-                    if matches!(inbound.protocol, Protocol::Trojan(_)) {
-                        listener
-                            .users
-                            .iter()
-                            .find(|(_, password)| *password == &member.users[&user])
-                            .unwrap()
-                            .0
-                            .to_string()
-                    } else {
-                        user.to_string()
-                    }
-                });
+                let user = account
+                    .identity(entry.inbound)
+                    .filter(|_| {
+                        !matches!(inbound.protocol, Protocol::Shadowsocks(_))
+                            || inbound.core == Core::Xray
+                            || shadowsocks::multi(inbound, users.len())
+                    })
+                    .map(|user| {
+                        if matches!(
+                            inbound.protocol,
+                            Protocol::Trojan(_) | Protocol::Shadowsocks(_)
+                        ) {
+                            listener
+                                .users
+                                .iter()
+                                .find(|(_, password)| *password == &member.users[&user])
+                                .unwrap()
+                                .0
+                                .to_string()
+                        } else {
+                            user.to_string()
+                        }
+                    });
                 for rule in &account.rules {
                     let outbound = match rule.destination {
                         Destination::Block => "block".to_owned(),
@@ -511,6 +523,7 @@ impl Builder<'_> {
                 Connection::Vless(value) => value.core,
                 Connection::Vmess(value) => value.core,
                 Connection::Trojan(value) => value.core,
+                Connection::Shadowsocks(value) => value.core,
             };
             let mut candidates = vec![preferred];
             candidates.extend(
@@ -571,7 +584,7 @@ impl Builder<'_> {
             let mut next: Vec<Chain> = Vec::new();
             for chain in &chains {
                 for node in &nodes {
-                    let networks = networks(connection, node.core, chain.networks);
+                    let networks = networks(connection, node.core, chain.networks)?;
                     if networks == [false, false]
                         || next.iter().any(|chain| chain.networks == networks)
                     {
@@ -831,9 +844,9 @@ fn key(core: Core) -> &'static str {
     }
 }
 
-fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
+fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool; 2]> {
     let multiplex = source.multiplex().is_some_and(|mux| !mux.tcp_only);
-    match source {
+    Ok(match source {
         Connection::Direct(_) => parent,
         Connection::Http(value) => {
             let transport =
@@ -885,7 +898,33 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> [bool; 2] {
                 transport && value.trojan.udp.unwrap_or(true),
             ]
         }
-    }
+        Connection::Shadowsocks(value) => {
+            let transport = if let Some(plugin) = &value.shadowsocks.plugin {
+                let udp = plugin.name == "kcptun"
+                    || plugin.name == "v2ray-plugin"
+                        && shadowsocks::arguments(&plugin.options)?
+                            .get("mode")
+                            .is_some_and(|mode| mode == "quic");
+                parent[usize::from(udp)]
+            } else {
+                value.transport.supported(&value.tls, parent)
+            };
+            let uot = value.shadowsocks.udp_over_tcp.is_some()
+                || value
+                    .shadowsocks
+                    .plugin
+                    .as_ref()
+                    .is_some_and(|plugin| plugin.name == "kcptun");
+            [
+                transport && value.shadowsocks.tcp.unwrap_or(true),
+                (if uot || multiplex {
+                    transport
+                } else {
+                    parent[1]
+                }) && value.shadowsocks.udp.unwrap_or(true),
+            ]
+        }
+    })
 }
 
 #[derive(Debug)]

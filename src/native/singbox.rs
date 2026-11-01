@@ -17,14 +17,20 @@ pub fn outbound(
     if source.multiplex().is_some()
         && !matches!(
             source,
-            Connection::Vless(_) | Connection::Vmess(_) | Connection::Trojan(_)
+            Connection::Vless(_)
+                | Connection::Vmess(_)
+                | Connection::Trojan(_)
+                | Connection::Shadowsocks(_)
         )
     {
         return unsupported("sing-box HTTP/SOCKS 出站没有流复用配置");
     }
     if !matches!(
         source,
-        Connection::Vless(_) | Connection::Vmess(_) | Connection::Trojan(_)
+        Connection::Vless(_)
+            | Connection::Vmess(_)
+            | Connection::Trojan(_)
+            | Connection::Shadowsocks(_)
     ) && source
         .transport()
         .is_some_and(|transport| !transport.is_default())
@@ -38,6 +44,7 @@ pub fn outbound(
         Connection::Vless(value) => ("vless", None, &value.network),
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
+        Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     dialer(network, &mut output)?;
@@ -275,6 +282,65 @@ pub fn outbound(
                 output.insert("transport".to_owned(), transport);
             }
         }
+        Connection::Shadowsocks(value) => {
+            if value.tls.enabled || !value.transport.is_default() {
+                return unsupported("sing-box Shadowsocks 通过 SIP003 插件配置传输封装");
+            }
+            let mut options = Options::new(&value.shadowsocks)?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("server_port".to_owned(), json!(value.port));
+            output.insert(
+                "method".to_owned(),
+                super::shadowsocks::cipher(
+                    value.shadowsocks.cipher,
+                    inbound::Core::SingBox,
+                    false,
+                )?,
+            );
+            output.insert(
+                "password".to_owned(),
+                json!(value.shadowsocks.cipher.password(&value.password)?),
+            );
+            for name in ["cipher", "tcp", "udp", "plugin", "udp_over_tcp"] {
+                options.take(name);
+            }
+            let mut networks = Vec::new();
+            if value.shadowsocks.tcp.unwrap_or(true) {
+                networks.push("tcp");
+            }
+            if value.shadowsocks.udp.unwrap_or(true) {
+                networks.push("udp");
+            }
+            output.insert("network".to_owned(), json!(networks));
+            if let Some(version) = value.shadowsocks.udp_over_tcp {
+                if version > 2 {
+                    return unsupported("UDP over TCP 使用版本 1 或 2");
+                }
+                if value.multiplex.is_some() {
+                    return unsupported("sing-box Shadowsocks 的 UoT 与 S-Mux 分别建立连接");
+                }
+                output.insert(
+                    "udp_over_tcp".to_owned(),
+                    json!({"enabled": true, "version": if version == 0 { 2 } else { version }}),
+                );
+            }
+            if let Some(multiplex) = &value.multiplex {
+                output.insert(
+                    "multiplex".to_owned(),
+                    super::multiplex::client(multiplex, inbound::Core::SingBox)?,
+                );
+            }
+            if let Some(plugin) = &value.shadowsocks.plugin {
+                output.extend(super::shadowsocks::plugin(
+                    plugin,
+                    inbound::Core::SingBox,
+                    &value.server,
+                    store,
+                    globals,
+                )?);
+            }
+            options.finish("sing-box Shadowsocks")?;
+        }
     }
     Ok(output)
 }
@@ -317,6 +383,7 @@ pub fn listeners(
                             json!(user)
                         }
                         Protocol::Trojan(_) => json!({"name": name, "password": password}),
+                        Protocol::Shadowsocks(_) => json!({"name": name, "password": password}),
                     })
                     .collect::<Vec<_>>()
             ),
@@ -439,6 +506,61 @@ pub fn listeners(
             output.insert("transport".to_owned(), transport);
         }
         fallbacks(source, &value.fallbacks, &mut output)?;
+        return Ok(vec![output]);
+    }
+    if let Protocol::Shadowsocks(value) = &source.protocol {
+        if source.tls.enabled || !source.transport.is_default() {
+            return unsupported("sing-box Shadowsocks 入站使用原生 TCP/UDP 监听");
+        }
+        let multi = super::shadowsocks::multi(source, users.len());
+        if value.cipher != crate::shadowsocks::Cipher::None
+            && (users.is_empty() || !multi && users.len() > 1)
+        {
+            return unsupported("当前 Shadowsocks 算法的入站需要单个认证密钥");
+        }
+        let mut options = Options::new(value)?;
+        for name in ["cipher", "tcp", "udp", "multiplex"] {
+            options.take(name);
+        }
+        output.insert("type".to_owned(), json!("shadowsocks"));
+        output.insert(
+            "method".to_owned(),
+            super::shadowsocks::cipher(value.cipher, inbound::Core::SingBox, true)?,
+        );
+        let mut networks = Vec::new();
+        if value.tcp {
+            networks.push("tcp");
+        }
+        if value.udp {
+            networks.push("udp");
+        }
+        output.insert("network".to_owned(), json!(networks));
+        if multi {
+            if value.cipher.key_size().is_some() {
+                options.take("password");
+                output.insert(
+                    "password".to_owned(),
+                    json!(
+                        value
+                            .password
+                            .as_ref()
+                            .ok_or("缺少 Shadowsocks 入口共享密钥")?
+                    ),
+                );
+            }
+        } else {
+            output.remove("users");
+            if let Some((_, password)) = users.first() {
+                output.insert("password".to_owned(), json!(password));
+            }
+        }
+        if let Some(multiplex) = &value.multiplex {
+            output.insert(
+                "multiplex".to_owned(),
+                super::multiplex::server(multiplex, inbound::Core::SingBox)?,
+            );
+        }
+        options.finish("sing-box Shadowsocks 入站")?;
         return Ok(vec![output]);
     }
     let Protocol::Mixed(value) = &source.protocol else {

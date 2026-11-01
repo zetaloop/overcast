@@ -20,7 +20,10 @@ pub fn outbound(
 ) -> Result<Map<String, Value>> {
     if !matches!(
         source,
-        Connection::Vless(_) | Connection::Vmess(_) | Connection::Trojan(_)
+        Connection::Vless(_)
+            | Connection::Vmess(_)
+            | Connection::Trojan(_)
+            | Connection::Shadowsocks(_)
     ) && source
         .transport()
         .is_some_and(|transport| !transport.is_default())
@@ -34,6 +37,7 @@ pub fn outbound(
         Connection::Vless(value) => ("vless", None, &value.network),
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
+        Connection::Shadowsocks(value) => ("ss", None, &value.network),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     let mut options = Options::new(network)?;
@@ -81,6 +85,53 @@ pub fn outbound(
         }
     }
     let tls = match source {
+        Connection::Shadowsocks(value) => {
+            if value.tls.enabled || !value.transport.is_default() {
+                return unsupported("Mihomo Shadowsocks 通过插件配置传输封装");
+            }
+            let mut options = Options::new(&value.shadowsocks)?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("port".to_owned(), json!(value.port));
+            output.insert(
+                "cipher".to_owned(),
+                super::shadowsocks::cipher(value.shadowsocks.cipher, inbound::Core::Mihomo, false)?,
+            );
+            output.insert(
+                "password".to_owned(),
+                json!(value.shadowsocks.cipher.password(&value.password)?),
+            );
+            output.insert(
+                "udp".to_owned(),
+                json!(value.shadowsocks.udp.unwrap_or(true)),
+            );
+            for name in ["cipher", "tcp", "udp", "plugin", "udp_over_tcp"] {
+                options.take(name);
+            }
+            if let Some(version) = value.shadowsocks.udp_over_tcp {
+                if version > 2 {
+                    return unsupported("UDP over TCP 使用版本 1 或 2");
+                }
+                output.insert("udp-over-tcp".to_owned(), json!(true));
+                output.insert(
+                    "udp-over-tcp-version".to_owned(),
+                    json!(if version == 0 { 2 } else { version }),
+                );
+            }
+            if let Some(plugin) = &value.shadowsocks.plugin {
+                output.extend(super::shadowsocks::plugin(
+                    plugin,
+                    inbound::Core::Mihomo,
+                    &value.server,
+                    store,
+                    globals,
+                )?);
+                if plugin.name == "kcptun" && value.shadowsocks.udp_over_tcp.is_none() {
+                    output.insert("udp-over-tcp-version".to_owned(), json!(2));
+                }
+            }
+            options.finish("Mihomo Shadowsocks")?;
+            None
+        }
         Connection::Trojan(value) => {
             if !value.tls.enabled {
                 return unsupported("Mihomo Trojan 出站使用 TLS");
@@ -342,6 +393,7 @@ pub fn listeners(
                             json!(user)
                         }
                         Protocol::Trojan(_) => json!({"username": name, "password": password}),
+                        Protocol::Shadowsocks(_) => json!({"username": name, "password": password}),
                     })
                     .collect::<Vec<_>>()
             ),
@@ -442,6 +494,39 @@ pub fn listeners(
             output.insert("allow-insecure".to_owned(), json!(true));
         }
         output.extend(super::transport::mihomo_server(&source.transport)?);
+        return Ok(vec![output]);
+    }
+    if let Protocol::Shadowsocks(value) = &source.protocol {
+        if source.tls.enabled || !source.transport.is_default() {
+            return unsupported("Mihomo Shadowsocks 入站使用原生 TCP/UDP 或协议插件");
+        }
+        if !value.tcp {
+            return unsupported("Mihomo Shadowsocks 入站启用 TCP 监听");
+        }
+        if value.cipher != crate::shadowsocks::Cipher::None && users.len() != 1 {
+            return unsupported("Mihomo Shadowsocks 入站使用单个认证密钥");
+        }
+        let mut options = Options::new(value)?;
+        for name in ["cipher", "tcp", "udp", "multiplex"] {
+            options.take(name);
+        }
+        output.insert("type".to_owned(), json!("shadowsocks"));
+        output.insert(
+            "cipher".to_owned(),
+            super::shadowsocks::cipher(value.cipher, inbound::Core::Mihomo, true)?,
+        );
+        output.insert("udp".to_owned(), json!(value.udp));
+        output.remove("users");
+        if let Some((_, password)) = users.first() {
+            output.insert("password".to_owned(), json!(password));
+        }
+        if let Some(multiplex) = &value.multiplex {
+            output.insert(
+                "mux-option".to_owned(),
+                super::multiplex::server(multiplex, inbound::Core::Mihomo)?,
+            );
+        }
+        options.finish("Mihomo Shadowsocks 入站")?;
         return Ok(vec![output]);
     }
     let Protocol::Mixed(value) = &source.protocol else {
