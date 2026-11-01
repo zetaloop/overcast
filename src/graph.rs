@@ -194,13 +194,23 @@ pub fn build<'a>(
             {
                 continue;
             }
-            if inbound.users && network.identity(inbound) {
+            if inbound.users {
                 for user in &config.users {
                     let routes = graph.routes(inbound, Some(user.uuid), network, &mut reachable)?;
-                    if routes
+                    if let Some(route) = routes
                         .iter()
-                        .any(|route| route.destination != Destination::Block)
+                        .find(|route| route.destination != Destination::Block)
                     {
+                        if !network.identity(inbound) {
+                            return Err(format!(
+                                "入站 {} 的 {} 接收器未验证凭据，无法按规则 {} 提供用户 {} 的接入",
+                                inbound.name,
+                                network.name().to_uppercase(),
+                                location(&route.path),
+                                user.name,
+                            )
+                            .into());
+                        }
                         users.insert(user.uuid);
                         accounts.push(Account {
                             user: Some(user),
@@ -211,6 +221,19 @@ pub fn build<'a>(
                 }
             } else {
                 let anonymous = graph.routes(inbound, None, network, &mut reachable)?;
+                if inbound.credentials.is_some()
+                    && !network.identity(inbound)
+                    && anonymous
+                        .iter()
+                        .any(|route| route.destination != Destination::Block)
+                {
+                    return Err(format!(
+                        "入站 {} 的 {} 接收器不验证入口凭据",
+                        inbound.name,
+                        network.name().to_uppercase()
+                    )
+                    .into());
+                }
                 for user in &config.users {
                     let authenticated =
                         graph.routes(inbound, Some(user.uuid), network, &mut reachable)?;
@@ -245,9 +268,6 @@ pub fn build<'a>(
                     .iter()
                     .any(|route| route.destination != Destination::Block)
                 {
-                    if inbound.users {
-                        users.extend(config.users.iter().map(|user| user.uuid));
-                    }
                     accounts.push(Account {
                         user: None,
                         network,
