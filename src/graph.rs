@@ -32,6 +32,21 @@ pub struct Account<'a> {
     pub rules: Vec<Rule>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Payload {
+    Proxy,
+    Connection,
+}
+
+impl From<&Protocol> for Payload {
+    fn from(value: &Protocol) -> Self {
+        match value {
+            Protocol::Forward(_) => Self::Connection,
+            _ => Self::Proxy,
+        }
+    }
+}
+
 impl Account<'_> {
     pub fn identity(&self, inbound: &Inbound) -> Option<Uuid> {
         self.user.map(|user| user.uuid).or_else(|| {
@@ -49,6 +64,10 @@ impl Account<'_> {
 }
 
 impl Graph<'_> {
+    pub fn config(&self) -> &Config {
+        self.analysis.config
+    }
+
     pub fn equivalent(
         &mut self,
         left: usize,
@@ -70,9 +89,9 @@ impl Graph<'_> {
             let mut remaining = self.analysis.truth;
             let mut clauses: HashMap<Destination, Vec<Lit>> = HashMap::new();
             for rule in rules {
-                let condition =
-                    self.analysis
-                        .condition(&rule.condition, entry.inbound.uuid, identity);
+                let condition = self
+                    .analysis
+                    .condition(&rule.condition, entry.inbound, identity);
                 let selected = self.analysis.all(&[remaining, condition]);
                 remaining = self.analysis.all(&[remaining, !condition]);
                 if rule.destination != Destination::Block {
@@ -127,6 +146,7 @@ impl Network {
             && inbound.core == Core::Mihomo
             && matches!(inbound.protocol, Protocol::Mixed(_)))
             && !matches!(&inbound.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
+            && inbound.protocol.users()
     }
 }
 
@@ -134,17 +154,27 @@ pub fn build<'a>(
     store: &Store,
     config: &'a Config,
     progress: &'a Progress,
-    mut reachable: impl FnMut(Core, Destination, Network) -> Result<bool>,
+    mut reachable: impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
 ) -> Result<Option<Graph<'a>>> {
-    if config.rules.is_empty()
-        || config.inbounds.is_empty()
-        || config.users.is_empty() && config.inbounds.iter().all(|inbound| inbound.users)
+    if config.inbounds.is_empty()
+        || config.users.is_empty()
+            && config
+                .inbounds
+                .iter()
+                .all(|inbound| inbound.users && inbound.protocol.users())
     {
         return Ok(None);
     }
     let mut conditions = Vec::new();
     let mut seen = HashSet::new();
-    let mut pending: Vec<_> = config.rules.iter().collect();
+    let mut pending: Vec<_> = if config.inbounds.iter().any(|inbound| {
+        Payload::from(&inbound.protocol) == Payload::Proxy
+            && (!inbound.users || !config.users.is_empty())
+    }) {
+        config.rules.iter().collect()
+    } else {
+        Vec::new()
+    };
     while let Some(rule) = pending.pop() {
         collect(&rule.condition, &mut conditions, &mut seen);
         pending.extend(&rule.children);
@@ -156,7 +186,7 @@ pub fn build<'a>(
     for inbound in &config.inbounds {
         progress.check()?;
         step.detail(&inbound.name);
-        if inbound.users && config.users.is_empty() {
+        if inbound.users && config.users.is_empty() && inbound.protocol.users() {
             continue;
         }
         if inbound.tls.enabled && inbound.tls.reality.enabled {
@@ -167,7 +197,12 @@ pub fn build<'a>(
                         .outbounds
                         .iter()
                         .any(|outbound| outbound.uuid == uuid)
-                        || !reachable(inbound.core, Destination::Outbound(uuid), Network::Tcp)? =>
+                        || !reachable(
+                            inbound.core,
+                            Destination::Outbound(uuid),
+                            Network::Tcp,
+                            Payload::Proxy,
+                        )? =>
                 {
                     continue;
                 }
@@ -184,7 +219,11 @@ pub fn build<'a>(
         let mut users = HashSet::new();
         for network in [Network::Tcp, Network::Udp] {
             if network == Network::Tcp
-                && matches!(&inbound.protocol, Protocol::Shadowsocks(value) if !value.tcp)
+                && match &inbound.protocol {
+                    Protocol::Shadowsocks(value) => !value.tcp,
+                    Protocol::Forward(value) => !value.tcp,
+                    _ => false,
+                }
             {
                 continue;
             }
@@ -197,11 +236,12 @@ pub fn build<'a>(
                     }
                     Protocol::Vless(_) | Protocol::Vmess(_) | Protocol::Trojan(_) => true,
                     Protocol::Shadowsocks(value) => value.tcp || value.udp,
+                    Protocol::Forward(value) => value.udp,
                 }
             {
                 continue;
             }
-            if inbound.users {
+            if inbound.users && inbound.protocol.users() {
                 for user in &config.users {
                     let routes = graph.routes(inbound, Some(user.uuid), network, &mut reachable)?;
                     if let Some(route) = routes
@@ -210,7 +250,7 @@ pub fn build<'a>(
                     {
                         if !network.identity(inbound) {
                             return Err(format!(
-                                "入站 {} 的 {} 接收器未验证凭据，无法按规则 {} 提供用户 {} 的接入",
+                                "入站 {} 的 {} 接收器未验证凭据，规则 {} 要求提供用户 {} 的接入",
                                 inbound.name,
                                 network.name().to_uppercase(),
                                 location(&route.path),
@@ -222,13 +262,14 @@ pub fn build<'a>(
                         accounts.push(Account {
                             user: Some(user),
                             network,
-                            rules: materialize(routes, config, inbound.uuid, Some(user.uuid)),
+                            rules: materialize(routes, config, inbound, Some(user.uuid)),
                         });
                     }
                 }
             } else {
                 let anonymous = graph.routes(inbound, None, network, &mut reachable)?;
                 if inbound.credentials.is_some()
+                    && inbound.protocol.users()
                     && !network.identity(inbound)
                     && anonymous
                         .iter()
@@ -241,7 +282,11 @@ pub fn build<'a>(
                     )
                     .into());
                 }
-                for user in &config.users {
+                for user in config
+                    .users
+                    .iter()
+                    .filter(|_| inbound.protocol.destination().is_none())
+                {
                     let authenticated =
                         graph.routes(inbound, Some(user.uuid), network, &mut reachable)?;
                     let destinations: HashSet<_> = anonymous
@@ -278,7 +323,7 @@ pub fn build<'a>(
                     accounts.push(Account {
                         user: None,
                         network,
-                        rules: materialize(anonymous, config, inbound.uuid, None),
+                        rules: materialize(anonymous, config, inbound, None),
                     });
                 }
             }
@@ -418,7 +463,7 @@ impl<'a> Analysis<'a> {
         !self.all(&negated)
     }
 
-    fn condition(&mut self, condition: &Condition, inbound: Uuid, user: Option<Uuid>) -> Lit {
+    fn condition(&mut self, condition: &Condition, inbound: &Inbound, user: Option<Uuid>) -> Lit {
         match condition {
             Condition::Always => self.truth,
             Condition::Never => !self.truth,
@@ -430,7 +475,7 @@ impl<'a> Analysis<'a> {
                 }
             }
             Condition::Inbound(uuid) => {
-                if *uuid == inbound {
+                if *uuid == inbound.uuid {
                     self.truth
                 } else {
                     !self.truth
@@ -450,6 +495,7 @@ impl<'a> Analysis<'a> {
                     .collect();
                 self.any(&values)
             }
+            _ if Payload::from(&inbound.protocol) != Payload::Proxy => !self.truth,
             _ => self.variables[condition],
         }
     }
@@ -458,7 +504,7 @@ impl<'a> Analysis<'a> {
         &mut self,
         rules: &[Rule],
         parent: Lit,
-        inbound: Uuid,
+        inbound: &Inbound,
         user: Option<Uuid>,
         path: &mut Vec<usize>,
         routes: &mut Vec<Route>,
@@ -482,13 +528,31 @@ impl<'a> Analysis<'a> {
         inbound: &Inbound,
         user: Option<Uuid>,
         network: Network,
-        reachable_destination: &mut impl FnMut(Core, Destination, Network) -> Result<bool>,
+        reachable_destination: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
     ) -> Result<Vec<Route>> {
+        if let Some(destination) = inbound.protocol.destination() {
+            return Ok(
+                if reachable_destination(
+                    inbound.core,
+                    destination,
+                    network,
+                    Payload::from(&inbound.protocol),
+                )? {
+                    vec![Route {
+                        condition: self.truth,
+                        destination,
+                        path: Vec::new(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+            );
+        }
         let mut routes = Vec::new();
         self.flatten(
             &self.config.rules,
             self.truth,
-            inbound.uuid,
+            inbound,
             user,
             &mut Vec::new(),
             &mut routes,
@@ -512,7 +576,12 @@ impl<'a> Analysis<'a> {
                     )
                     .into());
                 }
-                if !reachable_destination(inbound.core, route.destination, network)? {
+                if !reachable_destination(
+                    inbound.core,
+                    route.destination,
+                    network,
+                    Payload::from(&inbound.protocol),
+                )? {
                     route.destination = Destination::Block;
                 }
                 route.condition = condition;
@@ -548,7 +617,7 @@ impl<'a> Analysis<'a> {
 fn materialize(
     routes: Vec<Route>,
     config: &Config,
-    inbound: Uuid,
+    inbound: &Inbound,
     user: Option<Uuid>,
 ) -> Vec<Rule> {
     routes

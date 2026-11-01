@@ -41,8 +41,8 @@ impl Keys {
                 keys.encryption.as_ref(),
             )?);
         }
-        if let Protocol::Shadowsocks(value) = &source.protocol
-            && crate::native::shadowsocks::shared(source, usize::from(source.credentials.is_some()))
+        if crate::native::shadowsocks::shared(source, usize::from(source.credentials.is_some()))
+            && let Protocol::Shadowsocks(value) = &source.protocol
         {
             keys.shadowsocks = Some(crate::shadowsocks::Keys::resolve(
                 value,

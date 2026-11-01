@@ -296,6 +296,7 @@ pub fn listeners(
     source: &Inbound,
     users: &[(String, String)],
     store: &Store,
+    target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
     if source.transport.udp(
         source.tls.enabled && !source.tls.reality.enabled,
@@ -556,6 +557,23 @@ pub fn listeners(
                 }
             }
             options.finish("Xray Shadowsocks 入站")?;
+        }
+        Protocol::Forward(value) => {
+            let (server, port) = target.ok_or("转发入口缺少后继连接")?;
+            output.insert("protocol".to_owned(), json!("tunnel"));
+            settings.insert("address".to_owned(), json!(server));
+            settings.insert("port".to_owned(), json!(port));
+            let mut networks = Vec::new();
+            if value.tcp {
+                networks.push("tcp");
+            }
+            if value.udp {
+                networks.push("udp");
+            }
+            settings.insert("network".to_owned(), json!(networks.join(",")));
+            if let Some(level) = value.user_level {
+                settings.insert("userLevel".to_owned(), json!(level));
+            }
         }
     }
     let mut options = Options::new(&source.listen)?;

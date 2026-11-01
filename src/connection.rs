@@ -35,6 +35,30 @@ pub enum Connection {
 }
 
 impl Connection {
+    pub fn server(&self) -> Option<(&str, u16)> {
+        Some(match self {
+            Self::Direct(_) => return None,
+            Self::Http(value) => (&value.proxy.server, value.proxy.port),
+            Self::Socks(value) => (&value.proxy.server, value.proxy.port),
+            Self::Vless(value) => (&value.server, value.port),
+            Self::Vmess(value) => (&value.server, value.port),
+            Self::Trojan(value) => (&value.server, value.port),
+            Self::Shadowsocks(value) => (&value.server, value.port),
+        })
+    }
+
+    pub fn network(&self) -> &Network {
+        match self {
+            Self::Direct(value) => &value.network,
+            Self::Http(value) => &value.network,
+            Self::Socks(value) => &value.network,
+            Self::Vless(value) => &value.network,
+            Self::Vmess(value) => &value.network,
+            Self::Trojan(value) => &value.network,
+            Self::Shadowsocks(value) => &value.network,
+        }
+    }
+
     pub fn parse(text: &str) -> Result<Self> {
         if text
             .split_once("://")
@@ -375,7 +399,7 @@ impl Proxy {
     }
 }
 
-fn address(server: &str, port: u16) -> String {
+pub(crate) fn address(server: &str, port: u16) -> String {
     if server.contains(':') && !server.starts_with('[') {
         format!("[{server}]:{port}")
     } else {

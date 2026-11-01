@@ -47,17 +47,17 @@ impl Inbound {
             address: String::new(),
             ports: match kind {
                 Kind::Mixed => "1080",
-                Kind::Vless | Kind::Vmess | Kind::Trojan => "443",
+                Kind::Vless | Kind::Vmess | Kind::Trojan | Kind::Forward => "443",
                 Kind::Shadowsocks => "8388",
             }
             .to_owned(),
             core: kind.core(),
-            users: true,
+            users: !matches!(kind, Kind::Forward),
             credentials: None,
             protocol: kind.protocol(),
             transport: Transport::default(),
             tls: Tls {
-                enabled: !matches!(kind, Kind::Mixed | Kind::Shadowsocks),
+                enabled: !matches!(kind, Kind::Mixed | Kind::Shadowsocks | Kind::Forward),
                 ..Tls::default()
             },
             listen: Listen::default(),
@@ -145,12 +145,15 @@ enum Kind {
     Vmess,
     Trojan,
     Shadowsocks,
+    Forward,
 }
 
 impl Kind {
     fn core(self) -> Core {
         match self {
-            Self::Mixed | Self::Vmess | Self::Trojan | Self::Shadowsocks => Core::SingBox,
+            Self::Mixed | Self::Vmess | Self::Trojan | Self::Shadowsocks | Self::Forward => {
+                Core::SingBox
+            }
             Self::Vless => Core::Xray,
         }
     }
@@ -162,6 +165,7 @@ impl Kind {
             Self::Vmess => Protocol::Vmess(crate::vmess::Server::default()),
             Self::Trojan => Protocol::Trojan(crate::trojan::Server::default()),
             Self::Shadowsocks => Protocol::Shadowsocks(crate::shadowsocks::Server::default()),
+            Self::Forward => Protocol::Forward(crate::forward::Forward::default()),
         }
     }
 }
@@ -174,9 +178,25 @@ pub enum Protocol {
     Vmess(crate::vmess::Server),
     Trojan(crate::trojan::Server),
     Shadowsocks(crate::shadowsocks::Server),
+    Forward(crate::forward::Forward),
 }
 
 impl Protocol {
+    pub fn routing(&self) -> bool {
+        self.destination().is_none()
+    }
+
+    pub fn users(&self) -> bool {
+        !matches!(self, Self::Forward(_))
+    }
+
+    pub fn destination(&self) -> Option<crate::route::Destination> {
+        match self {
+            Self::Forward(value) => Some(value.outbound),
+            _ => None,
+        }
+    }
+
     fn kind(&self) -> Kind {
         match self {
             Self::Mixed(_) => Kind::Mixed,
@@ -184,6 +204,7 @@ impl Protocol {
             Self::Vmess(_) => Kind::Vmess,
             Self::Trojan(_) => Kind::Trojan,
             Self::Shadowsocks(_) => Kind::Shadowsocks,
+            Self::Forward(_) => Kind::Forward,
         }
     }
 
@@ -223,6 +244,13 @@ impl Protocol {
                 &title,
                 value,
                 Rc::new(move |value, screen| apply(&Self::Shadowsocks(value.clone()), screen)),
+                false,
+            ),
+            Self::Forward(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Forward(value.clone()), screen)),
                 false,
             ),
         }
@@ -484,19 +512,26 @@ fn edit(
             item
         })
         .collect();
-        let mut users = Item::new("users", "用户支持".stylized());
-        users.marker = inbound.users.marker();
-        items.push(users);
-        if inbound.users {
-            items.push(Item::new("new-user", "新增用户".stylized()));
-        } else {
-            let mut credentials = Item::new("credentials", "入口凭据".stylized());
-            credentials.value = inbound.credentials.as_ref().map_or_else(
-                || "无".to_owned(),
-                |credentials| credentials.uuid.to_string(),
-            );
-            credentials.detail = "Del 清除凭据".to_owned();
-            items.push(credentials);
+        if let Some(destination) = inbound.protocol.destination() {
+            let mut item = Item::new("outbound", "出站".stylized());
+            item.value = destination.text();
+            items.push(item);
+        }
+        if inbound.protocol.users() {
+            let mut users = Item::new("users", "用户支持".stylized());
+            users.marker = inbound.users.marker();
+            items.push(users);
+            if inbound.users {
+                items.push(Item::new("new-user", "新增用户".stylized()));
+            } else {
+                let mut credentials = Item::new("credentials", "入口凭据".stylized());
+                credentials.value = inbound.credentials.as_ref().map_or_else(
+                    || "无".to_owned(),
+                    |credentials| credentials.uuid.to_string(),
+                );
+                credentials.detail = "Del 清除凭据".to_owned();
+                items.push(credentials);
+            }
         }
         let mut tls = Item::new("tls", "TLS".stylized());
         tls.value = inbound.tls.enabled.text();
@@ -555,6 +590,24 @@ fn edit(
                 "ports" => edit!(ports),
                 "core" => edit!(core),
                 "users" => edit!(users),
+                "outbound" => {
+                    let current = inbound.protocol.destination().unwrap();
+                    let progress = crate::progress::Progress::default();
+                    crate::route::destination(screen, store, current, |config, destination| {
+                        crate::native::available(store, config, &inbound, destination, &progress)
+                    })
+                    .and_then(|selection| {
+                        if let Some(destination) = selection {
+                            let mut edited = inbound.clone();
+                            if let Protocol::Forward(value) = &mut edited.protocol {
+                                value.outbound = destination;
+                            }
+                            form::set(screen, &mut inbound, edited, &apply).map(|_| ())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                }
                 "new-user" => user::create(screen, store).map(|_| ()),
                 "protocol" => {
                     let mut kind = inbound.protocol.kind();
@@ -757,6 +810,7 @@ choices!(Kind {
     Vmess: "vmess" => "VMess",
     Trojan: "trojan" => "Trojan",
     Shadowsocks: "shadowsocks" => "Shadowsocks",
+    Forward: "forward" => "TCP/UDP 转发",
 });
 
 choices!(HttpVersion {

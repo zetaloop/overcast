@@ -25,6 +25,7 @@ pub struct Rule {
     pub condition: Condition,
     pub outbound: String,
     pub resolve_udp: bool,
+    pub target: Option<(String, u16)>,
 }
 
 pub struct Matchers<'a> {
@@ -225,6 +226,10 @@ impl<'a> Matchers<'a> {
                 fields.insert("action".to_owned(), json!("reject"));
             } else {
                 fields.insert("outbound".to_owned(), json!(rule.outbound));
+                if let Some((server, port)) = &rule.target {
+                    fields.insert("override_address".to_owned(), json!(server));
+                    fields.insert("override_port".to_owned(), json!(port));
+                }
             }
             result.push(value);
         }

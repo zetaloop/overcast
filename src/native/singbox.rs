@@ -349,6 +349,7 @@ pub fn listeners(
     source: &Inbound,
     users: &[(String, String)],
     store: &Store,
+    target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
     if matches!(source.protocol, Protocol::Mixed(_)) && !source.transport.is_default() {
         return unsupported("sing-box 的 HTTP/SOCKS 入站没有传输封装配置");
@@ -384,6 +385,7 @@ pub fn listeners(
                         }
                         Protocol::Trojan(_) => json!({"name": name, "password": password}),
                         Protocol::Shadowsocks(_) => json!({"name": name, "password": password}),
+                        Protocol::Forward(_) => unreachable!(),
                     })
                     .collect::<Vec<_>>()
             ),
@@ -561,6 +563,27 @@ pub fn listeners(
             );
         }
         options.finish("sing-box Shadowsocks 入站")?;
+        return Ok(vec![output]);
+    }
+    if let Protocol::Forward(value) = &source.protocol {
+        if value.user_level.is_some() {
+            return unsupported("sing-box 固定转发入口没有用户等级配置");
+        }
+        if source.tls.enabled || !source.transport.is_default() {
+            return unsupported("sing-box 固定转发入口使用原生 TCP/UDP 监听");
+        }
+        let (server, port) = target.ok_or("转发入口缺少后继连接")?;
+        output.insert("type".to_owned(), json!("direct"));
+        output.insert("override_address".to_owned(), json!(server));
+        output.insert("override_port".to_owned(), json!(port));
+        let mut networks = Vec::new();
+        if value.tcp {
+            networks.push("tcp");
+        }
+        if value.udp {
+            networks.push("udp");
+        }
+        output.insert("network".to_owned(), json!(networks));
         return Ok(vec![output]);
     }
     let Protocol::Mixed(value) = &source.protocol else {

@@ -1,5 +1,6 @@
 mod binding;
 pub(crate) mod encryption;
+mod forward;
 mod listener;
 mod mihomo;
 mod multiplex;
@@ -32,8 +33,8 @@ use crate::{
     condition::Condition,
     config::{Config, Store},
     connection::{self, Connection},
-    graph,
-    inbound::{Core, Protocol},
+    graph::{self, Payload},
+    inbound::{Core, Inbound, Protocol},
     progress::Progress,
     route::Destination,
 };
@@ -81,6 +82,7 @@ struct Endpoint {
     resolve_udp: bool,
 }
 
+#[derive(PartialEq)]
 struct Node {
     core: Core,
     globals: Map<String, Value>,
@@ -89,7 +91,7 @@ struct Node {
     resolve_udp: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Chain {
     nodes: Vec<Rc<Node>>,
     networks: [bool; 2],
@@ -106,8 +108,8 @@ struct Builder<'a> {
     config: &'a Config,
     progress: &'a Progress,
     services: Vec<Service>,
-    chains: HashMap<(Uuid, Core), Vec<Chain>>,
-    outbounds: HashMap<(Uuid, Core, usize), Endpoint>,
+    chains: HashMap<(Uuid, Core, Payload), Vec<Chain>>,
+    outbounds: HashMap<(Uuid, Core, Payload, usize), Endpoint>,
     bridges: BTreeMap<String, Endpoint>,
     previous: BTreeMap<String, u16>,
     ports: BTreeMap<String, u16>,
@@ -115,30 +117,59 @@ struct Builder<'a> {
     sockets: Vec<(TcpListener, Option<UdpSocket>)>,
 }
 
+impl<'a> Builder<'a> {
+    fn new(store: &'a Store, config: &'a Config, progress: &'a Progress) -> Self {
+        Self {
+            store,
+            config,
+            progress,
+            services: Vec::new(),
+            chains: HashMap::new(),
+            outbounds: HashMap::new(),
+            bridges: BTreeMap::new(),
+            previous: BTreeMap::new(),
+            ports: BTreeMap::new(),
+            reserved: Vec::new(),
+            sockets: Vec::new(),
+        }
+    }
+}
+
+pub fn available(
+    store: &Store,
+    config: &Config,
+    source: &Inbound,
+    destination: Destination,
+    progress: &Progress,
+) -> Result<bool> {
+    let payload = Payload::from(&source.protocol);
+    Ok(match destination {
+        Destination::Block => true,
+        Destination::Direct => false,
+        Destination::Outbound(uuid) => Builder::new(store, config, progress)
+            .chains(uuid, source.core, payload)?
+            .iter()
+            .any(|chain| chain.networks != [false, false]),
+    })
+}
+
 pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Option<Prepared>> {
-    let mut builder = Builder {
+    let mut builder = Builder::new(store, config, progress);
+    let Some(mut graph) = graph::build(
         store,
         config,
         progress,
-        services: Vec::new(),
-        chains: HashMap::new(),
-        outbounds: HashMap::new(),
-        bridges: BTreeMap::new(),
-        previous: BTreeMap::new(),
-        ports: BTreeMap::new(),
-        reserved: Vec::new(),
-        sockets: Vec::new(),
-    };
-    let Some(mut graph) = graph::build(store, config, progress, |core, destination, network| {
-        Ok(match destination {
-            Destination::Block => false,
-            Destination::Direct => true,
-            Destination::Outbound(uuid) => builder
-                .chains(uuid, core)?
-                .iter()
-                .any(|chain| chain.supports(network)),
-        })
-    })?
+        |core, destination, network, payload| {
+            Ok(match destination {
+                Destination::Block => false,
+                Destination::Direct => payload == Payload::Proxy,
+                Destination::Outbound(uuid) => builder
+                    .chains(uuid, core, payload)?
+                    .iter()
+                    .any(|chain| chain.supports(network)),
+            })
+        },
+    )?
     else {
         return Ok(None);
     };
@@ -177,10 +208,16 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
             .map(|(user, password)| (user.to_string(), password.clone()))
             .collect();
         let mut globals = Map::new();
+        let payload = Payload::from(&inbound.protocol);
+        let target = if matches!(inbound.protocol, Protocol::Forward(_)) {
+            Some(builder.forward_target(listener, &graph)?)
+        } else {
+            None
+        };
         let values = match inbound.core {
-            Core::Xray => xray::listeners(inbound, &users, store)?,
-            Core::SingBox => singbox::listeners(inbound, &users, store)?,
-            Core::Mihomo => mihomo::listeners(inbound, &users, store, &mut globals)?,
+            Core::Xray => xray::listeners(inbound, &users, store, target)?,
+            Core::SingBox => singbox::listeners(inbound, &users, store, target)?,
+            Core::Mihomo => mihomo::listeners(inbound, &users, store, &mut globals, target)?,
         };
         let values = if inbound.core == Core::SingBox {
             let mut expanded = Vec::new();
@@ -216,7 +253,8 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 && inbound.tls.reality.enabled
                 && let Destination::Outbound(uuid) = inbound.tls.reality.outbound
             {
-                let endpoint = builder.outbound(uuid, inbound.core, graph::Network::Tcp)?;
+                let endpoint =
+                    builder.outbound(uuid, inbound.core, graph::Network::Tcp, Payload::Proxy)?;
                 let parent = builder.bridge(service, &endpoint)?;
                 match inbound.core {
                     Core::SingBox => {
@@ -276,6 +314,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 condition: Condition::Always,
                 outbound: "direct".to_owned(),
                 resolve_udp: false,
+                target: None,
             });
         }
         for member in &listener.members {
@@ -285,35 +324,50 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 .iter()
                 .filter(|account| member.carries(account.network))
             {
-                let user = account
-                    .identity(entry.inbound)
-                    .filter(|_| {
-                        !matches!(inbound.protocol, Protocol::Shadowsocks(_))
-                            || inbound.core == Core::Xray
-                            || shadowsocks::multi(inbound, users.len())
-                    })
-                    .map(|user| {
-                        if matches!(
-                            inbound.protocol,
-                            Protocol::Trojan(_) | Protocol::Shadowsocks(_)
-                        ) {
-                            listener
-                                .users
-                                .iter()
-                                .find(|(_, password)| *password == &member.users[&user])
-                                .unwrap()
-                                .0
-                                .to_string()
-                        } else {
-                            user.to_string()
-                        }
-                    });
+                let user = if payload == Payload::Connection {
+                    None
+                } else {
+                    account
+                        .identity(entry.inbound)
+                        .filter(|_| {
+                            !matches!(inbound.protocol, Protocol::Shadowsocks(_))
+                                || inbound.core == Core::Xray
+                                || shadowsocks::multi(inbound, users.len())
+                        })
+                        .map(|user| {
+                            if matches!(
+                                inbound.protocol,
+                                Protocol::Trojan(_) | Protocol::Shadowsocks(_)
+                            ) {
+                                listener
+                                    .users
+                                    .iter()
+                                    .find(|(_, password)| *password == &member.users[&user])
+                                    .unwrap()
+                                    .0
+                                    .to_string()
+                            } else {
+                                user.to_string()
+                            }
+                        })
+                };
                 for rule in &account.rules {
+                    let target = if payload == Payload::Connection
+                        && let Destination::Outbound(_) = rule.destination
+                    {
+                        let (server, port) = forward::target(config, rule.destination)
+                            .and_then(Connection::server)
+                            .ok_or("转交目标缺少后继连接")?;
+                        Some((server.to_owned(), port))
+                    } else {
+                        None
+                    };
                     let outbound = match rule.destination {
                         Destination::Block => "block".to_owned(),
                         Destination::Direct => "direct".to_owned(),
                         Destination::Outbound(uuid) => {
-                            let endpoint = builder.outbound(uuid, inbound.core, account.network)?;
+                            let endpoint =
+                                builder.outbound(uuid, inbound.core, account.network, payload)?;
                             builder.bridge(service, &endpoint)?
                         }
                     };
@@ -325,6 +379,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                         condition: rule.condition.clone(),
                         outbound,
                         resolve_udp: false,
+                        target,
                     });
                 }
             }
@@ -460,6 +515,75 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
 }
 
 impl Builder<'_> {
+    fn same_path(
+        &mut self,
+        left: Uuid,
+        right: Uuid,
+        core: Core,
+        network: graph::Network,
+        payload: Payload,
+    ) -> Result<bool> {
+        let left = self
+            .chains(left, core, payload)?
+            .iter()
+            .find(|chain| chain.supports(network))
+            .cloned();
+        let right = self
+            .chains(right, core, payload)?
+            .iter()
+            .find(|chain| chain.supports(network));
+        Ok(left.as_ref() == right)
+    }
+
+    fn forward_target<'b>(
+        &mut self,
+        listener: &listener::Listener,
+        graph: &'b graph::Graph<'b>,
+    ) -> Result<(&'b str, u16)> {
+        let mut target = None;
+        for (index, member) in listener.members.iter().enumerate() {
+            let source = graph.entries[member.entry].inbound;
+            let destination = source.protocol.destination().unwrap();
+            let server = forward::target(graph.config(), destination)
+                .and_then(Connection::server)
+                .ok_or("转发入口缺少后继连接")?;
+            if target.is_some_and(|target| target != server) {
+                return Err(format!("入站 {} 的同一监听对应不同转发目标", source.name).into());
+            }
+            for other in &listener.members[..index] {
+                let Destination::Outbound(left) = graph.entries[other.entry]
+                    .inbound
+                    .protocol
+                    .destination()
+                    .unwrap()
+                else {
+                    unreachable!()
+                };
+                let Destination::Outbound(right) = destination else {
+                    unreachable!()
+                };
+                for network in [graph::Network::Tcp, graph::Network::Udp] {
+                    if member.carries(network)
+                        && other.carries(network)
+                        && !self.same_path(
+                            left,
+                            right,
+                            source.core,
+                            network,
+                            Payload::Connection,
+                        )?
+                    {
+                        return Err(
+                            format!("入站 {} 的同一监听对应不同转发路径", source.name).into()
+                        );
+                    }
+                }
+            }
+            target = Some(server);
+        }
+        target.ok_or_else(|| "转发入口缺少后继连接".into())
+    }
+
     fn service(
         &mut self,
         core: Core,
@@ -497,9 +621,15 @@ impl Builder<'_> {
         index
     }
 
-    fn chains(&mut self, uuid: Uuid, preferred: Core) -> Result<&[Chain]> {
-        if self.chains.contains_key(&(uuid, preferred)) {
-            return Ok(&self.chains[&(uuid, preferred)]);
+    fn chains(&mut self, uuid: Uuid, preferred: Core, payload: Payload) -> Result<&[Chain]> {
+        if self.chains.contains_key(&(uuid, preferred, payload)) {
+            return Ok(&self.chains[&(uuid, preferred, payload)]);
+        }
+        if payload == Payload::Connection
+            && forward::target(self.config, Destination::Outbound(uuid)).is_none()
+        {
+            self.chains.insert((uuid, preferred, payload), Vec::new());
+            return Ok(&self.chains[&(uuid, preferred, payload)]);
         }
         let source = self
             .config
@@ -533,19 +663,27 @@ impl Builder<'_> {
             );
             let mut nodes = Vec::new();
             let mut errors = Vec::new();
+            let forward = payload != Payload::Proxy && index == source.connections.len() - 1;
             for core in candidates {
                 if !matches_core(requested, core) {
                     continue;
                 }
-                if index != 0 && core != Core::Xray && matches!(connection, Connection::Direct(_)) {
+                if index != 0
+                    && core != Core::Xray
+                    && (forward || matches!(connection, Connection::Direct(_)))
+                {
                     errors.push(format!("{} 直连出站没有前置代理配置", key(core)));
                     continue;
                 }
                 let mut globals = Map::new();
-                let result = match core {
-                    Core::Xray => xray::outbound(connection, self.store),
-                    Core::SingBox => singbox::outbound(connection, self.store, &mut globals),
-                    Core::Mihomo => mihomo::outbound(connection, self.store, &mut globals),
+                let result = if forward {
+                    forward::outbound(connection.network(), core, self.store, &mut globals)
+                } else {
+                    match core {
+                        Core::Xray => xray::outbound(connection, self.store),
+                        Core::SingBox => singbox::outbound(connection, self.store, &mut globals),
+                        Core::Mihomo => mihomo::outbound(connection, self.store, &mut globals),
+                    }
                 };
                 match result {
                     Ok(value) => {
@@ -573,6 +711,10 @@ impl Builder<'_> {
                 }
             }
             if nodes.is_empty() {
+                if payload != Payload::Proxy {
+                    chains.clear();
+                    break;
+                }
                 return Err(format!(
                     "出站 {} 第 {} 段连接无法生成：{}",
                     source.name,
@@ -584,7 +726,15 @@ impl Builder<'_> {
             let mut next: Vec<Chain> = Vec::new();
             for chain in &chains {
                 for node in &nodes {
-                    let networks = networks(connection, node.core, chain.networks)?;
+                    let networks = if forward {
+                        let available = forward::networks(connection)?;
+                        [
+                            chain.networks[0] && available[0],
+                            chain.networks[1] && available[1],
+                        ]
+                    } else {
+                        networks(connection, node.core, chain.networks)?
+                    };
                     if networks == [false, false]
                         || next.iter().any(|chain| chain.networks == networks)
                     {
@@ -600,8 +750,8 @@ impl Builder<'_> {
             }
             chains = next;
         }
-        self.chains.insert((uuid, preferred), chains);
-        Ok(&self.chains[&(uuid, preferred)])
+        self.chains.insert((uuid, preferred, payload), chains);
+        Ok(&self.chains[&(uuid, preferred, payload)])
     }
 
     fn outbound(
@@ -609,14 +759,15 @@ impl Builder<'_> {
         uuid: Uuid,
         preferred: Core,
         network: graph::Network,
+        payload: Payload,
     ) -> Result<Endpoint> {
-        let plans = self.chains(uuid, preferred)?;
+        let plans = self.chains(uuid, preferred, payload)?;
         let selected = plans
             .iter()
             .position(|chain| chain.supports(network))
             .ok_or("出站无法传递请求的网络类型")?;
         let nodes = plans[selected].nodes.clone();
-        if let Some(endpoint) = self.outbounds.get(&(uuid, preferred, selected)) {
+        if let Some(endpoint) = self.outbounds.get(&(uuid, preferred, payload, selected)) {
             return Ok(endpoint.clone());
         }
         let mut endpoint = None;
@@ -624,7 +775,11 @@ impl Builder<'_> {
             let core = node.core;
             let service = self.service(core, node.globals.clone(), node.environment.clone());
             let mut value = node.value.clone();
-            let tag = format!("{uuid}-{}-{selected}-{index}", key(preferred));
+            let suffix = match payload {
+                Payload::Proxy => "",
+                Payload::Connection => "-forward",
+            };
+            let tag = format!("{uuid}-{}{suffix}-{selected}-{index}", key(preferred));
             value.insert(
                 if core == Core::Mihomo { "name" } else { "tag" }.to_owned(),
                 json!(tag),
@@ -677,7 +832,7 @@ impl Builder<'_> {
         }
         let endpoint = endpoint.ok_or("出站中没有连接")?;
         self.outbounds
-            .insert((uuid, preferred, selected), endpoint.clone());
+            .insert((uuid, preferred, payload, selected), endpoint.clone());
         Ok(endpoint)
     }
 
@@ -797,6 +952,7 @@ impl Builder<'_> {
                     condition: Condition::Always,
                     outbound: target.tag.clone(),
                     resolve_udp: target.resolve_udp,
+                    target: None,
                 },
             );
             port

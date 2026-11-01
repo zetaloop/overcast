@@ -358,6 +358,7 @@ pub fn listeners(
     users: &[(String, String)],
     store: &Store,
     globals: &mut Map<String, Value>,
+    target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
     if matches!(source.protocol, Protocol::Mixed(_)) && !source.transport.is_default() {
         return unsupported("Mihomo 的 HTTP/SOCKS 入站没有传输封装配置");
@@ -394,6 +395,7 @@ pub fn listeners(
                         }
                         Protocol::Trojan(_) => json!({"username": name, "password": password}),
                         Protocol::Shadowsocks(_) => json!({"username": name, "password": password}),
+                        Protocol::Forward(_) => unreachable!(),
                     })
                     .collect::<Vec<_>>()
             ),
@@ -527,6 +529,29 @@ pub fn listeners(
             );
         }
         options.finish("Mihomo Shadowsocks 入站")?;
+        return Ok(vec![output]);
+    }
+    if let Protocol::Forward(value) = &source.protocol {
+        if value.user_level.is_some() {
+            return unsupported("Mihomo 固定转发入口没有用户等级配置");
+        }
+        if source.tls.enabled || !source.transport.is_default() {
+            return unsupported("Mihomo 固定转发入口使用原生 TCP/UDP 监听");
+        }
+        let (server, port) = target.ok_or("转发入口缺少后继连接")?;
+        output.insert("type".to_owned(), json!("tunnel"));
+        output.insert(
+            "target".to_owned(),
+            json!(crate::connection::address(server, port)),
+        );
+        let mut networks = Vec::new();
+        if value.tcp {
+            networks.push("tcp");
+        }
+        if value.udp {
+            networks.push("udp");
+        }
+        output.insert("network".to_owned(), json!(networks));
         return Ok(vec![output]);
     }
     let Protocol::Mixed(value) = &source.protocol else {

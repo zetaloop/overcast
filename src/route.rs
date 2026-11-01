@@ -102,7 +102,7 @@ impl Value for Destination {
         apply: form::Apply<'_, Self>,
         _: bool,
     ) -> Result<bool> {
-        match destination(screen, &Store::open()?, *self)? {
+        match destination(screen, &Store::open()?, *self, |_, _| Ok(true))? {
             Some(value) => form::set(screen, self, value, &apply),
             None => Ok(false),
         }
@@ -197,8 +197,12 @@ fn select_user(screen: &mut Screen, store: &Store) -> Result<Option<Condition>> 
 fn select_inbound(screen: &mut Screen, store: &Store) -> Result<Option<Condition>> {
     loop {
         let config = store.load()?;
-        let mut items: Vec<_> = config
+        let inbounds: Vec<_> = config
             .inbounds
+            .iter()
+            .filter(|inbound| inbound.protocol.routing())
+            .collect();
+        let mut items: Vec<_> = inbounds
             .iter()
             .map(|inbound| {
                 let mut item = Item::new(inbound.uuid.to_string(), inbound.name.clone().stylized());
@@ -214,11 +218,17 @@ fn select_inbound(screen: &mut Screen, store: &Store) -> Result<Option<Condition
             help: "",
         };
         match screen.search(menu.title, &items, 0)? {
-            Some(index) if index < config.inbounds.len() => {
-                return Ok(Some(Condition::Inbound(config.inbounds[index].uuid)));
+            Some(index) if index < inbounds.len() => {
+                return Ok(Some(Condition::Inbound(inbounds[index].uuid)));
             }
             Some(index) => {
-                if let Some(uuid) = inbound::create(screen, store, &menu, index)? {
+                if let Some(uuid) = inbound::create(screen, store, &menu, index)?
+                    && store
+                        .load()?
+                        .inbounds
+                        .iter()
+                        .any(|inbound| inbound.uuid == uuid && inbound.protocol.routing())
+                {
                     return Ok(Some(Condition::Inbound(uuid)));
                 }
             }
@@ -296,10 +306,11 @@ fn select_target(
     }
 }
 
-fn destination(
+pub(crate) fn destination(
     screen: &mut Screen,
     store: &Store,
     current: Destination,
+    available: impl Fn(&Config, Destination) -> Result<bool>,
 ) -> Result<Option<Destination>> {
     loop {
         let config = store.load()?;
@@ -310,10 +321,20 @@ fn destination(
                 .iter()
                 .map(|outbound| Destination::Outbound(outbound.uuid)),
         );
-        if !values.contains(&current) {
+        let mut candidates = Vec::new();
+        for value in values {
+            if available(&config, value)? {
+                candidates.push(value);
+            }
+        }
+        let mut values = candidates;
+        if !values.contains(&current) && available(&config, current)? {
             values.push(current);
         }
-        let selected = values.iter().position(|value| *value == current).unwrap();
+        let selected = values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or(0);
         let mut items: Vec<_> = values
             .iter()
             .map(|value| {
@@ -334,7 +355,10 @@ fn destination(
             Some(index) if index < values.len() => return Ok(Some(values[index])),
             Some(_) => {
                 if let Some(uuid) = outbound::create(screen, store)? {
-                    return Ok(Some(Destination::Outbound(uuid)));
+                    let value = Destination::Outbound(uuid);
+                    if available(&store.load()?, value)? {
+                        return Ok(Some(value));
+                    }
                 }
             }
             None => return Ok(None),
@@ -577,19 +601,16 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
             Action::Back => return Ok(Some(path)),
             Action::Select => match items[selected].key.as_str() {
                 "condition" => condition(screen, store, &path),
-                "destination" => {
-                    destination(screen, store, rule.destination).and_then(|destination| {
-                        match destination {
-                            Some(destination) => screen.work(menu.title, "", |progress| {
-                                store.update(progress, |config| {
-                                    get_mut(&mut config.rules, &path)?.destination = destination;
-                                    Ok(())
-                                })
-                            }),
-                            None => Ok(()),
-                        }
-                    })
-                }
+                "destination" => destination(screen, store, rule.destination, |_, _| Ok(true))
+                    .and_then(|destination| match destination {
+                        Some(destination) => screen.work(menu.title, "", |progress| {
+                            store.update(progress, |config| {
+                                get_mut(&mut config.rules, &path)?.destination = destination;
+                                Ok(())
+                            })
+                        }),
+                        None => Ok(()),
+                    }),
                 "new" => {
                     let index = screen.work(menu.title, "", |progress| {
                         store.update(progress, |config| {

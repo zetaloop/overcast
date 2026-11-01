@@ -4,7 +4,7 @@ use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Result, config::Config, geodata::Catalog, pattern};
+use crate::{Result, config::Config, geodata::Catalog, graph::Payload, inbound::Inbound, pattern};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
@@ -27,7 +27,7 @@ pub enum Condition {
 }
 
 impl Condition {
-    pub fn scoped(&self, inbound: Uuid, user: Option<Uuid>) -> Self {
+    pub fn scoped(&self, inbound: &Inbound, user: Option<Uuid>) -> Self {
         match self {
             Self::User(uuid) => {
                 if Some(*uuid) == user {
@@ -37,7 +37,7 @@ impl Condition {
                 }
             }
             Self::Inbound(uuid) => {
-                if *uuid == inbound {
+                if *uuid == inbound.uuid {
                     Self::Always
                 } else {
                     Self::Never
@@ -50,6 +50,8 @@ impl Condition {
                     .map(|child| child.scoped(inbound, user))
                     .collect(),
             ),
+            Self::Always | Self::Never => self.clone(),
+            _ if Payload::from(&inbound.protocol) != Payload::Proxy => Self::Never,
             _ => self.clone(),
         }
     }

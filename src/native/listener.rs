@@ -32,12 +32,14 @@ enum Mode {
     Trojan,
     Shadowsocks,
     ShadowsocksUdp,
+    Forward,
+    ForwardUdp,
 }
 
 impl Mode {
     fn wire(self) -> Network {
         match self {
-            Self::Http3 | Self::SocksUdp | Self::ShadowsocksUdp => Network::Udp,
+            Self::Http3 | Self::SocksUdp | Self::ShadowsocksUdp | Self::ForwardUdp => Network::Udp,
             _ => Network::Tcp,
         }
     }
@@ -50,12 +52,14 @@ impl Mode {
             Self::Vmess => "VMess",
             Self::Trojan => "Trojan",
             Self::Shadowsocks | Self::ShadowsocksUdp => "Shadowsocks",
+            Self::Forward | Self::ForwardUdp => "TCP/UDP 转发",
         }
     }
 
     fn carries(self, core: Core, network: Network) -> bool {
         match self {
-            Self::SocksUdp | Self::ShadowsocksUdp => network == Network::Udp,
+            Self::SocksUdp | Self::ShadowsocksUdp | Self::ForwardUdp => network == Network::Udp,
+            Self::Forward => network == Network::Tcp,
             Self::Socks => network == Network::Tcp || core != Core::Mihomo,
             Self::Vless | Self::Vmess | Self::Trojan | Self::Shadowsocks => true,
             _ => network == Network::Tcp || core == Core::SingBox,
@@ -288,6 +292,27 @@ pub fn build(
                     modes.insert(Mode::ShadowsocksUdp);
                 }
             }
+            Protocol::Forward(_) => {
+                if entry
+                    .accounts
+                    .iter()
+                    .any(|account| account.network == Network::Tcp)
+                {
+                    modes.insert(Mode::Forward);
+                }
+                if entry
+                    .accounts
+                    .iter()
+                    .any(|account| account.network == Network::Udp)
+                {
+                    if unix || transport_udp && modes.contains(&Mode::Forward) {
+                        return Err(
+                            format!("入站 {} 的数据报需要独立 UDP 套接字", source.name).into()
+                        );
+                    }
+                    modes.insert(Mode::ForwardUdp);
+                }
+            }
         }
         let parts =
             if source.core == Core::SingBox && modes.contains(&Mode::Http3) && modes.len() > 1 {
@@ -308,6 +333,10 @@ pub fn build(
             if let Protocol::Shadowsocks(protocol) = &mut source.protocol {
                 protocol.tcp = modes.contains(&Mode::Shadowsocks);
                 protocol.udp = modes.contains(&Mode::ShadowsocksUdp);
+            }
+            if let Protocol::Forward(protocol) = &mut source.protocol {
+                protocol.tcp = modes.contains(&Mode::Forward);
+                protocol.udp = modes.contains(&Mode::ForwardUdp);
             }
             if let Protocol::Mixed(protocol) = &mut source.protocol {
                 if modes == BTreeSet::from([Mode::Http3]) {
@@ -594,6 +623,17 @@ pub fn build(
                     current.tcp |= other.tcp;
                     current.udp |= other.udp;
                 }
+                (Protocol::Forward(current), Protocol::Forward(other)) => {
+                    same(
+                        current,
+                        other,
+                        &["outbound", "tcp", "udp"],
+                        "固定转发",
+                        &members,
+                    )?;
+                    current.tcp |= other.tcp;
+                    current.udp |= other.udp;
+                }
                 _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
             }
         }
@@ -608,6 +648,7 @@ pub fn build(
             }
         } else if users.is_empty()
             && !matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
+            && source.protocol.users()
         {
             return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
         }
@@ -674,6 +715,9 @@ pub fn build(
         }
         for (position, left) in members.iter().enumerate() {
             for right in &members[position + 1..] {
+                if !source.protocol.users() {
+                    continue;
+                }
                 for network in [Network::Tcp, Network::Udp] {
                     if !left.carries(network) || !right.carries(network) {
                         continue;
@@ -735,7 +779,7 @@ pub fn build(
                 }
             }
         }
-        if password_identity {
+        if password_identity && source.protocol.users() {
             let mut identities: BTreeMap<String, (Uuid, bool)> = BTreeMap::new();
             for member in &members {
                 for (&uuid, password) in member.users.iter() {
@@ -778,6 +822,9 @@ pub fn build(
 }
 
 fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, String> {
+    if !entry.inbound.protocol.users() {
+        return BTreeMap::new();
+    }
     let mut values: BTreeMap<Uuid, String> = if entry.inbound.users {
         entry
             .users

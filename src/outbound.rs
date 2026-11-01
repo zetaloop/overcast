@@ -409,6 +409,15 @@ fn edit(
                                 for rule in &mut config.rules {
                                     rule.remove_outbound(outbound.uuid);
                                 }
+                                for inbound in &mut config.inbounds {
+                                    if let crate::inbound::Protocol::Forward(value) =
+                                        &mut inbound.protocol
+                                        && value.outbound
+                                            == crate::route::Destination::Outbound(outbound.uuid)
+                                    {
+                                        value.outbound = crate::route::Destination::Block;
+                                    }
+                                }
                                 Ok(())
                             })
                         },

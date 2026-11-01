@@ -4,6 +4,7 @@ mod config;
 mod connection;
 mod encryption;
 mod form;
+mod forward;
 mod geodata;
 mod graph;
 mod inbound;

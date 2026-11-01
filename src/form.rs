@@ -545,7 +545,7 @@ macro_rules! fields {
         impl $crate::form::Form for $ty {
             fn fields<'a>(&'a mut self, defaults: Self, apply: $crate::form::Apply<'a, Self>) -> $crate::form::Fields<'a> {
                 let original = std::rc::Rc::new(self.clone());
-                let Self { $($field),* } = self;
+                let Self { $($field,)* .. } = self;
                 let mut fields = Vec::new();
                 $({
                     let apply = $crate::form::map(original.clone(), apply.clone(), |value, edited| value.$field = edited);
