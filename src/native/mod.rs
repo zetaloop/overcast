@@ -1,6 +1,6 @@
 mod binding;
 pub(crate) mod encryption;
-mod forward;
+pub(crate) mod forward;
 pub(crate) mod listener;
 mod mihomo;
 mod multiplex;
@@ -155,23 +155,7 @@ pub fn available(
 
 pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Option<Prepared>> {
     let mut builder = Builder::new(store, config, progress);
-    let Some(mut graph) = graph::build(
-        store,
-        config,
-        progress,
-        |core, destination, network, payload| {
-            Ok(match destination {
-                Destination::Block => false,
-                Destination::Inbound(_) => false,
-                Destination::Direct => payload == Payload::Proxy,
-                Destination::Outbound(uuid) => builder
-                    .chains(uuid, core, payload)?
-                    .iter()
-                    .any(|chain| chain.supports(network)),
-            })
-        },
-    )?
-    else {
+    let Some(mut graph) = builder.graph()? else {
         return Ok(None);
     };
     if let Some(id) = config.runtime {
@@ -657,7 +641,49 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
     }))
 }
 
-impl Builder<'_> {
+pub fn analyze<'a>(
+    store: &'a Store,
+    config: &'a Config,
+    progress: &'a Progress,
+) -> Result<Option<graph::Graph<'a>>> {
+    Builder::new(store, config, progress).graph()
+}
+
+impl<'a> Builder<'a> {
+    fn graph(&mut self) -> Result<Option<graph::Graph<'a>>> {
+        graph::build(
+            self.store,
+            self.config,
+            self.progress,
+            |core, destination, network, payload| {
+                self.available(core, destination, network, payload)
+            },
+        )
+    }
+
+    fn available(
+        &mut self,
+        core: Core,
+        destination: Destination,
+        network: graph::Network,
+        payload: Payload,
+    ) -> Result<bool> {
+        Ok(match destination {
+            Destination::Block | Destination::Inbound(_) => false,
+            Destination::Direct => payload == Payload::Proxy,
+            Destination::Outbound(uuid) => {
+                self.config
+                    .outbounds
+                    .iter()
+                    .any(|outbound| outbound.uuid == uuid)
+                    && self
+                        .chains(uuid, core, payload)?
+                        .iter()
+                        .any(|chain| chain.supports(network))
+            }
+        })
+    }
+
     fn same_path(
         &mut self,
         left: Uuid,

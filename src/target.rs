@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, HashSet},
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::LazyLock,
@@ -30,6 +30,51 @@ pub struct Targets {
 }
 
 impl Targets {
+    pub fn matches(&self, server: &str) -> Result<(bool, Vec<(&Condition, bool)>)> {
+        let host = server.trim_start_matches('[').trim_end_matches(']');
+        let address = host
+            .split_once('%')
+            .map_or(host, |(address, _)| address)
+            .parse::<IpAddr>()
+            .ok();
+        let server = lowercase(server);
+        let mut values = Vec::new();
+        for (condition, entries) in &self.domains {
+            let mut matched = false;
+            if address.is_none() {
+                for entry in entries {
+                    matched = match DomainType::try_from(entry.kind)? {
+                        DomainType::Domain => server == entry.value,
+                        DomainType::Suffix => {
+                            server == entry.value
+                                || server
+                                    .strip_suffix(&entry.value)
+                                    .is_some_and(|prefix| prefix.ends_with('.'))
+                        }
+                        DomainType::Keyword => server.contains(&entry.value),
+                        DomainType::Regex => regex_automata::meta::Regex::new(
+                            &pattern::parse(&entry.value)?.to_string(),
+                        )?
+                        .is_match(&server),
+                    };
+                    if matched {
+                        break;
+                    }
+                }
+            }
+            values.push((condition, matched));
+        }
+        if let Some(address) = address {
+            values.extend(self.ips.iter().map(|(condition, networks)| {
+                (
+                    condition,
+                    networks.iter().any(|network| network.contains(address)),
+                )
+            }));
+        }
+        Ok((address.is_none(), values))
+    }
+
     pub fn load(store: &Store, conditions: Vec<Condition>, progress: &Progress) -> Result<Self> {
         let mut domains = Vec::new();
         let mut ips = Vec::new();
@@ -170,7 +215,7 @@ impl Targets {
         Ok(Self { domains, ips })
     }
 
-    pub fn domain_classes(&self, progress: &Progress) -> Result<BTreeSet<Vec<bool>>> {
+    pub fn domain_classes(&self, progress: &Progress) -> Result<BTreeMap<Vec<bool>, String>> {
         let step = progress.activity("分析域名条件");
         let mut patterns = vec![Hir::concat(vec![
             Hir::look(Look::Start),
@@ -209,33 +254,45 @@ impl Targets {
                     .start_kind(StartKind::Anchored),
             )
             .build_from_nfa(&nfa)?;
-        let alphabet: Vec<_> = dfa
-            .byte_classes()
-            .representatives(..)
-            .filter_map(|unit| unit.as_u8())
+        let mut bytes = HashSet::new();
+        let alphabet: Vec<_> = b"abcdefghijklmnopqrstuvwxyz0123456789.-_"
+            .iter()
+            .copied()
+            .chain(0..=u8::MAX)
+            .filter(|byte| bytes.insert(dfa.byte_classes().get(*byte)))
             .collect();
         let start = dfa.start_state_forward(&Input::new(b"").anchored(Anchored::Yes))?;
         let mut visited = HashSet::from([start]);
-        let mut pending = vec![start];
-        let mut classes = BTreeSet::from([vec![false; patterns.len()]]);
-        while let Some(state) = pending.pop() {
+        let mut states = vec![(start, None)];
+        let mut cursor = 0;
+        let mut classes = BTreeMap::from([(vec![false; patterns.len()], String::new())]);
+        while cursor < states.len() {
             progress.check()?;
+            let (state, _) = states[cursor];
             let end = dfa.next_eoi_state(state);
             if dfa.is_match_state(end) {
                 let mut values = vec![false; patterns.len()];
                 for index in 0..dfa.match_len(end) {
                     values[dfa.match_pattern(end, index).as_usize()] = true;
                 }
-                if values[0] {
-                    classes.insert(values);
+                if values[0] && !classes.contains_key(&values) {
+                    let mut text = Vec::new();
+                    let mut current = cursor;
+                    while let Some((parent, byte)) = states[current].1 {
+                        text.push(byte);
+                        current = parent;
+                    }
+                    text.reverse();
+                    classes.insert(values, String::from_utf8(text)?);
                 }
             }
             for byte in &alphabet {
                 let next = dfa.next_state(state, *byte);
                 if !dfa.is_dead_state(next) && visited.insert(next) {
-                    pending.push(next);
+                    states.push((next, Some((cursor, *byte))));
                 }
             }
+            cursor += 1;
             if step.sample() {
                 step.detail(format!(
                     "{} 个状态，{} 种匹配组合",
@@ -248,9 +305,9 @@ impl Targets {
         Ok(classes)
     }
 
-    pub fn ip_classes(&self, progress: &Progress) -> Result<BTreeSet<Vec<bool>>> {
+    pub fn ip_classes(&self, progress: &Progress) -> Result<BTreeMap<Vec<bool>, IpAddr>> {
         let step = progress.activity("分析 IP 条件");
-        let mut classes = BTreeSet::new();
+        let mut classes = BTreeMap::new();
         for ipv6 in [false, true] {
             let maximum = if ipv6 {
                 u128::MAX
@@ -280,7 +337,7 @@ impl Targets {
                 }
             }
             let mut counts = vec![0usize; self.ips.len()];
-            for changes in events.values() {
+            for (&address, changes) in &events {
                 progress.check()?;
                 for &(index, entering) in changes {
                     if entering {
@@ -289,7 +346,15 @@ impl Targets {
                         counts[index] -= 1;
                     }
                 }
-                classes.insert(counts.iter().map(|&count| count != 0).collect());
+                classes
+                    .entry(counts.iter().map(|&count| count != 0).collect())
+                    .or_insert_with(|| {
+                        if ipv6 {
+                            IpAddr::V6(Ipv6Addr::from(address))
+                        } else {
+                            IpAddr::V4(Ipv4Addr::from(address as u32))
+                        }
+                    });
             }
         }
         step.finish(format!("{} 种匹配组合", classes.len()));

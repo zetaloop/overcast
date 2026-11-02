@@ -75,6 +75,23 @@ impl Connection {
         }
     }
 
+    pub fn set_server(&mut self, server: &str) {
+        let (address, tls) = match self {
+            Self::Http(value) => (&mut value.proxy.server, &mut value.tls),
+            Self::Socks(value) => (&mut value.proxy.server, &mut value.tls),
+            Self::Vless(value) => (&mut value.server, &mut value.tls),
+            Self::Vmess(value) => (&mut value.server, &mut value.tls),
+            Self::Trojan(value) => (&mut value.server, &mut value.tls),
+            Self::Shadowsocks(value) => (&mut value.server, &mut value.tls),
+            Self::Forward(value) => (&mut value.server, &mut value.tls),
+            Self::Direct(_) => return,
+        };
+        if tls.enabled && tls.server_name.is_none() {
+            tls.server_name = Some(address.clone());
+        }
+        *address = server.to_owned();
+    }
+
     pub fn parse(text: &str) -> Result<Self> {
         if text
             .split_once("://")

@@ -919,7 +919,10 @@ fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
     options.take("ech");
     if source.ech.enabled {
         if let Some(config) = &source.ech.config {
-            output.insert("echConfigList".to_owned(), json!(config));
+            output.insert(
+                "echConfigList".to_owned(),
+                json!(crate::ech::base64(config)?),
+            );
         } else if let Some(file) = &source.ech.config_file {
             output.insert(
                 "echConfigList".to_owned(),

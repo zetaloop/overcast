@@ -924,7 +924,7 @@ fn client_tls(
     if source.ech.enabled {
         let mut ech = Map::from_iter([("enabled".to_owned(), json!(true))]);
         if let Some(value) = &source.ech.config {
-            ech.insert("config".to_owned(), json!(value));
+            ech.insert("config".to_owned(), json!(crate::ech::pem(value)?));
         }
         if let Some(value) = &source.ech.config_file {
             ech.insert("config_path".to_owned(), json!(path(store, value)));

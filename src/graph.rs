@@ -68,6 +68,69 @@ impl Graph<'_> {
         self.analysis.config
     }
 
+    pub fn addresses(
+        &mut self,
+        index: usize,
+        user: Option<Uuid>,
+        network: Network,
+        destination: Destination,
+        server: &str,
+    ) -> Result<Vec<String>> {
+        if self.allows(index, user, network, destination, server)? {
+            return Ok(vec![server.to_owned()]);
+        }
+        let mut values = Vec::new();
+        for candidate in self.analysis.addresses.clone() {
+            if self.allows(index, user, network, destination, &candidate)? {
+                values.push(candidate);
+            }
+        }
+        Ok(values)
+    }
+
+    fn allows(
+        &mut self,
+        index: usize,
+        user: Option<Uuid>,
+        network: Network,
+        destination: Destination,
+        server: &str,
+    ) -> Result<bool> {
+        let entry = &self.entries[index];
+        let Some(account) = entry.accounts.iter().find(|account| {
+            account.user.map(|user| user.uuid) == user && account.network == network
+        }) else {
+            return Ok(false);
+        };
+        let mut selected = Vec::new();
+        let mut remaining = self.analysis.truth;
+        for rule in &account.rules {
+            let condition = self
+                .analysis
+                .condition(&rule.condition, entry.inbound, user);
+            if rule.destination == destination {
+                selected.push(self.analysis.all(&[remaining, condition]));
+            }
+            remaining = self.analysis.all(&[remaining, !condition]);
+        }
+        let routes = self.analysis.any(&selected);
+        let mut values = vec![routes];
+        if Payload::from(&entry.inbound.protocol) == Payload::Proxy {
+            let (domain, matches) = self.targets.matches(server)?;
+            values.push(if domain {
+                self.analysis.present
+            } else {
+                !self.analysis.present
+            });
+            for (condition, matched) in matches {
+                let value = self.analysis.variables[condition];
+                values.push(if matched { value } else { !value });
+            }
+        }
+        let condition = self.analysis.all(&values);
+        self.analysis.possible(condition, entry.inbound.core)
+    }
+
     pub fn equivalent(
         &mut self,
         left: usize,
@@ -327,6 +390,8 @@ struct Analysis<'a> {
     solver: Solver<'static>,
     truth: Lit,
     single: Lit,
+    present: Lit,
+    addresses: Vec<String>,
     variables: HashMap<Condition, Lit>,
     paths: HashMap<(Uuid, Network), bool>,
     config: &'a Config,
@@ -348,7 +413,11 @@ impl<'a> Analysis<'a> {
             domains.push(variable);
         }
         let mut cases = Vec::new();
-        for values in targets.domain_classes(progress)? {
+        let mut addresses = Vec::new();
+        for (values, domain) in targets.domain_classes(progress)? {
+            if !domain.is_empty() {
+                addresses.push(domain);
+            }
             let selected = solver.new_lit();
             cases.push(selected);
             for (&variable, value) in domains.iter().zip(values) {
@@ -368,7 +437,8 @@ impl<'a> Analysis<'a> {
         let address: Vec<_> = (0..width).map(|_| solver.new_lit()).collect();
         let mut witnesses = vec![Vec::new(); ips.len()];
         let mut available = vec![present];
-        for (index, values) in classes.into_iter().enumerate() {
+        for (index, (values, ip)) in classes.into_iter().enumerate() {
+            addresses.push(ip.to_string());
             progress.check()?;
             let selected = solver.new_lit();
             available.push(selected);
@@ -397,6 +467,8 @@ impl<'a> Analysis<'a> {
             solver,
             truth,
             single,
+            present,
+            addresses,
             variables,
             paths: HashMap::new(),
             config,

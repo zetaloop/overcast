@@ -77,6 +77,10 @@ fn edit(
         items[1].value = user.uuid.to_string();
         items[2].value = user.password.clone();
         if original.is_some() {
+            items.extend([
+                Item::new("copy", "复制连接".stylized()),
+                Item::new("share", "分享链接".stylized()),
+            ]);
             items.push(Item::new(
                 "delete",
                 "删除用户".foreground(AnsiColor::BrightRed),
@@ -119,6 +123,19 @@ fn edit(
             Ok(edited)
         };
         let edited = match items[selected].key.as_str() {
+            "copy" | "share" => {
+                let result = crate::profile::copy(
+                    screen,
+                    store,
+                    None,
+                    original,
+                    items[selected].key == "share",
+                );
+                notice = result
+                    .err()
+                    .map_or_else(String::new, |error| error.to_string());
+                None
+            }
             "name" => screen.input(&menu, selected, &user.name, |value, screen| {
                 name(value)?;
                 apply(

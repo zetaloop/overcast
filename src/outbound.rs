@@ -26,10 +26,10 @@ pub struct Outbound {
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Selection {
+pub(crate) struct Selection {
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    name: String,
-    connections: Vec<Connection>,
+    pub name: String,
+    pub connections: Vec<Connection>,
 }
 
 impl Outbound {
@@ -218,6 +218,14 @@ fn copy_connections(screen: &mut Screen, outbound: &Outbound) -> Result<()> {
     }
 }
 
+fn share(screen: &mut Screen, store: &Store, outbound: &Outbound) -> Result<()> {
+    screen.copy(&crate::share::path(
+        &outbound.connections,
+        &outbound.name,
+        store,
+    )?)
+}
+
 fn edit(
     screen: &mut Screen,
     store: &Store,
@@ -266,6 +274,7 @@ fn edit(
         items.extend([
             Item::new("copy", "复制出站".stylized()),
             Item::new("select", "复制连接".stylized()),
+            Item::new("share", "分享链接".stylized()),
         ]);
         if existing {
             items.push(Item::new(
@@ -405,6 +414,7 @@ fn edit(
                     }
                     result
                 }
+                "share" => share(screen, store, &outbound),
                 "delete" => {
                     screen.work(
                         "删除出站",

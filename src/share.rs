@@ -22,6 +22,92 @@ const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
+pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<String> {
+    let mut values = Vec::new();
+    for connection in connections {
+        if let Connection::Direct(value) = connection {
+            Options::new(&value.network)?.finish("分享链接")?;
+        } else {
+            values.push(connection.clone());
+        }
+    }
+    let mut inner = values.pop().ok_or("直连没有远端分享链接")?;
+    while let Some(outer) = values.pop() {
+        Options::new(outer.network())?.finish("分享链接")?;
+        match outer {
+            Connection::Forward(value) => {
+                let (server, port, tls, transport) = match &mut inner {
+                    Connection::Http(value) => (
+                        &mut value.proxy.server,
+                        &mut value.proxy.port,
+                        &mut value.tls,
+                        &mut value.transport,
+                    ),
+                    Connection::Socks(value) => (
+                        &mut value.proxy.server,
+                        &mut value.proxy.port,
+                        &mut value.tls,
+                        &mut value.transport,
+                    ),
+                    Connection::Vless(value) => (
+                        &mut value.server,
+                        &mut value.port,
+                        &mut value.tls,
+                        &mut value.transport,
+                    ),
+                    Connection::Vmess(value) => (
+                        &mut value.server,
+                        &mut value.port,
+                        &mut value.tls,
+                        &mut value.transport,
+                    ),
+                    Connection::Trojan(value) => (
+                        &mut value.server,
+                        &mut value.port,
+                        &mut value.tls,
+                        &mut value.transport,
+                    ),
+                    Connection::Shadowsocks(value) => (
+                        &mut value.server,
+                        &mut value.port,
+                        &mut value.tls,
+                        &mut value.transport,
+                    ),
+                    Connection::Forward(value) => (
+                        &mut value.server,
+                        &mut value.port,
+                        &mut value.tls,
+                        &mut value.transport,
+                    ),
+                    Connection::Direct(_) => unreachable!(),
+                };
+                if value.tls.enabled && tls.enabled {
+                    return Err("嵌套 TLS 连接使用连接路径 JSON 分享".into());
+                }
+                if !value.transport.is_default() && tls.enabled {
+                    return Err("传输内部的 TLS 连接使用连接路径 JSON 分享".into());
+                }
+                if tls.enabled && tls.server_name.is_none() {
+                    tls.server_name = Some(server.clone());
+                }
+                if value.tls.enabled {
+                    *tls = value.tls;
+                }
+                if !value.transport.is_default() {
+                    if !transport.is_default() {
+                        return Err("嵌套传输连接使用连接路径 JSON 分享".into());
+                    }
+                    *transport = value.transport;
+                }
+                *server = value.server;
+                *port = value.port;
+            }
+            _ => return Err("多段代理连接使用连接路径 JSON 分享".into()),
+        }
+    }
+    link(&inner, name, store)
+}
+
 pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
     let (server, port) = source.server().ok_or("直连没有远端分享链接")?;
     let server = match server.parse::<IpAddr>() {

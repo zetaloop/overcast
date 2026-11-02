@@ -517,6 +517,12 @@ fn edit(
             item.value = destination.text();
             items.push(item);
         }
+        if existing {
+            items.extend([
+                Item::new("copy", "复制连接".stylized()),
+                Item::new("share", "分享链接".stylized()),
+            ]);
+        }
         if inbound.protocol.users() {
             let mut users = Item::new("users", "用户支持".stylized());
             users.marker = inbound.users.marker();
@@ -585,6 +591,13 @@ fn edit(
                 form::set(screen, &mut inbound, edited, &apply).map(|_| ())
             }
             Action::Select => match items[selected].key.as_str() {
+                "copy" | "share" => crate::profile::copy(
+                    screen,
+                    store,
+                    Some(inbound.uuid),
+                    None,
+                    items[selected].key == "share",
+                ),
                 "name" => edit!(name),
                 "address" => edit!(address),
                 "ports" => edit!(ports),
