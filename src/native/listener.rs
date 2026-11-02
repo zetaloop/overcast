@@ -67,12 +67,13 @@ impl Mode {
     }
 }
 
+#[derive(Clone)]
 pub struct Member {
     pub entry: usize,
     source: Rc<Inbound>,
     modes: BTreeSet<Mode>,
     pub(super) users: Rc<BTreeMap<Uuid, String>>,
-    binding: Binding,
+    pub(super) binding: Binding,
 }
 
 impl Member {
@@ -89,6 +90,93 @@ impl Member {
             .iter()
             .any(|mode| mode.carries(self.source.core, network))
     }
+
+    pub fn internal(&self, port: u16) -> Result<Listener> {
+        let mut source = self.source.as_ref().clone();
+        source.ports = port.to_string();
+        source.listen = crate::inbound::Listen {
+            address: "127.0.0.1".to_owned(),
+            ..crate::inbound::Listen::default()
+        };
+        let binding = Binding::local(port, self.binding.networks.clone())?;
+        Ok(Listener {
+            source,
+            members: vec![self.clone()],
+            users: self.users.as_ref().clone(),
+            binding,
+        })
+    }
+}
+
+pub fn accepts(source: &Inbound, wire: Network, network: Network) -> bool {
+    let udp = source.transport.udp(
+        source.tls.enabled && !source.tls.reality.enabled,
+        &source.tls.alpn,
+    );
+    modes(source, &[network]).iter().any(|mode| {
+        mode.carries(source.core, network)
+            && if udp {
+                wire == Network::Udp
+            } else {
+                wire == mode.wire()
+            }
+    })
+}
+
+fn modes(source: &Inbound, networks: &[Network]) -> BTreeSet<Mode> {
+    let mut modes = BTreeSet::new();
+    match &source.protocol {
+        Protocol::Mixed(protocol) => {
+            if protocol.http.enabled {
+                let versions = if protocol.http.versions.is_empty() {
+                    if source.core == Core::SingBox {
+                        vec![HttpVersion::Http1, HttpVersion::Http2]
+                    } else {
+                        vec![HttpVersion::Http1]
+                    }
+                } else {
+                    protocol.http.versions.clone()
+                };
+                modes.extend(versions.into_iter().map(|version| match version {
+                    HttpVersion::Http1 => Mode::Http1,
+                    HttpVersion::Http2 => Mode::Http2,
+                    HttpVersion::Http3 => Mode::Http3,
+                }));
+            }
+            if protocol.socks.enabled {
+                modes.insert(Mode::Socks);
+                if source.core == Core::Mihomo && networks.contains(&Network::Udp) {
+                    modes.insert(Mode::SocksUdp);
+                }
+            }
+        }
+        Protocol::Vless(_) => {
+            modes.insert(Mode::Vless);
+        }
+        Protocol::Vmess(_) => {
+            modes.insert(Mode::Vmess);
+        }
+        Protocol::Trojan(_) => {
+            modes.insert(Mode::Trojan);
+        }
+        Protocol::Shadowsocks(value) => {
+            if value.tcp {
+                modes.insert(Mode::Shadowsocks);
+            }
+            if value.udp && networks.contains(&Network::Udp) {
+                modes.insert(Mode::ShadowsocksUdp);
+            }
+        }
+        Protocol::Forward(_) => {
+            if networks.contains(&Network::Tcp) {
+                modes.insert(Mode::Forward);
+            }
+            if networks.contains(&Network::Udp) {
+                modes.insert(Mode::ForwardUdp);
+            }
+        }
+    }
+    modes
 }
 
 pub struct Listener {
@@ -212,13 +300,21 @@ pub fn build(
         }
         let unix = source.listen.address.starts_with('@')
             || Path::new(&source.listen.address).is_absolute();
-        if unix && source.core != Core::Xray {
-            return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
-        }
         let transport_udp = source.transport.udp(
             source.tls.enabled && !source.tls.reality.enabled,
             &source.tls.alpn,
         );
+        let modes = modes(
+            &source,
+            &entry
+                .accounts
+                .iter()
+                .map(|account| account.network)
+                .collect::<Vec<_>>(),
+        );
+        if unix && source.core != Core::Xray {
+            return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
+        }
         if unix && transport_udp {
             return Err(format!("入站 {} 的传输需要 UDP 监听地址", source.name).into());
         }
@@ -232,86 +328,14 @@ pub fn build(
             )
             .into());
         }
-        let mut modes = BTreeSet::new();
-        match &source.protocol {
-            Protocol::Mixed(protocol) => {
-                if protocol.http.enabled {
-                    let versions = if protocol.http.versions.is_empty() {
-                        if source.core == Core::SingBox {
-                            vec![HttpVersion::Http1, HttpVersion::Http2]
-                        } else {
-                            vec![HttpVersion::Http1]
-                        }
-                    } else {
-                        protocol.http.versions.clone()
-                    };
-                    modes.extend(versions.into_iter().map(|version| match version {
-                        HttpVersion::Http1 => Mode::Http1,
-                        HttpVersion::Http2 => Mode::Http2,
-                        HttpVersion::Http3 => Mode::Http3,
-                    }));
-                }
-                if protocol.socks.enabled {
-                    modes.insert(Mode::Socks);
-                    if source.core == Core::Mihomo
-                        && entry
-                            .accounts
-                            .iter()
-                            .any(|account| account.network == Network::Udp)
-                    {
-                        modes.insert(Mode::SocksUdp);
-                    }
-                }
-            }
-            Protocol::Vless(_) => {
-                modes.insert(Mode::Vless);
-            }
-            Protocol::Vmess(_) => {
-                modes.insert(Mode::Vmess);
-            }
-            Protocol::Trojan(_) => {
-                modes.insert(Mode::Trojan);
-            }
-            Protocol::Shadowsocks(value) => {
-                if value.tcp {
-                    modes.insert(Mode::Shadowsocks);
-                }
-                if value.udp
-                    && entry
-                        .accounts
-                        .iter()
-                        .any(|account| account.network == Network::Udp)
-                {
-                    if unix || transport_udp && value.tcp {
-                        return Err(format!(
-                            "入站 {} 的 Shadowsocks 数据报需要独立 UDP 套接字",
-                            source.name
-                        )
-                        .into());
-                    }
-                    modes.insert(Mode::ShadowsocksUdp);
-                }
-            }
-            Protocol::Forward(_) => {
-                if entry
-                    .accounts
-                    .iter()
-                    .any(|account| account.network == Network::Tcp)
-                {
-                    modes.insert(Mode::Forward);
-                }
-                if entry
-                    .accounts
-                    .iter()
-                    .any(|account| account.network == Network::Udp)
-                {
-                    if unix || transport_udp && modes.contains(&Mode::Forward) {
-                        return Err(
-                            format!("入站 {} 的数据报需要独立 UDP 套接字", source.name).into()
-                        );
-                    }
-                    modes.insert(Mode::ForwardUdp);
-                }
+        for (stream, packet, name) in [
+            (Mode::Shadowsocks, Mode::ShadowsocksUdp, "Shadowsocks "),
+            (Mode::Forward, Mode::ForwardUdp, ""),
+        ] {
+            if modes.contains(&packet) && (unix || transport_udp && modes.contains(&stream)) {
+                return Err(
+                    format!("入站 {} 的{name}数据报需要独立 UDP 套接字", source.name).into(),
+                );
             }
         }
         let parts =

@@ -127,7 +127,7 @@ impl Graph<'_> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Network {
     Tcp,
     Udp,
@@ -147,6 +147,21 @@ impl Network {
             && matches!(inbound.protocol, Protocol::Mixed(_)))
             && !matches!(&inbound.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
             && inbound.protocol.users()
+    }
+
+    pub fn enabled(self, inbound: &Inbound) -> bool {
+        match (self, &inbound.protocol) {
+            (Self::Tcp, Protocol::Shadowsocks(value)) => value.tcp,
+            (Self::Tcp, Protocol::Forward(value)) => value.tcp,
+            (Self::Tcp, _) => true,
+            (Self::Udp, Protocol::Mixed(value)) => {
+                value.udp
+                    && (value.socks.enabled || value.http.enabled && inbound.core == Core::SingBox)
+            }
+            (Self::Udp, Protocol::Vless(_) | Protocol::Vmess(_) | Protocol::Trojan(_)) => true,
+            (Self::Udp, Protocol::Shadowsocks(value)) => value.tcp || value.udp,
+            (Self::Udp, Protocol::Forward(value)) => value.udp,
+        }
     }
 }
 
@@ -186,59 +201,13 @@ pub fn build<'a>(
     for inbound in &config.inbounds {
         progress.check()?;
         step.detail(&inbound.name);
-        if inbound.users && config.users.is_empty() && inbound.protocol.users() {
-            continue;
-        }
-        if inbound.tls.enabled && inbound.tls.reality.enabled {
-            match inbound.tls.reality.outbound {
-                Destination::Block => continue,
-                Destination::Outbound(uuid)
-                    if !config
-                        .outbounds
-                        .iter()
-                        .any(|outbound| outbound.uuid == uuid)
-                        || !reachable(
-                            inbound.core,
-                            Destination::Outbound(uuid),
-                            Network::Tcp,
-                            Payload::Proxy,
-                        )? =>
-                {
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        if let Protocol::Mixed(protocol) = &inbound.protocol
-            && !protocol.http.enabled
-            && !protocol.socks.enabled
-        {
+        if !graph.enabled(inbound, &mut reachable)? {
             continue;
         }
         let mut accounts = Vec::new();
         let mut users = HashSet::new();
         for network in [Network::Tcp, Network::Udp] {
-            if network == Network::Tcp
-                && match &inbound.protocol {
-                    Protocol::Shadowsocks(value) => !value.tcp,
-                    Protocol::Forward(value) => !value.tcp,
-                    _ => false,
-                }
-            {
-                continue;
-            }
-            if network == Network::Udp
-                && !match &inbound.protocol {
-                    Protocol::Mixed(value) => {
-                        value.udp
-                            && (value.socks.enabled
-                                || value.http.enabled && inbound.core == Core::SingBox)
-                    }
-                    Protocol::Vless(_) | Protocol::Vmess(_) | Protocol::Trojan(_) => true,
-                    Protocol::Shadowsocks(value) => value.tcp || value.udp,
-                    Protocol::Forward(value) => value.udp,
-                }
-            {
+            if !network.enabled(inbound) {
                 continue;
             }
             if inbound.users && inbound.protocol.users() {
@@ -359,6 +328,7 @@ struct Analysis<'a> {
     truth: Lit,
     single: Lit,
     variables: HashMap<Condition, Lit>,
+    paths: HashMap<(Uuid, Network), bool>,
     config: &'a Config,
     progress: &'a Progress,
 }
@@ -428,6 +398,7 @@ impl<'a> Analysis<'a> {
             truth,
             single,
             variables,
+            paths: HashMap::new(),
             config,
             progress,
         })
@@ -530,6 +501,24 @@ impl<'a> Analysis<'a> {
         network: Network,
         reachable_destination: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
     ) -> Result<Vec<Route>> {
+        let mut routes = self.resolve(inbound, user, network, reachable_destination)?;
+        for route in &mut routes {
+            if let Destination::Inbound(uuid) = route.destination
+                && !self.reaches(uuid, network, reachable_destination)?
+            {
+                route.destination = Destination::Block;
+            }
+        }
+        Ok(routes)
+    }
+
+    fn resolve(
+        &mut self,
+        inbound: &Inbound,
+        user: Option<Uuid>,
+        network: Network,
+        reachable_destination: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
+    ) -> Result<Vec<Route>> {
         if let Some(destination) = inbound.protocol.destination() {
             return Ok(
                 if reachable_destination(
@@ -576,7 +565,15 @@ impl<'a> Analysis<'a> {
                     )
                     .into());
                 }
-                if !reachable_destination(
+                if let Destination::Inbound(uuid) = route.destination {
+                    if !self.config.inbounds.iter().any(|value| value.uuid == uuid) {
+                        return Err(format!(
+                            "分流规则 {} 指向不存在的入站：{uuid}",
+                            location(&route.path)
+                        )
+                        .into());
+                    }
+                } else if !reachable_destination(
                     inbound.core,
                     route.destination,
                     network,
@@ -589,6 +586,99 @@ impl<'a> Analysis<'a> {
             }
         }
         Ok(reachable)
+    }
+
+    fn reaches(
+        &mut self,
+        uuid: Uuid,
+        network: Network,
+        reachable: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
+    ) -> Result<bool> {
+        if let Some(&result) = self.paths.get(&(uuid, network)) {
+            return Ok(result);
+        }
+        let mut pending = vec![(uuid, network)];
+        let mut seen = HashSet::new();
+        let mut result = false;
+        'search: while let Some((uuid, wire)) = pending.pop() {
+            self.progress.check()?;
+            if !seen.insert((uuid, wire)) {
+                continue;
+            }
+            let inbound = self
+                .config
+                .inbounds
+                .iter()
+                .find(|value| value.uuid == uuid)
+                .ok_or_else(|| format!("找不到入站：{uuid}"))?;
+            if !self.enabled(inbound, reachable)? {
+                continue;
+            }
+            let users: Vec<_> = if inbound.users && inbound.protocol.users() {
+                self.config
+                    .users
+                    .iter()
+                    .map(|user| Some(user.uuid))
+                    .collect()
+            } else {
+                vec![None]
+            };
+            for network in [Network::Tcp, Network::Udp] {
+                if !network.enabled(inbound)
+                    || !crate::native::listener::accepts(inbound, wire, network)
+                {
+                    continue;
+                }
+                for &user in &users {
+                    for route in self.resolve(inbound, user, network, reachable)? {
+                        match route.destination {
+                            Destination::Block => {}
+                            Destination::Inbound(uuid) => pending.push((uuid, network)),
+                            Destination::Direct | Destination::Outbound(_) => {
+                                result = true;
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.paths.insert((uuid, network), result);
+        Ok(result)
+    }
+
+    fn enabled(
+        &self,
+        inbound: &Inbound,
+        reachable: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
+    ) -> Result<bool> {
+        if inbound.users && self.config.users.is_empty() && inbound.protocol.users() {
+            return Ok(false);
+        }
+        if inbound.tls.enabled && inbound.tls.reality.enabled {
+            match inbound.tls.reality.outbound {
+                Destination::Block | Destination::Inbound(_) => return Ok(false),
+                Destination::Outbound(uuid)
+                    if !self
+                        .config
+                        .outbounds
+                        .iter()
+                        .any(|outbound| outbound.uuid == uuid)
+                        || !reachable(
+                            inbound.core,
+                            Destination::Outbound(uuid),
+                            Network::Tcp,
+                            Payload::Proxy,
+                        )? =>
+                {
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+        Ok(
+            !matches!(&inbound.protocol, Protocol::Mixed(protocol) if !protocol.http.enabled && !protocol.socks.enabled),
+        )
     }
 
     fn outcome(&mut self, routes: &[Route], destination: Destination) -> Lit {

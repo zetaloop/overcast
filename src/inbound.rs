@@ -593,9 +593,21 @@ fn edit(
                 "outbound" => {
                     let current = inbound.protocol.destination().unwrap();
                     let progress = crate::progress::Progress::default();
-                    crate::route::destination(screen, store, current, |config, destination| {
-                        crate::native::available(store, config, &inbound, destination, &progress)
-                    })
+                    crate::route::destination(
+                        screen,
+                        store,
+                        current,
+                        false,
+                        |config, destination| {
+                            crate::native::available(
+                                store,
+                                config,
+                                &inbound,
+                                destination,
+                                &progress,
+                            )
+                        },
+                    )
                     .and_then(|selection| {
                         if let Some(destination) = selection {
                             let mut edited = inbound.clone();
@@ -726,6 +738,11 @@ fn edit(
                         |progress| {
                             store.update(progress, |config| {
                                 config.inbounds.retain(|value| value.uuid != inbound.uuid);
+                                for rule in &mut config.rules {
+                                    rule.remove_destination(crate::route::Destination::Inbound(
+                                        inbound.uuid,
+                                    ));
+                                }
                                 Ok(())
                             })
                         },

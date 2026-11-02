@@ -415,7 +415,9 @@ fn edit(
                                     .outbounds
                                     .retain(|current| current.uuid != outbound.uuid);
                                 for rule in &mut config.rules {
-                                    rule.remove_outbound(outbound.uuid);
+                                    rule.remove_destination(crate::route::Destination::Outbound(
+                                        outbound.uuid,
+                                    ));
                                 }
                                 for inbound in &mut config.inbounds {
                                     if let crate::inbound::Protocol::Forward(value) =

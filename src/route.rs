@@ -45,12 +45,12 @@ impl Rule {
         }
     }
 
-    pub fn remove_outbound(&mut self, uuid: Uuid) {
-        if self.destination == Destination::Outbound(uuid) {
+    pub fn remove_destination(&mut self, destination: Destination) {
+        if self.destination == destination {
             self.destination = Destination::Block;
         }
         for child in &mut self.children {
-            child.remove_outbound(uuid);
+            child.remove_destination(destination);
         }
     }
 }
@@ -62,6 +62,7 @@ pub enum Destination {
     #[default]
     Block,
     Outbound(Uuid),
+    Inbound(Uuid),
 }
 
 impl Destination {
@@ -74,6 +75,14 @@ impl Destination {
                 .iter()
                 .find(|outbound| outbound.uuid == uuid)
                 .map_or_else(|| uuid.to_string(), |outbound| outbound.name.clone()),
+            Self::Inbound(uuid) => format!(
+                "入口 / {}",
+                config
+                    .inbounds
+                    .iter()
+                    .find(|inbound| inbound.uuid == uuid)
+                    .map_or_else(|| uuid.to_string(), |inbound| inbound.name.clone())
+            ),
         }
     }
 
@@ -82,6 +91,7 @@ impl Destination {
             Self::Direct => "direct".to_owned(),
             Self::Block => "block".to_owned(),
             Self::Outbound(uuid) => uuid.to_string(),
+            Self::Inbound(uuid) => format!("inbound:{uuid}"),
         }
     }
 }
@@ -102,7 +112,7 @@ impl Value for Destination {
         apply: form::Apply<'_, Self>,
         _: bool,
     ) -> Result<bool> {
-        match destination(screen, &Store::open()?, *self, |_, _| Ok(true))? {
+        match destination(screen, &Store::open()?, *self, false, |_, _| Ok(true))? {
             Some(value) => form::set(screen, self, value, &apply),
             None => Ok(false),
         }
@@ -310,6 +320,7 @@ pub(crate) fn destination(
     screen: &mut Screen,
     store: &Store,
     current: Destination,
+    routing: bool,
     available: impl Fn(&Config, Destination) -> Result<bool>,
 ) -> Result<Option<Destination>> {
     loop {
@@ -321,6 +332,14 @@ pub(crate) fn destination(
                 .iter()
                 .map(|outbound| Destination::Outbound(outbound.uuid)),
         );
+        if routing {
+            values.extend(
+                config
+                    .inbounds
+                    .iter()
+                    .map(|inbound| Destination::Inbound(inbound.uuid)),
+            );
+        }
         let mut candidates = Vec::new();
         for value in values {
             if available(&config, value)? {
@@ -347,12 +366,36 @@ pub(crate) fn destination(
                 {
                     item.value = outbound.summary();
                 }
+                if let Destination::Inbound(uuid) = value
+                    && let Some(inbound) =
+                        config.inbounds.iter().find(|inbound| inbound.uuid == *uuid)
+                {
+                    item.value = inbound.summary();
+                }
                 item
             })
             .collect();
         items.push(Item::new("new", "创建出站".stylized()));
-        match screen.search("选择出站", &items, selected)? {
+        if routing {
+            items.push(Item::new("inbound", "创建入站".stylized()));
+        }
+        let menu = Menu {
+            title: if routing {
+                "选择去向"
+            } else {
+                "选择出站"
+            },
+            heading: "",
+            items: &items,
+            help: "",
+        };
+        match screen.search(menu.title, &items, selected)? {
             Some(index) if index < values.len() => return Ok(Some(values[index])),
+            Some(index) if items[index].key == "inbound" => {
+                if let Some(uuid) = inbound::create(screen, store, &menu, index)? {
+                    return Ok(Some(Destination::Inbound(uuid)));
+                }
+            }
             Some(_) => {
                 if let Some(uuid) = outbound::create(screen, store)? {
                     let value = Destination::Outbound(uuid);
@@ -601,16 +644,19 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
             Action::Back => return Ok(Some(path)),
             Action::Select => match items[selected].key.as_str() {
                 "condition" => condition(screen, store, &path),
-                "destination" => destination(screen, store, rule.destination, |_, _| Ok(true))
-                    .and_then(|destination| match destination {
-                        Some(destination) => screen.work(menu.title, "", |progress| {
-                            store.update(progress, |config| {
-                                get_mut(&mut config.rules, &path)?.destination = destination;
-                                Ok(())
-                            })
-                        }),
-                        None => Ok(()),
-                    }),
+                "destination" => {
+                    destination(screen, store, rule.destination, true, |_, _| Ok(true)).and_then(
+                        |destination| match destination {
+                            Some(destination) => screen.work(menu.title, "", |progress| {
+                                store.update(progress, |config| {
+                                    get_mut(&mut config.rules, &path)?.destination = destination;
+                                    Ok(())
+                                })
+                            }),
+                            None => Ok(()),
+                        },
+                    )
+                }
                 "new" => {
                     let index = screen.work(menu.title, "", |progress| {
                         store.update(progress, |config| {
