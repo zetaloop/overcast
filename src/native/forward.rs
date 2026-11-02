@@ -73,6 +73,7 @@ pub fn networks(source: &Connection) -> Result<[bool; 2]> {
             }
             (&value.tls, datagrams)
         }
+        Connection::Forward(value) => (&value.tls, true),
     };
     let udp = source
         .transport()

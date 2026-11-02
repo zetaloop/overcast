@@ -31,6 +31,9 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
     let mut query = Map::new();
     let (scheme, user) = match source {
         Connection::Direct(_) => unreachable!(),
+        Connection::Forward(_) => {
+            return Err("此连接使用连接路径 JSON 分享".into());
+        }
         Connection::Http(value) => {
             if !value.transport.is_default()
                 || !matches!(value.http.version, HttpVersion::Auto | HttpVersion::Http1)

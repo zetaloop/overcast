@@ -165,7 +165,7 @@ impl Kind {
             Self::Vmess => Protocol::Vmess(crate::vmess::Server::default()),
             Self::Trojan => Protocol::Trojan(crate::trojan::Server::default()),
             Self::Shadowsocks => Protocol::Shadowsocks(crate::shadowsocks::Server::default()),
-            Self::Forward => Protocol::Forward(crate::forward::Forward::default()),
+            Self::Forward => Protocol::Forward(crate::forward::Server::default()),
         }
     }
 }
@@ -178,7 +178,7 @@ pub enum Protocol {
     Vmess(crate::vmess::Server),
     Trojan(crate::trojan::Server),
     Shadowsocks(crate::shadowsocks::Server),
-    Forward(crate::forward::Forward),
+    Forward(crate::forward::Server),
 }
 
 impl Protocol {

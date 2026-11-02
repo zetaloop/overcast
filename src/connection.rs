@@ -32,9 +32,23 @@ pub enum Connection {
     Vmess(crate::vmess::Client),
     Trojan(crate::trojan::Client),
     Shadowsocks(crate::shadowsocks::Client),
+    Forward(crate::forward::Client),
 }
 
 impl Connection {
+    pub fn core(&self) -> Core {
+        match self {
+            Self::Direct(value) => value.core,
+            Self::Http(value) => value.proxy.core,
+            Self::Socks(value) => value.proxy.core,
+            Self::Vless(value) => value.core,
+            Self::Vmess(value) => value.core,
+            Self::Trojan(value) => value.core,
+            Self::Shadowsocks(value) => value.core,
+            Self::Forward(value) => value.core,
+        }
+    }
+
     pub fn server(&self) -> Option<(&str, u16)> {
         Some(match self {
             Self::Direct(_) => return None,
@@ -44,6 +58,7 @@ impl Connection {
             Self::Vmess(value) => (&value.server, value.port),
             Self::Trojan(value) => (&value.server, value.port),
             Self::Shadowsocks(value) => (&value.server, value.port),
+            Self::Forward(value) => (&value.server, value.port),
         })
     }
 
@@ -56,6 +71,7 @@ impl Connection {
             Self::Vmess(value) => &value.network,
             Self::Trojan(value) => &value.network,
             Self::Shadowsocks(value) => &value.network,
+            Self::Forward(value) => &value.network,
         }
     }
 
@@ -180,6 +196,7 @@ impl Connection {
             Self::Vmess(value) => &value.name,
             Self::Trojan(value) => &value.name,
             Self::Shadowsocks(value) => &value.name,
+            Self::Forward(value) => &value.name,
         }
     }
 
@@ -192,6 +209,7 @@ impl Connection {
             Self::Vmess(value) => Some(&value.transport),
             Self::Trojan(value) => Some(&value.transport),
             Self::Shadowsocks(value) => Some(&value.transport),
+            Self::Forward(value) => Some(&value.transport),
         }
     }
 
@@ -204,6 +222,7 @@ impl Connection {
             Self::Vmess(value) => value.multiplex.as_ref(),
             Self::Trojan(value) => value.multiplex.as_ref(),
             Self::Shadowsocks(value) => value.multiplex.as_ref(),
+            Self::Forward(_) => None,
         }
     }
 
@@ -229,6 +248,7 @@ impl Connection {
             Self::Shadowsocks(value) => {
                 format!("Shadowsocks {}", address(&value.server, value.port))
             }
+            Self::Forward(value) => format!("TCP/UDP {}", address(&value.server, value.port)),
         }
     }
 
@@ -293,6 +313,13 @@ impl Connection {
                 Rc::new(move |value, screen| apply(&Self::Shadowsocks(value.clone()), screen)),
                 creating,
             ),
+            Self::Forward(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Forward(value.clone()), screen)),
+                creating,
+            ),
         }
     }
 
@@ -328,6 +355,7 @@ impl Connection {
                 value.shadowsocks.cipher.password(&value.password)?;
                 (value.server.as_str(), value.port)
             }
+            Self::Forward(value) => (value.server.as_str(), value.port),
         };
         if server.trim().is_empty() {
             return Err("连接地址不能为空".into());
@@ -350,6 +378,7 @@ pub fn create(
         Item::new("vmess", "VMess".stylized()),
         Item::new("trojan", "Trojan".stylized()),
         Item::new("shadowsocks", "Shadowsocks".stylized()),
+        Item::new("forward", "TCP/UDP 转发".stylized()),
         Item::new("direct", "直连".stylized()),
         Item::new("back", "返回".stylized()),
     ];
@@ -371,7 +400,8 @@ pub fn create(
                     3 => Connection::Vmess(crate::vmess::Client::default()),
                     4 => Connection::Trojan(crate::trojan::Client::default()),
                     5 => Connection::Shadowsocks(crate::shadowsocks::Client::default()),
-                    6 => Connection::Direct(Direct::default()),
+                    6 => Connection::Forward(crate::forward::Client::default()),
+                    7 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
                 let accepted = connection.form(screen, apply, true)?;

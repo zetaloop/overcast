@@ -18,6 +18,9 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
+    if let Connection::Forward(_) = source {
+        return unsupported("Mihomo Direct 按请求目标发送数据");
+    }
     if !matches!(
         source,
         Connection::Vless(_)
@@ -38,6 +41,7 @@ pub fn outbound(
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("ss", None, &value.network),
+        Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     let mut options = Options::new(network)?;
@@ -49,9 +53,7 @@ pub fn outbound(
             ("tcp_multi_path", "mptcp"),
         ],
     );
-    if let Some(value) = &network.tcp_fast_open
-        && let FastOpen::Enabled(value) = value
-    {
+    if let Some(FastOpen::Enabled(value)) = &network.tcp_fast_open {
         options.take("tcp_fast_open");
         output.insert("tfo".to_owned(), json!(value));
     }
@@ -85,6 +87,7 @@ pub fn outbound(
         }
     }
     let tls = match source {
+        Connection::Forward(_) => unreachable!(),
         Connection::Shadowsocks(value) => {
             if value.tls.enabled || !value.transport.is_default() {
                 return unsupported("Mihomo Shadowsocks 通过插件配置传输封装");
@@ -618,7 +621,7 @@ pub fn client_tls(
 ) -> Result<()> {
     let v2ray = matches!(kind, "vless" | "vmess" | "trojan");
     if source.reality.enabled && !v2ray {
-        return unsupported("Mihomo HTTP/SOCKS 出站没有 REALITY 配置");
+        return unsupported(format!("Mihomo {kind} 出站没有 REALITY 配置"));
     }
     let mut options = Options::new(source)?;
     options.take("reality");
@@ -709,7 +712,7 @@ pub fn client_tls(
     options.take("ech");
     if source.ech.enabled {
         if !v2ray {
-            return unsupported("Mihomo HTTP/SOCKS 出站没有 ECH 配置");
+            return unsupported(format!("Mihomo {kind} 出站没有 ECH 配置"));
         }
         let mut ech = Map::from_iter([("enable".to_owned(), json!(true))]);
         if let Some(file) = &source.ech.config_file {

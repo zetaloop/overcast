@@ -22,6 +22,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
+        Connection::Forward(value) => ("freedom", None, &value.network),
     };
     let mut output = Map::from_iter([("protocol".to_owned(), json!(kind))]);
     if let Some(multiplex) = source.multiplex() {
@@ -61,6 +62,14 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Direct(_) => {
             settings.insert("finalRules".to_owned(), json!([{"action": "allow"}]));
             None
+        }
+        Connection::Forward(value) => {
+            settings.insert(
+                "redirect".to_owned(),
+                json!(connection::address(&value.server, value.port)),
+            );
+            settings.insert("finalRules".to_owned(), json!([{"action": "allow"}]));
+            Some(&value.tls)
         }
         Connection::Http(value) => {
             let mut options = Options::new(&value.http)?;

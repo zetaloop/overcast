@@ -789,15 +789,7 @@ impl Builder<'_> {
             if chains.is_empty() {
                 break;
             }
-            let requested = match connection {
-                Connection::Direct(value) => value.core,
-                Connection::Http(value) => value.proxy.core,
-                Connection::Socks(value) => value.proxy.core,
-                Connection::Vless(value) => value.core,
-                Connection::Vmess(value) => value.core,
-                Connection::Trojan(value) => value.core,
-                Connection::Shadowsocks(value) => value.core,
-            };
+            let requested = connection.core();
             let mut candidates = vec![preferred];
             candidates.extend(
                 [Core::Xray, Core::SingBox, Core::Mihomo]
@@ -869,17 +861,17 @@ impl Builder<'_> {
             let mut next: Vec<Chain> = Vec::new();
             for chain in &chains {
                 for node in &nodes {
-                    let networks = if forward {
-                        let available = forward::networks(connection)?;
+                    let available = if forward {
+                        let supported = forward::networks(connection)?;
                         [
-                            chain.networks[0] && available[0],
-                            chain.networks[1] && available[1],
+                            chain.networks[0] && supported[0],
+                            chain.networks[1] && supported[1],
                         ]
                     } else {
                         networks(connection, node.core, chain.networks)?
                     };
-                    if networks == [false, false]
-                        || next.iter().any(|chain| chain.networks == networks)
+                    if available == [false, false]
+                        || next.iter().any(|chain| chain.networks == available)
                     {
                         continue;
                     }
@@ -887,7 +879,7 @@ impl Builder<'_> {
                     path.push(Rc::clone(node));
                     next.push(Chain {
                         nodes: path,
-                        networks,
+                        networks: available,
                     });
                 }
             }
@@ -1159,6 +1151,7 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
     let multiplex = source.multiplex().is_some_and(|mux| !mux.tcp_only);
     Ok(match source {
         Connection::Direct(_) => parent,
+        Connection::Forward(value) => [value.transport.supported(&value.tls, parent), parent[1]],
         Connection::Http(value) => {
             let transport =
                 if core == Core::SingBox && value.http.version == connection::HttpVersion::Http3 {

@@ -14,6 +14,9 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
+    if matches!(source, Connection::Forward(_)) {
+        return unsupported("sing-box 固定目标使用路由地址改写");
+    }
     if source.multiplex().is_some()
         && !matches!(
             source,
@@ -45,6 +48,7 @@ pub fn outbound(
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
+        Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     dialer(network, &mut output)?;
@@ -60,6 +64,7 @@ pub fn outbound(
     }
     match source {
         Connection::Direct(_) => {}
+        Connection::Forward(_) => unreachable!(),
         Connection::Http(value) => {
             let mut options = Options::new(&value.http)?;
             options.take("version");
