@@ -4,12 +4,12 @@ mod forward;
 mod listener;
 mod mihomo;
 mod multiplex;
-mod options;
+pub(crate) mod options;
 mod reality;
 mod routing;
 pub(crate) mod shadowsocks;
 mod singbox;
-mod transport;
+pub(crate) mod transport;
 mod xray;
 
 use std::{
@@ -1148,7 +1148,7 @@ fn hashes(values: &[String]) -> Result<Vec<String>> {
         .collect()
 }
 
-fn hex_hashes(values: &[String]) -> Result<Vec<String>> {
+pub(crate) fn hex_hashes(values: &[String]) -> Result<Vec<String>> {
     values
         .iter()
         .map(|value| {

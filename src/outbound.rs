@@ -278,7 +278,7 @@ fn edit(
             title: &title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nC 复制连接\nDel 删除连接\nAlt+↑↓ 移动\nEsc 返回",
+            help: "方向键 选择\n回车键 编辑\nC 复制连接\nL 分享链接\nDel 删除连接\nAlt+↑↓ 移动\nEsc 返回",
         };
         let action = screen.select(&menu, &mut selected, &notice)?;
         let connection = selected
@@ -316,6 +316,14 @@ fn edit(
                 } else {
                     outbound.selection().copy(screen)
                 }
+            }
+            (Action::Key(key), Some(index)) if matches!(key.code, KeyCode::Char('l' | 'L')) => {
+                let connection = &outbound.connections[index];
+                screen.copy(&crate::share::link(
+                    connection,
+                    &connection.summary(),
+                    store,
+                )?)
             }
             (Action::Key(key), Some(index)) if key.code == KeyCode::Delete => {
                 let mut edited = outbound.clone();

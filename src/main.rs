@@ -20,6 +20,7 @@ mod reality;
 mod resource;
 mod route;
 mod shadowsocks;
+mod share;
 mod target;
 mod transport;
 mod trojan;

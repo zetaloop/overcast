@@ -1138,7 +1138,7 @@ fn duration(text: &str, unit: Duration) -> Result<i64> {
     Ok(i64::try_from(if negative { -value } else { value })?)
 }
 
-fn early_data(path: &str, size: u32) -> String {
+pub(crate) fn early_data(path: &str, size: u32) -> String {
     let (path, fragment) = path
         .split_once('#')
         .map_or((path, None), |(path, fragment)| (path, Some(fragment)));

@@ -12,7 +12,7 @@ use crate::{
     Result,
     connection::{HttpVersion, Tls},
     transport::{
-        Download, Grpc, Header, Http, HttpUpgrade, Kcp, Pool, Transport, WebSocket, XHttp,
+        Download, Grpc, Header, Http, HttpUpgrade, Kcp, Pool, Quic, Transport, WebSocket, XHttp,
         XHttpOptions,
     },
     vless::{Client, Flow},
@@ -320,36 +320,37 @@ pub fn tls(query: &mut BTreeMap<String, String>, default: bool) -> Result<Tls> {
 }
 
 pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
+    let mask = query
+        .remove("fm")
+        .map(|value| serde_json::from_str::<Map<String, Value>>(&value))
+        .transpose()?;
     let kind = query.remove("type").unwrap_or_else(|| "tcp".to_owned());
-    match kind.as_str() {
+    let value: Result<Transport> = match kind.as_str() {
         "tcp" | "raw" => {
             if query.get("headerType").is_some_and(|value| value == "http") {
                 query.remove("headerType");
-                return Ok(Transport::Http(Http {
+                Ok(Transport::Http(Http {
                     version: HttpVersion::Http1,
                     host: query.remove("host").map_or_else(Vec::new, |value| {
                         value.split(',').map(str::to_owned).collect()
                     }),
                     path: query.remove("path"),
                     ..Http::default()
-                }));
+                }))
+            } else {
+                if query
+                    .get("headerType")
+                    .is_none_or(|value| value == "none" || value.is_empty())
+                {
+                    query.remove("headerType");
+                    query.remove("host");
+                    query.remove("path");
+                }
+                Ok(Transport::Default)
             }
-            if query
-                .get("headerType")
-                .is_none_or(|value| value == "none" || value.is_empty())
-            {
-                query.remove("headerType");
-                query.remove("host");
-                query.remove("path");
-            }
-            Ok(Transport::Default)
         }
         "http" | "h2" => Ok(Transport::Http(Http {
-            version: if kind == "h2" {
-                HttpVersion::Http2
-            } else {
-                HttpVersion::Auto
-            },
+            version: HttpVersion::Http2,
             host: query.remove("host").map_or_else(Vec::new, |value| {
                 value.split(',').map(str::to_owned).collect()
             }),
@@ -364,6 +365,10 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
             };
             Ok(Transport::Kcp(Kcp {
                 mtu: query.remove("mtu").map(|value| value.parse()).transpose()?,
+                interval: query
+                    .remove("tti")
+                    .map(|value| value.parse::<u32>().map(|value| format!("{value}ms")))
+                    .transpose()?,
                 seed: query.remove("seed"),
                 domain: query.remove("host"),
                 header,
@@ -387,34 +392,18 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
                 path: query.remove("path"),
                 ..WebSocket::default()
             };
-            if let Some(path) = &value.path
-                && let Some((prefix, query)) = path.split_once('?')
-            {
-                let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
-                if let Some((_, size)) = pairs.iter().find(|(key, _)| key == "ed") {
-                    value.early_data = Some(size.parse()?);
-                    let query = url::form_urlencoded::Serializer::new(String::new())
-                        .extend_pairs(
-                            pairs
-                                .iter()
-                                .filter(|(key, _)| key != "ed")
-                                .map(|(key, value)| (key.as_ref(), value.as_ref())),
-                        )
-                        .finish();
-                    value.path = Some(if query.is_empty() {
-                        prefix.to_owned()
-                    } else {
-                        format!("{prefix}?{query}")
-                    });
-                }
-            }
+            value.early_data = early_data(&mut value.path)?;
             Ok(Transport::WebSocket(value))
         }
-        "httpupgrade" => Ok(Transport::HttpUpgrade(HttpUpgrade {
-            host: query.remove("host"),
-            path: query.remove("path"),
-            ..HttpUpgrade::default()
-        })),
+        "httpupgrade" => {
+            let mut value = HttpUpgrade {
+                host: query.remove("host"),
+                path: query.remove("path"),
+                ..HttpUpgrade::default()
+            };
+            value.early_data = early_data(&mut value.path)?.map(|value| value != 0);
+            Ok(Transport::HttpUpgrade(value))
+        }
         "grpc" => {
             let multi_mode = match query.remove("mode").as_deref() {
                 None | Some("" | "gun") => false,
@@ -447,7 +436,145 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
             Ok(Transport::XHttp(Box::new(value)))
         }
         _ => Err(format!("无法识别传输类型：{kind}").into()),
+    };
+    let mut value = value?;
+    if let Some(mask) = mask {
+        finalmask(&mut value, mask)?;
     }
+    Ok(value)
+}
+
+fn early_data(path: &mut Option<String>) -> Result<Option<u32>> {
+    let Some(value) = path.as_deref() else {
+        return Ok(None);
+    };
+    let (value, fragment) = value
+        .split_once('#')
+        .map_or((value, None), |(value, fragment)| (value, Some(fragment)));
+    let Some((prefix, query)) = value.split_once('?') else {
+        return Ok(None);
+    };
+    let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
+    let Some((_, size)) = pairs.iter().find(|(key, _)| key == "ed") else {
+        return Ok(None);
+    };
+    let size = size.parse()?;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(
+            pairs
+                .iter()
+                .filter(|(key, _)| key != "ed")
+                .map(|(key, value)| (key.as_ref(), value.as_ref())),
+        )
+        .finish();
+    let mut value = if query.is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}?{query}")
+    };
+    if let Some(fragment) = fragment {
+        value.push('#');
+        value.push_str(fragment);
+    }
+    *path = Some(value);
+    Ok(Some(size))
+}
+
+fn finalmask(transport: &mut Transport, mut values: Map<String, Value>) -> Result<()> {
+    if let Transport::XHttp(value) = transport
+        && let Some(params) = values.remove("quicParams")
+    {
+        value.quic = quic(serde_json::from_value(params)?)?;
+    }
+    if let Transport::Kcp(value) = transport
+        && let Some(masks) = values.remove("udp")
+    {
+        value.checksum = false;
+        value.seed = None;
+        value.header = Header::None;
+        value.domain = None;
+        for mut mask in serde_json::from_value::<Vec<Map<String, Value>>>(masks)? {
+            if mask.remove("type").as_ref() != Some(&json!("mkcp-legacy")) {
+                return Err("当前 KCP 参数无法表达此 Finalmask".into());
+            }
+            let mut settings: Map<String, Value> = mask
+                .remove("settings")
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default();
+            if let Some(header) = settings.remove("header") {
+                if value.header != Header::None {
+                    return Err("当前 KCP 参数使用单个数据包头".into());
+                }
+                value.header = if header == "wechat" {
+                    Header::WechatVideo
+                } else {
+                    serde_json::from_value(header)?
+                };
+                value.domain = settings
+                    .remove("value")
+                    .map(serde_json::from_value)
+                    .transpose()?;
+            } else if let Some(seed) = settings.remove("value") {
+                if value.seed.is_some() {
+                    return Err("当前 KCP 参数使用单个种子".into());
+                }
+                value.seed = Some(serde_json::from_value(seed)?);
+            } else {
+                if value.checksum {
+                    return Err("当前 KCP 参数使用单个校验层".into());
+                }
+                value.checksum = true;
+            }
+            remaining(mask.keys(), "Finalmask")?;
+            remaining(settings.keys(), "KCP Finalmask")?;
+        }
+    }
+    remaining(values.keys(), "Finalmask")
+}
+
+fn quic(mut values: Map<String, Value>) -> Result<Quic> {
+    let mut output = Map::new();
+    rename(
+        &mut values,
+        &mut output,
+        &[
+            ("congestion", "congestion"),
+            ("debug", "debug"),
+            ("bbrProfile", "bbr_profile"),
+            ("brutalUp", "upload_bandwidth"),
+            ("brutalDown", "download_bandwidth"),
+            ("initStreamReceiveWindow", "initial_stream_window"),
+            ("maxStreamReceiveWindow", "max_stream_window"),
+            ("initConnectionReceiveWindow", "initial_connection_window"),
+            ("maxConnectionReceiveWindow", "max_connection_window"),
+            ("maxIncomingStreams", "incoming_streams"),
+        ],
+    );
+    for (native, source) in [
+        ("brutalDisableLossCompensation", "loss_compensation"),
+        ("disablePathMTUDiscovery", "path_mtu_discovery"),
+        ("disableGSO", "gso"),
+        ("disableChromeParrot", "chrome_fingerprint"),
+        ("disableStatelessReset", "stateless_reset"),
+    ] {
+        if let Some(value) = values.remove(native) {
+            output.insert(
+                source.to_owned(),
+                json!(!serde_json::from_value::<bool>(value)?),
+            );
+        }
+    }
+    for (native, source) in [
+        ("keepAlivePeriod", "keep_alive"),
+        ("maxIdleTimeout", "idle_timeout"),
+    ] {
+        if let Some(value) = values.remove(native) {
+            output.insert(source.to_owned(), json!(range(value, "s")?));
+        }
+    }
+    remaining(values.keys(), "QUIC 参数")?;
+    Ok(serde_json::from_value(json!(output))?)
 }
 
 fn xhttp(mut extra: Map<String, Value>) -> Result<XHttp> {
@@ -481,6 +608,13 @@ fn xhttp(mut extra: Map<String, Value>) -> Result<XHttp> {
                 security_options(serde_json::from_value(settings)?, security == "reality")?;
         }
         download.tls.enabled = security == "tls" || security == "reality";
+        if let Some(mask) = stream.remove("finalmask") {
+            let mut mask: Map<String, Value> = serde_json::from_value(mask)?;
+            if let Some(params) = mask.remove("quicParams") {
+                download.quic = quic(serde_json::from_value(params)?)?;
+            }
+            remaining(mask.keys(), "XHTTP 下载 Finalmask")?;
+        }
         if security != "tls" && security != "reality" && security != "none" {
             return Err("无法识别 XHTTP 下载握手类型".into());
         }
@@ -503,6 +637,8 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Tls
             ("masterKeyLog", "key_log"),
             ("minVersion", "min_version"),
             ("maxVersion", "max_version"),
+            ("curvePreferences", "curves"),
+            ("enableSessionResumption", "session_resumption"),
         ],
     );
     if reality {
@@ -520,11 +656,77 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Tls
             ],
         );
         output.insert("reality".to_owned(), json!(options));
-    } else if let Some(insecure) = values.remove("allowInsecure") {
-        output.insert(
-            "verify_certificate".to_owned(),
-            json!(!serde_json::from_value::<bool>(insecure)?),
-        );
+    } else {
+        if let Some(insecure) = values.remove("allowInsecure") {
+            output.insert(
+                "verify_certificate".to_owned(),
+                json!(!serde_json::from_value::<bool>(insecure)?),
+            );
+        }
+        for (native, source, separator) in [
+            ("cipherSuites", "cipher_suites", ':'),
+            ("verifyPeerCertByName", "verify_names", ','),
+            ("pinnedPeerCertSha256", "certificate_sha256", ','),
+        ] {
+            if let Some(value) = values.remove(native) {
+                let value: String = serde_json::from_value(value)?;
+                output.insert(
+                    source.to_owned(),
+                    json!(
+                        value
+                            .split(separator)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
+        }
+        if let Some(value) = values.remove("disableSystemRoot") {
+            output.insert(
+                "system_roots".to_owned(),
+                json!(!serde_json::from_value::<bool>(value)?),
+            );
+        }
+        if let Some(value) = values.remove("useSystemCA") {
+            output.insert("system_roots".to_owned(), value);
+        }
+        if let Some(value) = values.remove("echConfigList") {
+            output.insert("ech".to_owned(), json!({"enabled": true, "config": value}));
+        }
+        if let Some(certificates) = values.remove("certificates") {
+            let mut trust = Vec::new();
+            for mut certificate in serde_json::from_value::<Vec<Map<String, Value>>>(certificates)?
+            {
+                let usage = certificate.remove("usage");
+                let text = certificate
+                    .remove("certificate")
+                    .map(serde_json::from_value::<Vec<String>>)
+                    .transpose()?
+                    .unwrap_or_default();
+                if usage.as_ref() == Some(&json!("verify")) {
+                    trust.extend(text);
+                } else if usage.is_none() || usage.as_ref() == Some(&json!("encipherment")) {
+                    if output.contains_key("client_certificate") {
+                        return Err("XHTTP 下载连接使用一组客户端证书".into());
+                    }
+                    if !text.is_empty() {
+                        output.insert("client_certificate".to_owned(), json!(text.join("\n")));
+                    }
+                    if let Some(key) = certificate.remove("key") {
+                        output.insert(
+                            "client_key".to_owned(),
+                            json!(serde_json::from_value::<Vec<String>>(key)?.join("\n")),
+                        );
+                    }
+                } else {
+                    return Err("无法识别 XHTTP 下载证书用途".into());
+                }
+                remaining(certificate.keys(), "XHTTP 下载证书")?;
+            }
+            if !trust.is_empty() {
+                output.insert("certificates".to_owned(), json!(trust));
+            }
+        }
     }
     remaining(values.keys(), "XHTTP 下载握手")?;
     Ok(serde_json::from_value(json!(output))?)
