@@ -32,14 +32,14 @@ pub enum Component {
     Caddy,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub preview: bool,
     pub installed: Option<Installed>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Installed {
     pub tag: String,
@@ -57,7 +57,7 @@ struct Package<'a> {
 impl Component {
     const ALL: [Self; 4] = [Self::Xray, Self::SingBox, Self::Mihomo, Self::Caddy];
 
-    fn key(self) -> &'static str {
+    pub fn key(self) -> &'static str {
         match self {
             Self::Xray => "xray",
             Self::SingBox => "sing-box",
@@ -66,7 +66,7 @@ impl Component {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Xray => "Xray",
             Self::SingBox => "sing-box",
@@ -86,6 +86,32 @@ impl Component {
 
     fn binary(self) -> String {
         format!("{}{}", self.key(), env::consts::EXE_SUFFIX)
+    }
+
+    pub fn program(self, store: &Store, settings: &Settings) -> Result<PathBuf> {
+        let installed = settings
+            .installed
+            .as_ref()
+            .ok_or_else(|| format!("{} 尚未安装", self.name()))?;
+        Ok(self
+            .directory(store, &installed.tag)?
+            .join(installed.asset.to_string())
+            .join(&installed.path))
+    }
+
+    pub fn ensure(self, store: &Store, settings: &mut Settings, progress: &Progress) -> Result<()> {
+        if settings.installed.is_some() && self.program(store, settings)?.try_exists()? {
+            return Ok(());
+        }
+        let client = resource::client();
+        let release = self.release(
+            &client,
+            settings.installed.as_ref().map(|value| value.tag.as_str()),
+            settings.preview,
+            progress,
+        )?;
+        settings.installed = Some(self.install(store, &client, &release, progress)?);
+        Ok(())
     }
 
     fn directory(self, store: &Store, version: &str) -> Result<PathBuf> {
@@ -537,7 +563,10 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                 item
             })
             .collect();
+        let mut running = Item::new("running", "运行服务".stylized());
+        running.marker = if config.running { "■" } else { "□" };
         items.extend([
+            running,
             Item::new("update", "更新已安装组件".stylized()),
             Item::new("back", "返回".stylized()),
         ]);
@@ -554,6 +583,21 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
         }
         let result = if let Some(component) = Component::ALL.get(selected) {
             edit(screen, store, &client, *component)
+        } else if items[selected].key == "running" {
+            screen.work(
+                if config.running {
+                    "停止服务"
+                } else {
+                    "启动服务"
+                },
+                "",
+                |progress| {
+                    store.update(progress, |config| {
+                        config.running = !config.running;
+                        Ok(())
+                    })
+                },
+            )
         } else if items[selected].key == "update" {
             screen.work("更新组件", "", |progress| {
                 let installed = thread::scope(|scope| {

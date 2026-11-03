@@ -22,6 +22,7 @@ pub mod progress;
 mod reality;
 mod resource;
 mod route;
+mod service;
 mod shadowsocks;
 mod share;
 mod target;
@@ -42,7 +43,11 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 fn run() -> Result<()> {
     let store = Store::open()?;
-    let mut screen = Screen::open(std::env::args().skip(1))?;
+    let mut args = std::env::args().skip(1).peekable();
+    if args.next_if_eq("--run").is_some() {
+        return service::run(store);
+    }
+    let mut screen = Screen::open(args)?;
     screen.aliases(&[
         ("help", &["about"]),
         ("version", &["about"]),

@@ -177,4 +177,20 @@ impl Progress {
         }
         Ok(())
     }
+
+    pub fn notify(&self) {
+        let _guard = self.wake.0.lock().expect("progress lock poisoned");
+        self.wake.1.notify_all();
+    }
+
+    pub fn until(&self, mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
+        let mut guard = self.wake.0.lock().expect("progress lock poisoned");
+        loop {
+            self.check()?;
+            if ready()? {
+                return Ok(());
+            }
+            guard = self.wake.1.wait(guard).expect("progress lock poisoned");
+        }
+    }
 }

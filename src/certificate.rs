@@ -1,10 +1,19 @@
-use std::{collections::BTreeSet, net::IpAddr, path::PathBuf, sync::LazyLock};
+use std::{
+    collections::BTreeSet,
+    fs,
+    io::ErrorKind,
+    net::IpAddr,
+    path::PathBuf,
+    sync::{Arc, LazyLock, Mutex},
+    time::SystemTime,
+};
 
 use ipnetwork::IpNetwork;
+use notify::{RecursiveMode, Watcher};
 use serde_json::{Value, json};
 use url::Host;
 
-use crate::{Result, config::Store, inbound::Inbound};
+use crate::{Result, config::Store, inbound::Inbound, progress::Progress};
 
 pub fn name(source: &Inbound) -> Result<String> {
     let value = source
@@ -72,6 +81,63 @@ pub fn paths(store: &Store, name: &str) -> (PathBuf, PathBuf) {
 
 pub fn root(store: &Store) -> PathBuf {
     store.directory.join("caddy/pki/authorities/local/root.crt")
+}
+
+pub fn wait(store: &Store, names: &BTreeSet<String>, progress: &Progress) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let failure = Arc::new(Mutex::new(None));
+    let error = failure.clone();
+    let changed = progress.clone();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        match event {
+            Ok(event) if event.kind.is_access() => return,
+            Ok(_) => {}
+            Err(value) => *error.lock().expect("certificate lock poisoned") = Some(value),
+        }
+        changed.notify();
+    })?;
+    for name in names {
+        let (certificate, _) = paths(store, name);
+        let directory = certificate.parent().unwrap();
+        store.create_dir(directory)?;
+        watcher.watch(directory, RecursiveMode::NonRecursive)?;
+    }
+    let step = progress.activity("准备证书");
+    progress.until(|| {
+        if let Some(error) = failure.lock().expect("certificate lock poisoned").take() {
+            return Err(error.into());
+        }
+        let mut pending = Vec::new();
+        let now = SystemTime::now();
+        for name in names {
+            let (certificate, key) = paths(store, name);
+            let bytes = match fs::read(&certificate) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    pending.push(name.as_str());
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let certificates = x509_cert::Certificate::load_pem_chain(&bytes)?;
+            let certificate = certificates
+                .first()
+                .ok_or_else(|| format!("证书文件为空：{}", certificate.display()))?;
+            let validity = certificate.tbs_certificate().validity();
+            if now < validity.not_before.to_system_time() {
+                return Err(format!("证书 {name} 从 {} 开始生效", validity.not_before).into());
+            }
+            if !key.try_exists()? || now >= validity.not_after.to_system_time() {
+                pending.push(name.as_str());
+            }
+        }
+        step.detail(pending.join("、"));
+        Ok(pending.is_empty())
+    })?;
+    step.finish(format!("{} 份证书", names.len()));
+    Ok(())
 }
 
 pub fn config(store: &Store, names: &BTreeSet<String>, port: u16) -> Value {

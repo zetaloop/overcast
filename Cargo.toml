@@ -17,6 +17,7 @@ ipnetwork = { version = "0.21.1", features = ["serde"] }
 maxminddb = "0.32.0"
 ml-dsa = "0.1.1"
 ml-kem = "0.3.4"
+notify = "8.2.1"
 percent-encoding = "2.3.2"
 prost = "0.14.4"
 regex-automata = "0.4.18"
@@ -34,10 +35,11 @@ url = "2.5.8"
 uuid = { version = "1.29.0", features = ["serde", "v4", "v5"] }
 varisat = "0.2.2"
 x25519-dalek = "3.0.0"
+x509-cert = "0.3.0"
 zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2"] }
 
 [target."cfg(unix)".dependencies]
-nix = { version = "0.31.3", features = ["sched", "user"] }
+nix = { version = "0.31.3", features = ["sched", "signal", "user"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Threading"] }
