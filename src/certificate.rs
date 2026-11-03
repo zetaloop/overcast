@@ -171,6 +171,12 @@ pub fn config(store: &Store, names: &BTreeSet<String>, port: u16) -> Value {
         "storage": {"module": "file_system", "root": store.directory.join("caddy")},
         "apps": {"tls": {"certificates": {"automate": names}, "automation": {"policies": policies}}},
     });
+    #[cfg(windows)]
+    {
+        output["logging"] = json!({"logs": {"default": {
+            "writer": {"output": "file", "filename": store.directory.join("logs/caddy.log")},
+        }}});
+    }
     if !local.is_empty() {
         output["apps"]["pki"] =
             json!({"certificate_authorities": {"local": {"install_trust": false}}});

@@ -42,11 +42,11 @@ use tui::{Action, Item, Menu, Screen};
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 fn run() -> Result<()> {
-    let store = Store::open()?;
     let mut args = std::env::args().skip(1).peekable();
     if args.next_if_eq("--run").is_some() {
-        return service::run(store);
+        return service::run(Store::open(args.next().map(Into::into))?);
     }
+    let store = Store::open(None)?;
     let mut screen = Screen::open(args)?;
     screen.aliases(&[
         ("help", &["about"]),

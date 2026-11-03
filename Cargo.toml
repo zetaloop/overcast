@@ -42,4 +42,5 @@ zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2
 nix = { version = "0.31.3", features = ["sched", "signal", "user"] }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Threading"] }
+windows-service = "0.8.1"
+windows-sys = { version = "0.61.2", features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Services", "Win32_System_Threading"] }

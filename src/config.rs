@@ -81,7 +81,7 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open() -> Result<Self> {
+    pub fn open(directory: Option<PathBuf>) -> Result<Self> {
         #[cfg(unix)]
         let account = match env::var("SUDO_UID") {
             Ok(uid) => {
@@ -105,10 +105,12 @@ impl Store {
         #[cfg(not(unix))]
         let home = env::home_dir();
 
-        let directory = absolute(match env::var_os("OVERCAST_HOME") {
-            Some(directory) => PathBuf::from(directory),
-            None => home.ok_or("无法确定账号的主目录")?.join(".overcast"),
-        })?;
+        let directory = absolute(
+            match directory.or_else(|| env::var_os("OVERCAST_HOME").map(PathBuf::from)) {
+                Some(directory) => directory,
+                None => home.ok_or("无法确定账号的主目录")?.join(".overcast"),
+            },
+        )?;
         #[cfg(unix)]
         let owner = if nix::unistd::geteuid().is_root() {
             let (uid, gid) = match fs::metadata(&directory) {

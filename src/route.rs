@@ -98,7 +98,7 @@ impl Destination {
 
 impl Value for Destination {
     fn text(&self) -> String {
-        match Store::open().and_then(|store| store.load()) {
+        match Store::open(None).and_then(|store| store.load()) {
             Ok(config) => self.name(&config),
             Err(error) => error.to_string(),
         }
@@ -112,7 +112,7 @@ impl Value for Destination {
         apply: form::Apply<'_, Self>,
         _: bool,
     ) -> Result<bool> {
-        match destination(screen, &Store::open()?, *self, false, |_, _| Ok(true))? {
+        match destination(screen, &Store::open(None)?, *self, false, |_, _| Ok(true))? {
             Some(value) => form::set(screen, self, value, &apply),
             None => Ok(false),
         }

@@ -1,4 +1,12 @@
+#[cfg(not(windows))]
 mod systemd;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(not(windows))]
+use systemd as platform;
+#[cfg(windows)]
+use windows as platform;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -266,18 +274,18 @@ fn switch(
         (false, false) => {}
         (true, false) => {
             let step = progress.activity("停止服务");
-            systemd::remove()?;
+            platform::remove()?;
             step.finish("已停止");
         }
         (false, true) => {
             let step = progress.activity("启动服务");
-            systemd::install(store)?;
+            platform::install(store)?;
             wait(store, target.id, progress)?;
             step.finish(format!("{} 个核心", target.units.len()));
         }
         (true, true) => {
             let step = progress.activity("应用服务");
-            systemd::reload()?;
+            platform::reload()?;
             wait(store, target.id, progress)?;
             step.finish(format!("{} 个核心", target.units.len()));
         }
@@ -310,29 +318,36 @@ fn wait(store: &Store, id: Uuid, progress: &Progress) -> Result<()> {
 }
 
 pub fn run(store: Store) -> Result<()> {
-    use nix::sys::signal::{SigSet, Signal};
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{SigSet, Signal};
 
-    let mut signals = SigSet::empty();
-    for signal in [Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT] {
-        signals.add(signal);
-    }
-    signals.thread_block()?;
-    let (sender, events) = mpsc::channel();
-    let progress = Progress::default();
-    let (notify, cancel) = (sender.clone(), progress.clone());
-    thread::spawn(move || {
-        while let Ok(signal) = signals.wait() {
-            if signal != Signal::SIGHUP {
-                cancel.cancel();
-                let _ = notify.send(Event::Stop);
-                return;
-            }
-            if notify.send(Event::Reload).is_err() {
-                return;
-            }
+        let mut signals = SigSet::empty();
+        for signal in [Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT] {
+            signals.add(signal);
         }
-    });
-    orchestrate(&store, sender, events, &progress)
+        signals.thread_block()?;
+        let (sender, events) = mpsc::channel();
+        let progress = Progress::default();
+        let (notify, cancel) = (sender.clone(), progress.clone());
+        thread::spawn(move || {
+            while let Ok(signal) = signals.wait() {
+                if signal != Signal::SIGHUP {
+                    cancel.cancel();
+                    let _ = notify.send(Event::Stop);
+                    return;
+                }
+                if notify.send(Event::Reload).is_err() {
+                    return;
+                }
+            }
+        });
+        orchestrate(&store, sender, events, &progress)
+    }
+    #[cfg(windows)]
+    {
+        windows::serve(store)
+    }
 }
 
 struct Process {
@@ -587,6 +602,7 @@ impl Orchestrator<'_> {
     }
 }
 
+#[cfg(unix)]
 fn isolate(command: &mut Command) {
     use nix::sys::signal::SigSet;
     use std::os::unix::process::CommandExt;
@@ -600,17 +616,36 @@ fn isolate(command: &mut Command) {
         });
     }
 }
+
+#[cfg(windows)]
+fn isolate(command: &mut Command) {
+    windows::isolate(command);
+}
+
+#[cfg(unix)]
 fn terminate(pid: u32) {
     let _ = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(pid as i32),
         nix::sys::signal::Signal::SIGTERM,
     );
 }
+
+#[cfg(windows)]
+fn terminate(pid: u32) {
+    windows::terminate(pid);
+}
+
+#[cfg(unix)]
 fn kill(pid: u32) {
     let _ = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(pid as i32),
         nix::sys::signal::Signal::SIGKILL,
     );
+}
+
+#[cfg(windows)]
+fn kill(pid: u32) {
+    windows::kill(pid);
 }
 
 fn log(store: &Store, message: &str) {
