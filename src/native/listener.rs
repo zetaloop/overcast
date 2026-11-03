@@ -15,10 +15,7 @@ use crate::{
     progress::Progress,
 };
 
-use super::{
-    binding::{Address, Binding},
-    certificate_name,
-};
+use super::binding::{Address, Binding};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Mode {
@@ -573,7 +570,8 @@ pub fn build(
                 )?;
                 if source.core != Core::Xray
                     && !source.tls.reality.enabled
-                    && certificate_name(&source) != certificate_name(&member.source)
+                    && crate::certificate::name(&source)?
+                        != crate::certificate::name(&member.source)?
                 {
                     return Err(conflict(&members, "这个核心的监听使用一组证书与私钥").into());
                 }

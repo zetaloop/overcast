@@ -1,3 +1,4 @@
+mod certificate;
 mod component;
 mod condition;
 mod config;

@@ -22,14 +22,14 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 use uuid::Uuid;
 
 use crate::{
-    Result,
+    Result, certificate,
+    component::Component,
     condition::Condition,
     config::{Config, Store},
     connection::{self, Connection},
@@ -60,7 +60,7 @@ pub struct State {
 
 #[derive(Deserialize, Serialize)]
 pub struct Instance {
-    pub core: Core,
+    pub component: Component,
     pub file: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
@@ -173,7 +173,32 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         .iter()
         .map(|listener| listener.binding.clone())
         .collect();
-    let mut certificates = BTreeSet::new();
+    let certificates: BTreeSet<_> = listeners
+        .iter()
+        .filter(|listener| listener.source.tls.enabled && !listener.source.tls.reality.enabled)
+        .flat_map(|listener| &listener.members)
+        .map(|member| certificate::name(graph.entries[member.entry].inbound))
+        .collect::<Result<_>>()?;
+    let caddy = if certificates.is_empty() {
+        None
+    } else {
+        if certificates.iter().any(|name| certificate::public(name)) {
+            let mut binding = binding::Binding::local(80, BTreeSet::from([graph::Network::Tcp]))?;
+            binding.address = binding::Address::Any;
+            if let Some(listener) = listeners
+                .iter()
+                .find(|listener| listener.binding.intersects(&binding))
+            {
+                return Err(format!(
+                    "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
+                    listener.source.name
+                )
+                .into());
+            }
+            builder.reserved.push(binding);
+        }
+        Some(builder.port("caddy", BTreeSet::from([graph::Network::Tcp]))?)
+    };
     let mut keys = config.keys.clone();
     reality::prepare(&listeners, &graph, &mut keys, progress)?;
     encryption::prepare(&listeners, &graph, &mut keys, progress)?;
@@ -268,14 +293,6 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 value.contains_key("fallback") || value.contains_key("fallback_for_alpn")
             });
         let service = builder.service(inbound.core, globals, BTreeMap::new());
-        if inbound.tls.enabled && !inbound.tls.reality.enabled {
-            certificates.extend(
-                listener
-                    .members
-                    .iter()
-                    .map(|member| certificate_name(graph.entries[member.entry].inbound).to_owned()),
-            );
-        }
         let mut tags = Vec::new();
         for (part, mut value) in values.into_iter().enumerate() {
             progress.check()?;
@@ -313,7 +330,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                             .map(|member| {
                                 certificate_paths(store, graph.entries[member.entry].inbound)
                             })
-                            .collect();
+                            .collect::<Result<_>>()?;
                         value.get_mut("streamSettings").unwrap()["tlsSettings"]["certificates"] = json!(
                             paths
                                 .into_iter()
@@ -611,7 +628,11 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
             Ok(())
         })?;
         state.instances.push(Instance {
-            core: service.core,
+            component: match service.core {
+                Core::Xray => Component::Xray,
+                Core::SingBox => Component::SingBox,
+                Core::Mihomo => Component::Mihomo,
+            },
             file,
             environment,
         });
@@ -628,12 +649,28 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
             fs::hard_link(directory.path().join(name), working.join(name))?;
         }
     }
+    if let Some(port) = caddy {
+        let working = directory.path().join("caddy");
+        store.create_dir(&working)?;
+        store.write(&working.join("config.json"), |file| {
+            serde_json::to_writer_pretty(
+                file,
+                &certificate::config(store, &state.certificates, port),
+            )?;
+            Ok(())
+        })?;
+        state.instances.push(Instance {
+            component: Component::Caddy,
+            file: "caddy/config.json".to_owned(),
+            environment: BTreeMap::new(),
+        });
+    }
     store.write(&directory.path().join("state.json"), |file| {
         serde_json::to_writer_pretty(file, &state)?;
         Ok(())
     })?;
     progress.check()?;
-    step.finish(format!("{} 个核心实例", state.instances.len()));
+    step.finish(format!("{} 个服务实例", state.instances.len()));
     Ok(Some(Prepared {
         id,
         directory,
@@ -1276,19 +1313,8 @@ fn path(store: &Store, value: &str) -> PathBuf {
     store.directory.join(value)
 }
 
-fn certificate_paths(store: &Store, inbound: &crate::inbound::Inbound) -> (PathBuf, PathBuf) {
-    let name = utf8_percent_encode(certificate_name(inbound), NON_ALPHANUMERIC).to_string();
-    let directory = store.directory.join("certificates").join(name);
-    (directory.join("certificate.pem"), directory.join("key.pem"))
-}
-
-fn certificate_name(inbound: &crate::inbound::Inbound) -> &str {
-    inbound
-        .tls
-        .server_name
-        .as_deref()
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&inbound.address)
+fn certificate_paths(store: &Store, inbound: &Inbound) -> Result<(PathBuf, PathBuf)> {
+    Ok(certificate::paths(store, &certificate::name(inbound)?))
 }
 
 fn pem(store: &Store, inline: &[String], files: &[String]) -> Result<Vec<String>> {

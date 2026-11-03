@@ -393,13 +393,7 @@ impl Builder<'_> {
         }
         let mut tls = connection::Tls {
             enabled: true,
-            server_name: Some(
-                source
-                    .tls
-                    .server_name
-                    .clone()
-                    .unwrap_or_else(|| source.address.clone()),
-            ),
+            server_name: Some(crate::certificate::name(source)?),
             alpn: source.tls.alpn.clone(),
             min_version: source.tls.min_version.clone(),
             max_version: source.tls.max_version.clone(),
@@ -412,6 +406,12 @@ impl Builder<'_> {
             tls.ech.config = Some(crate::ech::public(source, self.store)?);
         }
         if !source.tls.reality.enabled {
+            if !crate::certificate::public(tls.server_name.as_ref().unwrap()) {
+                tls.certificates
+                    .push(std::fs::read_to_string(crate::certificate::root(
+                        self.store,
+                    ))?);
+            }
             return Ok(vec![tls]);
         }
         let keys = self

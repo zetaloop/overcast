@@ -740,7 +740,7 @@ fn server_tls(source: &Inbound, store: &Store, output: &mut Map<String, Value>) 
     options.take("reality");
     options.take("enabled");
     options.take("server_name");
-    let (certificate, key) = certificate_paths(store, source);
+    let (certificate, key) = certificate_paths(store, source)?;
     output.insert("certificate".to_owned(), json!(certificate));
     output.insert("private-key".to_owned(), json!(key));
     options.rename(output, &[("client_auth", "client-auth-type")]);

@@ -940,7 +940,7 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
     let mut options = Options::new(&source.tls)?;
     options.take("reality");
     options.take("enabled");
-    let (certificate, key) = certificate_paths(store, source);
+    let (certificate, key) = certificate_paths(store, source)?;
     let mut output = Map::from_iter([(
         "certificates".to_owned(),
         json!([{
