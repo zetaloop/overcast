@@ -1,9 +1,13 @@
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod systemd;
 #[cfg(windows)]
 mod windows;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(all(unix, not(target_os = "macos")))]
 use systemd as platform;
 #[cfg(windows)]
 use windows as platform;
