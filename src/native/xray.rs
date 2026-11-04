@@ -378,7 +378,7 @@ pub fn listeners(
             }
         }
         Protocol::Vless(value) => {
-            if users.is_empty() {
+            if users.is_empty() && value.fallbacks.is_empty() {
                 return unsupported("VLESS 入口需要认证用户");
             }
             output.insert("protocol".to_owned(), json!("vless"));
@@ -470,7 +470,7 @@ pub fn listeners(
             options.finish("Xray VMess 入站")?;
         }
         Protocol::Trojan(value) => {
-            if users.is_empty() {
+            if users.is_empty() && value.fallbacks.is_empty() {
                 return unsupported("Trojan 入口需要认证用户");
             }
             output.insert("protocol".to_owned(), json!("trojan"));
@@ -810,7 +810,7 @@ pub fn security(source: &connection::Tls, store: &Store) -> Result<Map<String, V
 fn fallbacks(source: &[inbound::Fallback]) -> Result<Value> {
     let mut fallbacks = Vec::new();
     for fallback in source {
-        if fallback.target.is_empty() {
+        if fallback.target.address().is_empty() {
             return Err("请填写回落目标".into());
         }
         let mut options = Options::new(fallback)?;

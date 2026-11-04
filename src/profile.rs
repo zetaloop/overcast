@@ -171,6 +171,7 @@ impl Builder<'_> {
                                 receiver,
                                 Network::Tcp,
                                 Network::Udp,
+                                crate::graph::Layer::Transport,
                             )
                         {
                             stream(&mut path[0], receiver.core);

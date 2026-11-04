@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     Result,
     config::Store,
-    graph::{Entry, Graph, Network},
+    graph::{Entry, Graph, Layer, Network},
     inbound::{Core, HttpVersion, Inbound, Protocol},
     progress::Progress,
 };
@@ -101,28 +101,47 @@ impl Member {
             .any(|mode| mode.carries(self.source.core, network))
     }
 
-    pub fn internal(&self, port: u16) -> Result<Listener> {
+    pub fn internal(&self, port: u16, layer: Layer) -> Result<Listener> {
         let mut source = self.source.as_ref().clone();
+        let mut member = self.clone();
+        let mut networks = self.binding.networks.clone();
+        if layer == Layer::Protocol {
+            if !self.users.is_empty()
+                && matches!(&source.protocol, Protocol::Vless(value)
+                    if value.flow == crate::vless::Flow::Vision && value.encryption.is_none())
+            {
+                return Err(
+                    format!("入站 {} 的 Vision 处理需要外层 TLS 上下文", source.name).into(),
+                );
+            }
+            member.modes.retain(|mode| mode.wire() == Network::Tcp);
+            source.transport = crate::transport::Transport::default();
+            source.tls = crate::inbound::Tls::default();
+            networks = BTreeSet::from([Network::Tcp]);
+        }
+        configure(&mut source, &member.modes);
         source.ports = port.to_string();
         source.listen = crate::inbound::Listen {
             address: "127.0.0.1".to_owned(),
+            proxy_protocol: layer == Layer::Protocol && source.core == Core::Xray,
             ..crate::inbound::Listen::default()
         };
-        let binding = Binding::local(port, self.binding.networks.clone())?;
+        let binding = Binding::local(port, networks)?;
         Ok(Listener {
             source,
-            members: vec![self.clone()],
+            members: vec![member],
             users: self.users.as_ref().clone(),
             binding,
         })
     }
 }
 
-pub fn accepts(source: &Inbound, wire: Network, network: Network) -> bool {
-    let udp = source.transport.udp(
-        source.tls.enabled && !source.tls.reality.enabled,
-        &source.tls.alpn,
-    );
+pub fn accepts(source: &Inbound, wire: Network, network: Network, layer: Layer) -> bool {
+    let udp = layer == Layer::Transport
+        && source.transport.udp(
+            source.tls.enabled && !source.tls.reality.enabled,
+            &source.tls.alpn,
+        );
     modes(source, &[network]).iter().any(|mode| {
         mode.carries(source.core, network)
             && if udp {
@@ -196,6 +215,28 @@ pub struct Listener {
     pub binding: Binding,
 }
 
+fn configure(source: &mut Inbound, modes: &BTreeSet<Mode>) {
+    match &mut source.protocol {
+        Protocol::Mixed(value) => {
+            value.http.versions = versions(modes);
+            value.http.enabled = !value.http.versions.is_empty();
+            value.socks.enabled = modes.contains(&Mode::Socks);
+            if source.core == Core::Mihomo {
+                value.udp = modes.contains(&Mode::SocksUdp);
+            }
+        }
+        Protocol::Shadowsocks(value) => {
+            value.tcp = modes.contains(&Mode::Shadowsocks);
+            value.udp = modes.contains(&Mode::ShadowsocksUdp);
+        }
+        Protocol::Forward(value) => {
+            value.tcp = modes.contains(&Mode::Forward);
+            value.udp = modes.contains(&Mode::ForwardUdp);
+        }
+        _ => {}
+    }
+}
+
 pub struct Group<'a> {
     pub entries: BTreeSet<usize>,
     pub listeners: Vec<&'a Listener>,
@@ -233,6 +274,14 @@ pub fn build(
     for (index, entry) in graph.entries.iter().enumerate() {
         progress.check()?;
         let mut source = entry.inbound.clone();
+        if let Some(fallbacks) = source.protocol.fallbacks_mut() {
+            for fallback in fallbacks {
+                if !matches!(fallback.target, crate::endpoint::Endpoint::Address(_)) {
+                    fallback.network = None;
+                    fallback.proxy_protocol = None;
+                }
+            }
+        }
         if source.tls.enabled && source.tls.reality.enabled {
             if let Some(keys) = keys
                 .get(&source.uuid)
@@ -364,25 +413,14 @@ pub fn build(
         let users = Rc::new(credentials(entry));
         for modes in parts {
             let mut source = source.clone();
-            if let Protocol::Shadowsocks(protocol) = &mut source.protocol {
-                protocol.tcp = modes.contains(&Mode::Shadowsocks);
-                protocol.udp = modes.contains(&Mode::ShadowsocksUdp);
-            }
-            if let Protocol::Forward(protocol) = &mut source.protocol {
-                protocol.tcp = modes.contains(&Mode::Forward);
-                protocol.udp = modes.contains(&Mode::ForwardUdp);
-            }
-            if let Protocol::Mixed(protocol) = &mut source.protocol {
-                if modes == BTreeSet::from([Mode::Http3]) {
-                    protocol.socks.enabled = false;
-                }
-                protocol.http.versions = versions(&modes);
-                if source.core != Core::SingBox {
-                    protocol.udp = entry
-                        .accounts
-                        .iter()
-                        .any(|account| account.network == Network::Udp);
-                }
+            configure(&mut source, &modes);
+            if let Protocol::Mixed(protocol) = &mut source.protocol
+                && source.core != Core::SingBox
+            {
+                protocol.udp = entry
+                    .accounts
+                    .iter()
+                    .any(|account| account.network == Network::Udp);
             }
             if transport_udp || modes.iter().all(|mode| mode.wire() == Network::Udp) {
                 source.listen.tcp_fast_open = None;
@@ -673,18 +711,12 @@ pub fn build(
                 _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
             }
         }
-        if let Protocol::Mixed(protocol) = &mut source.protocol {
-            protocol.http.enabled = modes
-                .iter()
-                .any(|mode| matches!(mode, Mode::Http1 | Mode::Http2 | Mode::Http3));
-            protocol.http.versions = versions(&modes);
-            protocol.socks.enabled = modes.contains(&Mode::Socks);
-            if source.core == Core::Mihomo {
-                protocol.udp = modes.contains(&Mode::SocksUdp);
-            }
-        } else if users.is_empty()
+        configure(&mut source, &modes);
+        if users.is_empty()
+            && !matches!(source.protocol, Protocol::Mixed(_))
             && !matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
             && source.protocol.users()
+            && source.protocol.fallbacks().is_empty()
         {
             return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
         }
@@ -868,6 +900,9 @@ pub fn build(
 }
 
 fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, Credential> {
+    if entry.accounts.is_empty() {
+        return BTreeMap::new();
+    }
     if !entry.inbound.protocol.users() {
         return BTreeMap::new();
     }

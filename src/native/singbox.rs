@@ -490,7 +490,7 @@ pub fn listeners(
         return Ok(vec![output]);
     }
     if let Protocol::Trojan(value) = &source.protocol {
-        if users.is_empty() {
+        if users.is_empty() && value.fallbacks.is_empty() {
             return unsupported("Trojan 入口需要认证用户");
         }
         let mut options = Options::new(value)?;
@@ -777,10 +777,10 @@ fn fallbacks(
             options.take("path");
         }
         options.finish("sing-box 协议回落")?;
-        let (host, port) = if let Ok(port) = rule.target.parse::<u16>() {
+        let (host, port) = if let Ok(port) = rule.target.address().parse::<u16>() {
             ("localhost".to_owned(), port)
         } else {
-            let address = url::Url::parse(&format!("tcp://{}", rule.target))?;
+            let address = url::Url::parse(&format!("tcp://{}", rule.target.address()))?;
             if address.path() != "" && address.path() != "/" {
                 return unsupported("sing-box 回落使用 TCP 地址");
             }

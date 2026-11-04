@@ -205,46 +205,10 @@ fn select_user(screen: &mut Screen, store: &Store) -> Result<Option<Condition>> 
 }
 
 fn select_inbound(screen: &mut Screen, store: &Store) -> Result<Option<Condition>> {
-    loop {
-        let config = store.load()?;
-        let inbounds: Vec<_> = config
-            .inbounds
-            .iter()
-            .filter(|inbound| inbound.protocol.routing())
-            .collect();
-        let mut items: Vec<_> = inbounds
-            .iter()
-            .map(|inbound| {
-                let mut item = Item::new(inbound.uuid.to_string(), inbound.name.clone().stylized());
-                item.value = inbound.summary();
-                item
-            })
-            .collect();
-        items.push(Item::new("new", "创建入站".stylized()));
-        let menu = Menu {
-            title: "选择入站",
-            heading: "",
-            items: &items,
-            help: "",
-        };
-        match screen.search(menu.title, &items, 0)? {
-            Some(index) if index < inbounds.len() => {
-                return Ok(Some(Condition::Inbound(inbounds[index].uuid)));
-            }
-            Some(index) => {
-                if let Some(uuid) = inbound::create(screen, store, &menu, index)?
-                    && store
-                        .load()?
-                        .inbounds
-                        .iter()
-                        .any(|inbound| inbound.uuid == uuid && inbound.protocol.routing())
-                {
-                    return Ok(Some(Condition::Inbound(uuid)));
-                }
-            }
-            None => return Ok(None),
-        }
-    }
+    Ok(
+        inbound::select(screen, store, None, |inbound| inbound.protocol.routing())?
+            .map(Condition::Inbound),
+    )
 }
 
 fn select_target(

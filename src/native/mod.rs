@@ -33,7 +33,8 @@ use crate::{
     condition::Condition,
     config::{Config, Store},
     connection::{self, Connection},
-    graph::{self, Payload},
+    endpoint,
+    graph::{self, Layer, Payload},
     inbound::{Core, Inbound, Protocol},
     progress::Progress,
     route::Destination,
@@ -182,44 +183,67 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
     let caddy = if certificates.is_empty() {
         None
     } else {
-        if certificates.iter().any(|name| certificate::public(name)) {
-            let mut binding = binding::Binding::local(80, BTreeSet::from([graph::Network::Tcp]))?;
-            binding.address = binding::Address::Any;
-            if let Some(listener) = listeners
+        let mut binding = binding::Binding::local(80, BTreeSet::from([graph::Network::Tcp]))?;
+        binding.address = binding::Address::Any;
+        if certificates.iter().any(|name| certificate::public(name))
+            && let Some(listener) = listeners
                 .iter()
                 .find(|listener| listener.binding.intersects(&binding))
-            {
-                return Err(format!(
-                    "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
-                    listener.source.name
-                )
-                .into());
-            }
-            builder.reserved.push(binding);
+        {
+            return Err(format!(
+                "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
+                listener.source.name
+            )
+            .into());
         }
+        builder.reserved.push(binding);
         Some(builder.port("caddy", BTreeSet::from([graph::Network::Tcp]))?)
     };
     let mut keys = config.keys.clone();
     reality::prepare(&listeners, &graph, &mut keys, progress)?;
     encryption::prepare(&listeners, &graph, &mut keys, progress)?;
     shadowsocks::prepare(&listeners, &graph, &mut keys, progress)?;
-    let targets: BTreeSet<_> = graph
+    let mut targets: BTreeSet<_> = graph
         .entries
         .iter()
         .flat_map(|entry| &entry.accounts)
         .flat_map(|account| {
             account.rules.iter().filter_map(move |rule| {
                 if let Destination::Inbound(uuid) = rule.destination {
-                    Some((uuid, account.network))
+                    Some((uuid, account.network, Layer::Transport))
                 } else {
                     None
                 }
             })
         })
         .collect();
+    targets.extend(
+        graph
+            .entries
+            .iter()
+            .flat_map(|entry| entry.inbound.protocol.fallbacks())
+            .filter_map(|fallback| match fallback.target {
+                endpoint::Endpoint::Inbound(uuid) => {
+                    Some((uuid, graph::Network::Tcp, Layer::Protocol))
+                }
+                _ => None,
+            }),
+    );
     let mut internal = HashMap::new();
-    for &(uuid, network) in &targets {
-        if internal.contains_key(&(uuid, network)) {
+    for &(uuid, network, layer) in &targets {
+        if internal.contains_key(&(uuid, network, layer)) {
+            continue;
+        }
+        if layer == Layer::Protocol
+            && !graph.reaches(
+                uuid,
+                network,
+                layer,
+                |core, destination, network, payload| {
+                    builder.available(core, destination, network, payload)
+                },
+            )?
+        {
             continue;
         }
         let member = listeners
@@ -227,37 +251,91 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
             .flat_map(|listener| &listener.members)
             .find(|member| {
                 graph.entries[member.entry].inbound.uuid == uuid
-                    && member.binding.networks.contains(&network)
-            })
-            .ok_or_else(|| format!("入站 {uuid} 缺少 {} 接收器", network.name()))?;
-        let tag = format!(
-            "inlet-{uuid}-{}",
-            member
-                .binding
-                .networks
-                .iter()
-                .map(|network| network.name())
-                .collect::<Vec<_>>()
-                .join("-")
-        );
-        let port = builder.port(&tag, member.binding.networks.clone())?;
-        let listener = member.internal(port)?;
+                    && if layer == Layer::Transport {
+                        member.binding.networks.contains(&network)
+                    } else {
+                        listener::accepts(
+                            graph.entries[member.entry].inbound,
+                            network,
+                            graph::Network::Tcp,
+                            layer,
+                        )
+                    }
+            });
+        let Some(member) = member else {
+            if layer == Layer::Protocol {
+                continue;
+            }
+            return Err(format!("入站 {uuid} 缺少 {} 接收器", network.name()).into());
+        };
+        let networks = if layer == Layer::Protocol {
+            BTreeSet::from([graph::Network::Tcp])
+        } else {
+            member.binding.networks.clone()
+        };
+        let tag = if layer == Layer::Protocol {
+            format!("inlet-{uuid}-protocol")
+        } else {
+            format!(
+                "inlet-{uuid}-{}",
+                member
+                    .binding
+                    .networks
+                    .iter()
+                    .map(|network| network.name())
+                    .collect::<Vec<_>>()
+                    .join("-")
+            )
+        };
+        let port = builder.port(&tag, networks)?;
+        let listener = member.internal(port, layer)?;
         for &network in &listener.binding.networks {
-            if targets.contains(&(uuid, network)) {
-                internal.insert((uuid, network), listeners.len());
+            if targets.contains(&(uuid, network, layer)) {
+                internal.insert((uuid, network, layer), listeners.len());
             }
         }
         listeners.push(listener);
     }
+    let fallback_targets: HashMap<_, _> = internal
+        .iter()
+        .filter(|((_, _, layer), _)| *layer == Layer::Protocol)
+        .map(|(&(uuid, _, _), &index)| {
+            (
+                uuid,
+                (
+                    *listeners[index].binding.ports.first().unwrap(),
+                    listeners[index].source.listen.proxy_protocol,
+                ),
+            )
+        })
+        .collect();
     let step = progress.activity("生成核心配置");
     let mut receivers = Vec::new();
     for (index, listener) in listeners.iter_mut().enumerate() {
         progress.check()?;
+        let sender = listener.source.core;
+        if let Some(fallbacks) = listener.source.protocol.fallbacks_mut() {
+            for fallback in fallbacks {
+                let target = match fallback.target {
+                    endpoint::Endpoint::Address(_) => continue,
+                    endpoint::Endpoint::Block => None,
+                    endpoint::Endpoint::Inbound(uuid) => fallback_targets.get(&uuid).copied(),
+                };
+                let (port, forwarded) = match target {
+                    Some(target) => target,
+                    None => (builder.reject()?, false),
+                };
+                fallback.target = endpoint::Endpoint::Address(format!("127.0.0.1:{port}"));
+                fallback.network = None;
+                fallback.proxy_protocol = (forwarded && sender == Core::Xray).then_some(2);
+            }
+        }
         if let Some(keys) = keys.get(&listener.source.uuid) {
             keys.apply(&mut listener.source, listener.users.len());
         }
         let inbound = &listener.source;
         step.detail(&inbound.name);
+        let core = inbound.core;
         let users: Vec<_> = listener
             .users
             .iter()
@@ -269,12 +347,12 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         } else {
             None
         };
-        let values = match inbound.core {
+        let values = match core {
             Core::Xray => xray::listeners(inbound, &users, store, target)?,
             Core::SingBox => singbox::listeners(inbound, &users, store, target)?,
             Core::Mihomo => mihomo::listeners(inbound, &users, store, &mut globals, target)?,
         };
-        let values = if inbound.core == Core::SingBox {
+        let values = if core == Core::SingBox {
             let mut expanded = Vec::new();
             for value in values {
                 for port in &listener.binding.ports {
@@ -288,11 +366,11 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         } else {
             values
         };
-        let fallback = inbound.core == Core::SingBox
+        let fallback = core == Core::SingBox
             && values.iter().any(|value| {
                 value.contains_key("fallback") || value.contains_key("fallback_for_alpn")
             });
-        let service = builder.service(inbound.core, globals, BTreeMap::new());
+        let service = builder.service(core, globals, BTreeMap::new());
         let mut tags = Vec::new();
         for (part, mut value) in values.into_iter().enumerate() {
             progress.check()?;
@@ -300,10 +378,9 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 && inbound.tls.reality.enabled
                 && let Destination::Outbound(uuid) = inbound.tls.reality.outbound
             {
-                let endpoint =
-                    builder.outbound(uuid, inbound.core, graph::Network::Tcp, Payload::Proxy)?;
+                let endpoint = builder.outbound(uuid, core, graph::Network::Tcp, Payload::Proxy)?;
                 let parent = builder.bridge(service, &endpoint)?;
-                match inbound.core {
+                match core {
                     Core::SingBox => {
                         value.get_mut("tls").unwrap()["reality"]["handshake"]["detour"] =
                             json!(parent)
@@ -315,7 +392,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 }
             }
             let tag = format!("{}-{index}-{part}", inbound.uuid);
-            match inbound.core {
+            match core {
                 Core::Xray => {
                     value.insert("tag".to_owned(), json!(tag));
                     if listener.binding.ports.is_empty() {
@@ -372,8 +449,9 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         let payload = Payload::from(&inbound.protocol);
         let (service, tags, fallback) = &receivers[index];
         let service = *service;
+        let core = inbound.core;
         let mut detour = None;
-        if inbound.core == Core::SingBox && !fallback {
+        if core == Core::SingBox && !fallback {
             let mut choices = BTreeSet::new();
             let fixed = listener.members.iter().all(|member| {
                 graph.entries[member.entry]
@@ -394,7 +472,11 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                     })
             });
             if fixed && choices.len() == 1 {
-                let target = internal[&(*choices.first().unwrap(), graph::Network::Tcp)];
+                let target = internal[&(
+                    *choices.first().unwrap(),
+                    graph::Network::Tcp,
+                    Layer::Transport,
+                )];
                 let source = &listeners[target].source;
                 let (target_service, target_tags, _) = &receivers[target];
                 if service == *target_service
@@ -438,7 +520,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                         .identity(entry.inbound)
                         .filter(|_| {
                             !matches!(inbound.protocol, Protocol::Shadowsocks(_))
-                                || inbound.core == Core::Xray
+                                || core == Core::Xray
                                 || shadowsocks::multi(inbound, listener.users.len())
                         })
                         .map(|user| {
@@ -476,17 +558,17 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                         Destination::Direct => "direct".to_owned(),
                         Destination::Outbound(uuid) => {
                             let endpoint =
-                                builder.outbound(uuid, inbound.core, account.network, payload)?;
+                                builder.outbound(uuid, core, account.network, payload)?;
                             builder.bridge(service, &endpoint)?
                         }
                         Destination::Inbound(uuid) => {
-                            let index = internal[&(uuid, account.network)];
+                            let index = internal[&(uuid, account.network, Layer::Transport)];
                             let port = *listeners[index].binding.ports.first().unwrap();
-                            if inbound.core == Core::SingBox {
+                            if core == Core::SingBox {
                                 target = Some(("127.0.0.1".to_owned(), port));
                                 "direct".to_owned()
                             } else {
-                                let sender = if inbound.core == Core::Xray {
+                                let sender = if core == Core::Xray {
                                     service
                                 } else {
                                     builder.service(Core::Xray, Map::new(), BTreeMap::new())
@@ -1105,6 +1187,28 @@ impl<'a> Builder<'a> {
             },
         );
         Ok(tag)
+    }
+
+    fn reject(&mut self) -> Result<u16> {
+        if let Some(&port) = self.ports.get("reject") {
+            return Ok(port);
+        }
+        let port = self.port("reject", BTreeSet::from([graph::Network::Tcp]))?;
+        let service = self.service(Core::SingBox, Map::new(), BTreeMap::new());
+        self.services[service].listeners.push(json!({
+            "type": "direct", "tag": "reject", "listen": "127.0.0.1", "listen_port": port, "network": "tcp",
+        }));
+        self.services[service].rules.push(routing::Rule {
+            inbound: vec!["reject".to_owned()],
+            user: None,
+            protocol: None,
+            network: Some(graph::Network::Tcp),
+            condition: Condition::Always,
+            outbound: "block".to_owned(),
+            resolve_udp: false,
+            target: None,
+        });
+        Ok(port)
     }
 
     fn port(&mut self, tag: &str, networks: BTreeSet<graph::Network>) -> Result<u16> {

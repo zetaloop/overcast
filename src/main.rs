@@ -5,6 +5,7 @@ mod config;
 mod connection;
 mod ech;
 mod encryption;
+mod endpoint;
 mod form;
 mod forward;
 mod geodata;

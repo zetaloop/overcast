@@ -7,6 +7,7 @@ use crate::{
     Result,
     condition::Condition,
     config::{Config, Store},
+    endpoint::Endpoint,
     inbound::{Core, Inbound, Protocol},
     progress::Progress,
     route::{Destination, Rule},
@@ -38,6 +39,12 @@ pub enum Payload {
     Connection,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Layer {
+    Transport,
+    Protocol,
+}
+
 impl From<&Protocol> for Payload {
     fn from(value: &Protocol) -> Self {
         match value {
@@ -64,6 +71,16 @@ impl Account<'_> {
 }
 
 impl Graph<'_> {
+    pub fn reaches(
+        &mut self,
+        uuid: Uuid,
+        network: Network,
+        layer: Layer,
+        mut reachable: impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
+    ) -> Result<bool> {
+        self.analysis.reaches(uuid, network, layer, &mut reachable)
+    }
+
     pub fn config(&self) -> &Config {
         self.analysis.config
     }
@@ -236,10 +253,15 @@ pub fn build<'a>(
 ) -> Result<Option<Graph<'a>>> {
     if config.inbounds.is_empty()
         || config.users.is_empty()
-            && config
-                .inbounds
-                .iter()
-                .all(|inbound| inbound.users && inbound.protocol.users())
+            && config.inbounds.iter().all(|inbound| {
+                inbound.users
+                    && inbound.protocol.users()
+                    && inbound
+                        .protocol
+                        .fallbacks()
+                        .iter()
+                        .all(|fallback| fallback.target == Endpoint::Block)
+            })
     {
         return Ok(None);
     }
@@ -360,7 +382,7 @@ pub fn build<'a>(
                 }
             }
         }
-        if !accounts.is_empty() {
+        if !accounts.is_empty() || graph.fallbacks(inbound, &mut reachable)? {
             entries.push(Entry {
                 inbound,
                 users: config
@@ -372,7 +394,7 @@ pub fn build<'a>(
             });
         }
     }
-    step.finish(format!("{} 个入口具有可转发路径", entries.len()));
+    step.finish(format!("{} 个入口", entries.len()));
     Ok((!entries.is_empty()).then_some(Graph {
         targets,
         entries,
@@ -393,7 +415,7 @@ struct Analysis<'a> {
     present: Lit,
     addresses: Vec<String>,
     variables: HashMap<Condition, Lit>,
-    paths: HashMap<(Uuid, Network), bool>,
+    paths: HashMap<(Uuid, Network, Layer), bool>,
     config: &'a Config,
     progress: &'a Progress,
 }
@@ -576,7 +598,7 @@ impl<'a> Analysis<'a> {
         let mut routes = self.resolve(inbound, user, network, reachable_destination)?;
         for route in &mut routes {
             if let Destination::Inbound(uuid) = route.destination
-                && !self.reaches(uuid, network, reachable_destination)?
+                && !self.reaches(uuid, network, Layer::Transport, reachable_destination)?
             {
                 route.destination = Destination::Block;
             }
@@ -660,21 +682,42 @@ impl<'a> Analysis<'a> {
         Ok(reachable)
     }
 
+    fn fallbacks(
+        &mut self,
+        inbound: &Inbound,
+        reachable: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
+    ) -> Result<bool> {
+        for fallback in inbound.protocol.fallbacks() {
+            match &fallback.target {
+                Endpoint::Block => {}
+                Endpoint::Address(value) if !value.is_empty() => return Ok(true),
+                Endpoint::Address(_) => {}
+                Endpoint::Inbound(uuid) => {
+                    if self.reaches(*uuid, Network::Tcp, Layer::Protocol, reachable)? {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn reaches(
         &mut self,
         uuid: Uuid,
         network: Network,
+        layer: Layer,
         reachable: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
     ) -> Result<bool> {
-        if let Some(&result) = self.paths.get(&(uuid, network)) {
+        if let Some(&result) = self.paths.get(&(uuid, network, layer)) {
             return Ok(result);
         }
-        let mut pending = vec![(uuid, network)];
+        let mut pending = vec![(uuid, network, layer)];
         let mut seen = HashSet::new();
         let mut result = false;
-        'search: while let Some((uuid, wire)) = pending.pop() {
+        'search: while let Some((uuid, wire, layer)) = pending.pop() {
             self.progress.check()?;
-            if !seen.insert((uuid, wire)) {
+            if !seen.insert((uuid, wire, layer)) {
                 continue;
             }
             let inbound = self
@@ -697,7 +740,7 @@ impl<'a> Analysis<'a> {
             };
             for network in [Network::Tcp, Network::Udp] {
                 if !network.enabled(inbound)
-                    || !crate::native::listener::accepts(inbound, wire, network)
+                    || !crate::native::listener::accepts(inbound, wire, network, layer)
                 {
                     continue;
                 }
@@ -705,7 +748,9 @@ impl<'a> Analysis<'a> {
                     for route in self.resolve(inbound, user, network, reachable)? {
                         match route.destination {
                             Destination::Block => {}
-                            Destination::Inbound(uuid) => pending.push((uuid, network)),
+                            Destination::Inbound(uuid) => {
+                                pending.push((uuid, network, Layer::Transport))
+                            }
                             Destination::Direct | Destination::Outbound(_) => {
                                 result = true;
                                 break 'search;
@@ -714,8 +759,23 @@ impl<'a> Analysis<'a> {
                     }
                 }
             }
+            if crate::native::listener::accepts(inbound, wire, Network::Tcp, layer) {
+                for fallback in inbound.protocol.fallbacks() {
+                    match &fallback.target {
+                        Endpoint::Block => {}
+                        Endpoint::Address(value) if !value.is_empty() => {
+                            result = true;
+                            break 'search;
+                        }
+                        Endpoint::Address(_) => {}
+                        Endpoint::Inbound(uuid) => {
+                            pending.push((*uuid, Network::Tcp, Layer::Protocol))
+                        }
+                    }
+                }
+            }
         }
-        self.paths.insert((uuid, network), result);
+        self.paths.insert((uuid, network, layer), result);
         Ok(result)
     }
 
@@ -724,9 +784,6 @@ impl<'a> Analysis<'a> {
         inbound: &Inbound,
         reachable: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
     ) -> Result<bool> {
-        if inbound.users && self.config.users.is_empty() && inbound.protocol.users() {
-            return Ok(false);
-        }
         if inbound.tls.enabled && inbound.tls.reality.enabled {
             match inbound.tls.reality.outbound {
                 Destination::Block | Destination::Inbound(_) => return Ok(false),

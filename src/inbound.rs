@@ -16,6 +16,7 @@ use crate::{
     Result,
     config::Store,
     connection::{FastOpen, SocketOption},
+    endpoint::Endpoint,
     form::{self, Value, choices, fields},
     transport::Transport,
     tui::{Action, Item, Menu, Screen},
@@ -182,6 +183,22 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    pub fn fallbacks(&self) -> &[Fallback] {
+        match self {
+            Self::Vless(value) => &value.fallbacks,
+            Self::Trojan(value) => &value.fallbacks,
+            _ => &[],
+        }
+    }
+
+    pub fn fallbacks_mut(&mut self) -> Option<&mut Vec<Fallback>> {
+        match self {
+            Self::Vless(value) => Some(&mut value.fallbacks),
+            Self::Trojan(value) => Some(&mut value.fallbacks),
+            _ => None,
+        }
+    }
+
     pub fn routing(&self) -> bool {
         self.destination().is_none()
     }
@@ -264,19 +281,42 @@ pub struct Fallback {
     pub server_name: Option<String>,
     pub alpn: Option<String>,
     pub path: Option<String>,
-    pub target: String,
+    pub target: Endpoint,
     pub network: Option<String>,
     pub proxy_protocol: Option<u8>,
 }
 
-fields!(Fallback {
-    server_name: "服务名",
-    alpn: "ALPN",
-    path: "路径",
-    target: "目标",
-    network: "网络类型",
-    proxy_protocol: "PROXY protocol 版本",
-});
+impl form::Form for Fallback {
+    fn fields<'a>(&'a mut self, defaults: Self, apply: form::Apply<'a, Self>) -> form::Fields<'a> {
+        let original = Rc::new(self.clone());
+        let address = matches!(self.target, Endpoint::Address(_));
+        let mut fields = Vec::new();
+        macro_rules! field {
+            ($name:ident, $label:literal) => {
+                fields.push(form::field(
+                    stringify!($name),
+                    $label,
+                    &mut self.$name,
+                    defaults.$name,
+                    form::map(original.clone(), apply.clone(), |value, field| {
+                        value.$name = field
+                    }),
+                ));
+            };
+        }
+        field!(server_name, "服务名");
+        field!(alpn, "ALPN");
+        field!(path, "路径");
+        field!(target, "目标");
+        if address {
+            field!(network, "网络类型");
+            field!(proxy_protocol, "PROXY protocol 版本");
+        }
+        fields
+    }
+}
+
+form::group!(Fallback);
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -756,6 +796,15 @@ fn edit(
                                         inbound.uuid,
                                     ));
                                 }
+                                for source in &mut config.inbounds {
+                                    if let Some(fallbacks) = source.protocol.fallbacks_mut() {
+                                        for fallback in fallbacks {
+                                            if fallback.target == Endpoint::Inbound(inbound.uuid) {
+                                                fallback.target = Endpoint::Block;
+                                            }
+                                        }
+                                    }
+                                }
                                 Ok(())
                             })
                         },
@@ -772,6 +821,56 @@ fn edit(
         notice = result
             .err()
             .map_or_else(String::new, |error| error.to_string());
+    }
+}
+
+pub fn select(
+    screen: &mut Screen,
+    store: &Store,
+    current: Option<Uuid>,
+    filter: impl Fn(&Inbound) -> bool,
+) -> Result<Option<Uuid>> {
+    loop {
+        let config = store.load()?;
+        let inbounds: Vec<_> = config
+            .inbounds
+            .iter()
+            .filter(|inbound| filter(inbound))
+            .collect();
+        let mut items: Vec<_> = inbounds
+            .iter()
+            .map(|inbound| {
+                let mut item = Item::new(inbound.uuid.to_string(), inbound.name.clone().stylized());
+                item.value = inbound.summary();
+                item
+            })
+            .collect();
+        items.push(Item::new("new", "创建入站".stylized()));
+        let selected = inbounds
+            .iter()
+            .position(|inbound| Some(inbound.uuid) == current)
+            .unwrap_or(0);
+        let menu = Menu {
+            title: "选择入站",
+            heading: "",
+            items: &items,
+            help: "",
+        };
+        match screen.search(menu.title, &items, selected)? {
+            Some(index) if index < inbounds.len() => return Ok(Some(inbounds[index].uuid)),
+            Some(index) => {
+                if let Some(uuid) = create(screen, store, &menu, index)?
+                    && store
+                        .load()?
+                        .inbounds
+                        .iter()
+                        .any(|inbound| inbound.uuid == uuid && filter(inbound))
+                {
+                    return Ok(Some(uuid));
+                }
+            }
+            None => return Ok(None),
+        }
     }
 }
 
