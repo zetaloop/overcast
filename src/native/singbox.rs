@@ -7,7 +7,7 @@ use crate::{
     inbound::{self, Inbound, Protocol},
 };
 
-use super::{certificate_paths, hashes, options::Options, path, unsupported};
+use super::{certificate_paths, hashes, listener::Credential, options::Options, path, unsupported};
 
 pub fn outbound(
     source: &Connection,
@@ -352,7 +352,7 @@ pub fn outbound(
 
 pub fn listeners(
     source: &Inbound,
-    users: &[(String, String)],
+    users: &[(String, Credential)],
     store: &Store,
     target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
@@ -366,8 +366,9 @@ pub fn listeners(
             json!(
                 users
                     .iter()
-                    .map(|(name, password)| match &source.protocol {
-                        Protocol::Mixed(_) => json!({"username": name, "password": password}),
+                    .map(|(name, credential)| match &source.protocol {
+                        Protocol::Mixed(_) =>
+                            json!({"username": name, "password": credential.password}),
                         Protocol::Vless(value) => {
                             let mut user = Map::from_iter([
                                 ("name".to_owned(), json!(name)),
@@ -388,8 +389,10 @@ pub fn listeners(
                             }
                             json!(user)
                         }
-                        Protocol::Trojan(_) => json!({"name": name, "password": password}),
-                        Protocol::Shadowsocks(_) => json!({"name": name, "password": password}),
+                        Protocol::Trojan(_) =>
+                            json!({"name": name, "password": credential.password}),
+                        Protocol::Shadowsocks(_) =>
+                            json!({"name": name, "password": credential.password}),
                         Protocol::Forward(_) => unreachable!(),
                     })
                     .collect::<Vec<_>>()
@@ -557,8 +560,8 @@ pub fn listeners(
             }
         } else {
             output.remove("users");
-            if let Some((_, password)) = users.first() {
-                output.insert("password".to_owned(), json!(password));
+            if let Some((_, credential)) = users.first() {
+                output.insert("password".to_owned(), json!(credential.password));
             }
         }
         if let Some(multiplex) = &value.multiplex {

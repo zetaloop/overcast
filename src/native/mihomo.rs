@@ -10,7 +10,8 @@ use crate::{
 };
 
 use super::{
-    certificate_paths, hex_hashes, options::Options, path, pem, single_headers, unsupported,
+    certificate_paths, hex_hashes, listener::Credential, options::Options, path, pem,
+    single_headers, unsupported,
 };
 
 pub fn outbound(
@@ -358,7 +359,7 @@ pub fn outbound(
 
 pub fn listeners(
     source: &Inbound,
-    users: &[(String, String)],
+    users: &[(String, Credential)],
     store: &Store,
     globals: &mut Map<String, Value>,
     target: Option<(&str, u16)>,
@@ -374,8 +375,9 @@ pub fn listeners(
             json!(
                 users
                     .iter()
-                    .map(|(name, password)| match &source.protocol {
-                        Protocol::Mixed(_) => json!({"username": name, "password": password}),
+                    .map(|(name, credential)| match &source.protocol {
+                        Protocol::Mixed(_) =>
+                            json!({"username": name, "password": credential.password}),
                         Protocol::Vless(value) => {
                             let mut user = Map::from_iter([
                                 ("username".to_owned(), json!(name)),
@@ -396,8 +398,10 @@ pub fn listeners(
                             }
                             json!(user)
                         }
-                        Protocol::Trojan(_) => json!({"username": name, "password": password}),
-                        Protocol::Shadowsocks(_) => json!({"username": name, "password": password}),
+                        Protocol::Trojan(_) =>
+                            json!({"username": name, "password": credential.password}),
+                        Protocol::Shadowsocks(_) =>
+                            json!({"username": name, "password": credential.password}),
                         Protocol::Forward(_) => unreachable!(),
                     })
                     .collect::<Vec<_>>()
@@ -522,8 +526,8 @@ pub fn listeners(
         );
         output.insert("udp".to_owned(), json!(value.udp));
         output.remove("users");
-        if let Some((_, password)) = users.first() {
-            output.insert("password".to_owned(), json!(password));
+        if let Some((_, credential)) = users.first() {
+            output.insert("password".to_owned(), json!(credential.password));
         }
         if let Some(multiplex) = &value.multiplex {
             output.insert(

@@ -10,7 +10,8 @@ use crate::{
 };
 
 use super::{
-    certificate_paths, hex_hashes, options::Options, path, single_headers, transport, unsupported,
+    certificate_paths, hex_hashes, listener::Credential, options::Options, path, single_headers,
+    transport, unsupported,
 };
 
 pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>> {
@@ -303,7 +304,7 @@ fn packets(
 
 pub fn listeners(
     source: &Inbound,
-    users: &[(String, String)],
+    users: &[(String, Credential)],
     store: &Store,
     target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
@@ -326,7 +327,9 @@ pub fn listeners(
             json!(
                 users
                     .iter()
-                    .map(|(name, password)| { json!({"user": name, "pass": password}) })
+                    .map(|(name, credential)| {
+                        json!({"user": name, "pass": credential.password})
+                    })
                     .collect::<Vec<_>>()
             ),
         );
@@ -483,10 +486,10 @@ pub fn listeners(
                 json!(
                     users
                         .iter()
-                        .map(|(name, password)| {
+                        .map(|(name, credential)| {
                             let mut user = Map::from_iter([
                                 ("email".to_owned(), json!(name)),
-                                ("password".to_owned(), json!(password)),
+                                ("password".to_owned(), json!(credential.password)),
                             ]);
                             if let Some(level) = value.user_level {
                                 user.insert("level".to_owned(), json!(level));
@@ -512,7 +515,7 @@ pub fn listeners(
             for name in ["cipher", "tcp", "udp", "multiplex", "user_level"] {
                 options.take(name);
             }
-            settings.insert("method".to_owned(), method.clone());
+            settings.insert("method".to_owned(), method);
             let mut networks = Vec::new();
             if value.tcp {
                 networks.push("tcp");
@@ -542,26 +545,33 @@ pub fn listeners(
                     json!(
                         users
                             .iter()
-                            .map(|(name, password)| {
+                            .map(|(name, credential)| {
                                 let mut user = Map::from_iter([
                                     ("email".to_owned(), json!(name)),
-                                    ("password".to_owned(), json!(password)),
+                                    ("password".to_owned(), json!(credential.password)),
                                 ]);
                                 if value.cipher.key_size().is_none() {
-                                    user.insert("method".to_owned(), method.clone());
+                                    user.insert(
+                                        "method".to_owned(),
+                                        super::shadowsocks::cipher(
+                                            credential.cipher.expect("Shadowsocks cipher missing"),
+                                            inbound::Core::Xray,
+                                            true,
+                                        )?,
+                                    );
                                 }
-                                if let Some(level) = value.user_level {
+                                if let Some(level) = credential.level {
                                     user.insert("level".to_owned(), json!(level));
                                 }
-                                user
+                                Ok(user)
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Result<Vec<_>>>()?
                     ),
                 );
             } else {
                 settings.insert("email".to_owned(), json!(users[0].0));
-                settings.insert("password".to_owned(), json!(users[0].1));
-                if let Some(level) = value.user_level {
+                settings.insert("password".to_owned(), json!(users[0].1.password));
+                if let Some(level) = users[0].1.level {
                     settings.insert("level".to_owned(), json!(level));
                 }
             }

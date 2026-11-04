@@ -17,6 +17,19 @@ use crate::{
 
 use super::binding::{Address, Binding};
 
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Credential {
+    pub password: String,
+    pub cipher: Option<crate::shadowsocks::Cipher>,
+    pub level: Option<u8>,
+}
+
+impl Credential {
+    pub fn identity(&self) -> (Option<crate::shadowsocks::Cipher>, &str) {
+        (self.cipher, &self.password)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Mode {
     Http1,
@@ -69,7 +82,7 @@ pub struct Member {
     pub entry: usize,
     source: Rc<Inbound>,
     modes: BTreeSet<Mode>,
-    pub(super) users: Rc<BTreeMap<Uuid, String>>,
+    pub(super) users: Rc<BTreeMap<Uuid, Credential>>,
     pub(super) binding: Binding,
 }
 
@@ -179,7 +192,7 @@ fn modes(source: &Inbound, networks: &[Network]) -> BTreeSet<Mode> {
 pub struct Listener {
     pub source: Inbound,
     pub members: Vec<Member>,
-    pub users: BTreeMap<Uuid, String>,
+    pub users: BTreeMap<Uuid, Credential>,
     pub binding: Binding,
 }
 
@@ -484,13 +497,13 @@ pub fn build(
             if member.users.is_empty() != members[0].users.is_empty() {
                 return Err(conflict(&members, "认证与无凭据连接无法共用原生认证表").into());
             }
-            for (&user, password) in member.users.iter() {
+            for (&user, credential) in member.users.iter() {
                 if matches!(source.protocol, Protocol::Mixed(_))
-                    && users.get(&user).is_some_and(|other| other != password)
+                    && users.get(&user).is_some_and(|other| other != credential)
                 {
                     return Err(conflict(&members, &format!("凭据 {user} 对应不同密码")).into());
                 }
-                users.insert(user, password.clone());
+                users.insert(user, credential.clone());
             }
             if binding.interface != member.binding.interface {
                 return Err(conflict(&members, "监听套接字绑定到不同接口").into());
@@ -630,13 +643,14 @@ pub fn build(
                     same(current, other, &[], "Trojan", &members)?
                 }
                 (Protocol::Shadowsocks(current), Protocol::Shadowsocks(other)) => {
-                    same(
-                        current,
-                        other,
-                        &["tcp", "udp", "password"],
-                        "Shadowsocks",
-                        &members,
-                    )?;
+                    let mut omitted = vec!["tcp", "udp", "password"];
+                    if source.core == Core::Xray {
+                        omitted.push("user_level");
+                        if current.cipher.aead() && other.cipher.aead() {
+                            omitted.push("cipher");
+                        }
+                    }
+                    same(current, other, &omitted, "Shadowsocks", &members)?;
                     if current.password.is_none() {
                         current.password = other.password.clone();
                     } else if other.password.is_some() && current.password != other.password {
@@ -684,7 +698,7 @@ pub fn build(
                 member
                     .users
                     .iter()
-                    .map(|(uuid, password)| (*uuid, password.clone()))
+                    .map(|(uuid, credential)| (*uuid, credential.clone()))
             })
             .collect();
         let mut addresses: BTreeSet<_> = members
@@ -715,9 +729,11 @@ pub fn build(
                             .filter(|member| {
                                 member.binding.accepts(address, interface)
                                     && member.modes.contains(&mode)
-                                    && identity.is_none_or(|(user, password)| {
+                                    && identity.is_none_or(|(user, credential)| {
                                         if password_identity {
-                                            member.users.values().any(|value| value == password)
+                                            member.users.values().any(|value| {
+                                                value.identity() == credential.identity()
+                                            })
                                         } else {
                                             member.users.contains_key(user)
                                         }
@@ -760,11 +776,13 @@ pub fn build(
                     } else if password_identity {
                         left.users
                             .iter()
-                            .flat_map(|(left_user, password)| {
+                            .flat_map(|(left_user, credential)| {
                                 right
                                     .users
                                     .iter()
-                                    .filter(move |(_, other)| *other == password)
+                                    .filter(move |(_, other)| {
+                                        other.identity() == credential.identity()
+                                    })
                                     .map(move |(right_user, _)| {
                                         (Some(*left_user), Some(*right_user))
                                     })
@@ -802,12 +820,18 @@ pub fn build(
             }
         }
         if password_identity && source.protocol.users() {
-            let mut identities: BTreeMap<String, (Uuid, bool)> = BTreeMap::new();
+            let mut identities: BTreeMap<_, (Uuid, bool, Credential)> = BTreeMap::new();
             for member in &members {
-                for (&uuid, password) in member.users.iter() {
+                for (&uuid, credential) in member.users.iter() {
+                    let identity = (credential.cipher, credential.password.clone());
+                    if let Some((_, _, current)) = identities.get(&identity)
+                        && current.level.unwrap_or_default() != credential.level.unwrap_or_default()
+                    {
+                        return Err(conflict(&members, "相同认证凭据对应不同的用户等级").into());
+                    }
                     identities
-                        .entry(password.clone())
-                        .and_modify(|(current, system)| {
+                        .entry(identity)
+                        .and_modify(|(current, system, _)| {
                             if member.source.users {
                                 *current = uuid;
                                 *system = true;
@@ -815,22 +839,22 @@ pub fn build(
                                 *current = (*current).min(uuid);
                             }
                         })
-                        .or_insert((uuid, member.source.users));
+                        .or_insert((uuid, member.source.users, credential.clone()));
                 }
             }
             users = identities
-                .into_iter()
-                .map(|(password, (uuid, system))| {
-                    (
-                        if system {
-                            uuid
-                        } else {
-                            Uuid::new_v5(&uuid, password.as_bytes())
-                        },
-                        password,
-                    )
+                .into_values()
+                .map(|(uuid, system, credential)| {
+                    let uuid = if credential.cipher.is_some() {
+                        Uuid::new_v5(&uuid, &serde_json::to_vec(&credential.identity())?)
+                    } else if system {
+                        uuid
+                    } else {
+                        Uuid::new_v5(&uuid, credential.password.as_bytes())
+                    };
+                    Ok((uuid, credential))
                 })
-                .collect();
+                .collect::<Result<_>>()?;
         }
         result.push(Listener {
             source,
@@ -843,33 +867,44 @@ pub fn build(
     Ok(result)
 }
 
-fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, String> {
+fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, Credential> {
     if !entry.inbound.protocol.users() {
         return BTreeMap::new();
     }
-    let mut values: BTreeMap<Uuid, String> = if entry.inbound.users {
+    if matches!(
+        &entry.inbound.protocol,
+        Protocol::Shadowsocks(source) if source.cipher == crate::shadowsocks::Cipher::None
+    ) {
+        return BTreeMap::new();
+    }
+    let credential = |password: &str| {
+        if let Protocol::Shadowsocks(source) = &entry.inbound.protocol {
+            Credential {
+                password: source.cipher.credential(password),
+                cipher: Some(source.cipher),
+                level: source.user_level,
+            }
+        } else {
+            Credential {
+                password: password.to_owned(),
+                ..Credential::default()
+            }
+        }
+    };
+    if entry.inbound.users {
         entry
             .users
             .iter()
-            .map(|user| (user.uuid, user.password.clone()))
+            .map(|user| (user.uuid, credential(&user.password)))
             .collect()
     } else {
         entry
             .inbound
             .credentials
             .iter()
-            .map(|value| (value.uuid, value.password.clone()))
+            .map(|value| (value.uuid, credential(&value.password)))
             .collect()
-    };
-    if let Protocol::Shadowsocks(source) = &entry.inbound.protocol {
-        if source.cipher == crate::shadowsocks::Cipher::None {
-            return BTreeMap::new();
-        }
-        for password in values.values_mut() {
-            *password = source.cipher.credential(password);
-        }
     }
-    values
 }
 
 fn versions(modes: &BTreeSet<Mode>) -> Vec<HttpVersion> {

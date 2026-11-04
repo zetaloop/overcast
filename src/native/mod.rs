@@ -261,7 +261,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         let users: Vec<_> = listener
             .users
             .iter()
-            .map(|(user, password)| (user.to_string(), password.clone()))
+            .map(|(user, credential)| (user.to_string(), credential.clone()))
             .collect();
         let mut globals = Map::new();
         let target = if matches!(inbound.protocol, Protocol::Forward(_)) {
@@ -449,7 +449,9 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                                 listener
                                     .users
                                     .iter()
-                                    .find(|(_, password)| *password == &member.users[&user])
+                                    .find(|(_, credential)| {
+                                        credential.identity() == member.users[&user].identity()
+                                    })
                                     .unwrap()
                                     .0
                                     .to_string()
