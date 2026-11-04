@@ -64,7 +64,7 @@ impl Binding {
         let Value::Object(mut settings) = serde_json::to_value(&source.listen)? else {
             unreachable!()
         };
-        for name in ["address", "namespace", "ipv6_only"] {
+        for name in ["enabled", "address", "namespace", "ipv6_only"] {
             settings.remove(name);
         }
         if cfg!(any(target_os = "linux", target_os = "android")) {

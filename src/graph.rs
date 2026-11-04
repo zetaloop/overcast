@@ -93,7 +93,7 @@ impl Graph<'_> {
         destination: Destination,
         server: &str,
     ) -> Result<Vec<String>> {
-        if self.allows(index, user, network, destination, server)? {
+        if !server.is_empty() && self.allows(index, user, network, destination, server)? {
             return Ok(vec![server.to_owned()]);
         }
         let mut values = Vec::new();

@@ -170,86 +170,78 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         builder.previous = serde_json::from_slice::<State>(&bytes)?.ports;
     }
     let mut listeners = listener::build(store, &mut graph, &config.keys, progress)?;
+    let members: Vec<_> = listeners
+        .iter()
+        .flat_map(|listener| listener.members.iter().cloned())
+        .collect();
+    listeners.retain(|listener| listener.source.listen.enabled);
+    if listeners.is_empty() {
+        return Ok(None);
+    }
     builder.reserved = listeners
         .iter()
         .map(|listener| listener.binding.clone())
         .collect();
-    let certificates: BTreeSet<_> = listeners
-        .iter()
-        .filter(|listener| listener.source.tls.enabled && !listener.source.tls.reality.enabled)
-        .flat_map(|listener| &listener.members)
-        .map(|member| certificate::name(graph.entries[member.entry].inbound))
-        .collect::<Result<_>>()?;
-    let caddy = if certificates.is_empty() {
-        None
-    } else {
-        let mut binding = binding::Binding::local(80, BTreeSet::from([graph::Network::Tcp]))?;
-        binding.address = binding::Address::Any;
-        if certificates.iter().any(|name| certificate::public(name))
-            && let Some(listener) = listeners
-                .iter()
-                .find(|listener| listener.binding.intersects(&binding))
-        {
-            return Err(format!(
-                "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
-                listener.source.name
-            )
-            .into());
-        }
-        builder.reserved.push(binding);
-        Some(builder.port("caddy", BTreeSet::from([graph::Network::Tcp]))?)
-    };
-    let mut keys = config.keys.clone();
-    reality::prepare(&listeners, &graph, &mut keys, progress)?;
-    encryption::prepare(&listeners, &graph, &mut keys, progress)?;
-    shadowsocks::prepare(&listeners, &graph, &mut keys, progress)?;
-    let mut targets: BTreeSet<_> = graph
-        .entries
-        .iter()
-        .flat_map(|entry| &entry.accounts)
-        .flat_map(|account| {
-            account.rules.iter().filter_map(move |rule| {
-                if let Destination::Inbound(uuid) = rule.destination {
-                    Some((uuid, account.network, Layer::Transport))
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
-    targets.extend(
-        graph
-            .entries
-            .iter()
-            .flat_map(|entry| entry.inbound.protocol.fallbacks())
-            .filter_map(|fallback| match fallback.target {
-                endpoint::Endpoint::Inbound(uuid) => {
-                    Some((uuid, graph::Network::Tcp, Layer::Protocol))
-                }
-                _ => None,
-            }),
-    );
+    let mut http = binding::Binding::local(80, BTreeSet::from([graph::Network::Tcp]))?;
+    http.address = binding::Address::Any;
+    if members.iter().any(|member| {
+        let source = graph.entries[member.entry].inbound;
+        source.tls.enabled && !source.tls.reality.enabled
+    }) {
+        builder.reserved.push(http.clone());
+    }
     let mut internal = HashMap::new();
-    for &(uuid, network, layer) in &targets {
-        if internal.contains_key(&(uuid, network, layer)) {
-            continue;
+    let mut current = 0;
+    while current < listeners.len() {
+        progress.check()?;
+        let mut targets = BTreeSet::new();
+        for member in &listeners[current].members {
+            let entry = &graph.entries[member.entry];
+            for account in entry
+                .accounts
+                .iter()
+                .filter(|account| member.carries(account.network))
+            {
+                targets.extend(account.rules.iter().filter_map(|rule| {
+                    if let Destination::Inbound(uuid) = rule.destination {
+                        Some((uuid, account.network, Layer::Transport))
+                    } else {
+                        None
+                    }
+                }));
+            }
+            targets.extend(
+                entry
+                    .inbound
+                    .protocol
+                    .fallbacks()
+                    .iter()
+                    .filter_map(|fallback| {
+                        if let endpoint::Endpoint::Inbound(uuid) = fallback.target {
+                            Some((uuid, graph::Network::Tcp, Layer::Protocol))
+                        } else {
+                            None
+                        }
+                    }),
+            );
         }
-        if layer == Layer::Protocol
-            && !graph.reaches(
-                uuid,
-                network,
-                layer,
-                |core, destination, network, payload| {
-                    builder.available(core, destination, network, payload)
-                },
-            )?
-        {
-            continue;
-        }
-        let member = listeners
-            .iter()
-            .flat_map(|listener| &listener.members)
-            .find(|member| {
+        for (uuid, network, layer) in targets {
+            if internal.contains_key(&(uuid, network, layer)) {
+                continue;
+            }
+            if layer == Layer::Protocol
+                && !graph.reaches(
+                    uuid,
+                    network,
+                    layer,
+                    |core, destination, network, payload| {
+                        builder.available(core, destination, network, payload)
+                    },
+                )?
+            {
+                continue;
+            }
+            let member = members.iter().find(|member| {
                 graph.entries[member.entry].inbound.uuid == uuid
                     && if layer == Layer::Transport {
                         member.binding.networks.contains(&network)
@@ -262,40 +254,66 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                         )
                     }
             });
-        let Some(member) = member else {
-            if layer == Layer::Protocol {
-                continue;
-            }
-            return Err(format!("入站 {uuid} 缺少 {} 接收器", network.name()).into());
-        };
-        let networks = if layer == Layer::Protocol {
-            BTreeSet::from([graph::Network::Tcp])
-        } else {
-            member.binding.networks.clone()
-        };
-        let tag = if layer == Layer::Protocol {
-            format!("inlet-{uuid}-protocol")
-        } else {
-            format!(
-                "inlet-{uuid}-{}",
-                member
-                    .binding
-                    .networks
-                    .iter()
-                    .map(|network| network.name())
-                    .collect::<Vec<_>>()
-                    .join("-")
-            )
-        };
-        let port = builder.port(&tag, networks)?;
-        let listener = member.internal(port, layer)?;
-        for &network in &listener.binding.networks {
-            if targets.contains(&(uuid, network, layer)) {
+            let Some(member) = member else {
+                if layer == Layer::Protocol {
+                    continue;
+                }
+                return Err(format!("入站 {uuid} 缺少 {} 接收器", network.name()).into());
+            };
+            let networks = if layer == Layer::Protocol {
+                BTreeSet::from([graph::Network::Tcp])
+            } else {
+                member.binding.networks.clone()
+            };
+            let tag = if layer == Layer::Protocol {
+                format!("inlet-{uuid}-protocol")
+            } else {
+                format!(
+                    "inlet-{uuid}-{}",
+                    member
+                        .binding
+                        .networks
+                        .iter()
+                        .map(|network| network.name())
+                        .collect::<Vec<_>>()
+                        .join("-")
+                )
+            };
+            let port = builder.port(&tag, networks)?;
+            let listener = member.internal(port, layer)?;
+            for &network in &listener.binding.networks {
                 internal.insert((uuid, network, layer), listeners.len());
             }
+            listeners.push(listener);
         }
-        listeners.push(listener);
+        current += 1;
     }
+    let certificates: BTreeSet<_> = listeners
+        .iter()
+        .filter(|listener| listener.source.tls.enabled && !listener.source.tls.reality.enabled)
+        .flat_map(|listener| &listener.members)
+        .map(|member| certificate::name(graph.entries[member.entry].inbound))
+        .collect::<Result<_>>()?;
+    let caddy = if certificates.is_empty() {
+        None
+    } else {
+        if certificates.iter().any(|name| certificate::public(name))
+            && let Some(listener) = listeners
+                .iter()
+                .find(|listener| listener.binding.intersects(&http))
+        {
+            return Err(format!(
+                "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
+                listener.source.name
+            )
+            .into());
+        }
+        Some(builder.port("caddy", BTreeSet::from([graph::Network::Tcp]))?)
+    };
+    let mut keys = config.keys.clone();
+    reality::prepare(&listeners, &graph, &mut keys, progress)?;
+    encryption::prepare(&listeners, &graph, &mut keys, progress)?;
+    shadowsocks::prepare(&listeners, &graph, &mut keys, progress)?;
     let fallback_targets: HashMap<_, _> = internal
         .iter()
         .filter(|((_, _, layer), _)| *layer == Layer::Protocol)

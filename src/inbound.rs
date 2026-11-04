@@ -46,12 +46,7 @@ impl Inbound {
             uuid: Uuid::new_v4(),
             name: String::new(),
             address: String::new(),
-            ports: match kind {
-                Kind::Mixed => "1080",
-                Kind::Vless | Kind::Vmess | Kind::Trojan | Kind::Forward => "443",
-                Kind::Shadowsocks => "8388",
-            }
-            .to_owned(),
+            ports: kind.port().to_string(),
             core: kind.core(),
             users: !matches!(kind, Kind::Forward),
             credentials: None,
@@ -69,15 +64,16 @@ impl Inbound {
         if self.name.trim().is_empty() {
             return Err("入站名称不能为空".into());
         }
-        if self.address.trim().is_empty() {
+        if self.listen.enabled && self.address.trim().is_empty() {
             return Err("连接地址不能为空".into());
         }
-        if !is_ip(&self.address) {
+        if !self.address.is_empty() && !is_ip(&self.address) {
             url::Host::parse(&self.address)
                 .map_err(|error| format!("连接地址格式不正确：{error}"))?;
         }
         let address = &self.listen.address;
-        if !is_ip(address)
+        if self.listen.enabled
+            && !is_ip(address)
             && address != "localhost"
             && !Path::new(address).is_absolute()
             && !address.starts_with('@')
@@ -92,6 +88,9 @@ impl Inbound {
     }
 
     pub fn ports(&self) -> Result<BTreeSet<u16>> {
+        if !self.listen.enabled && self.ports.trim().is_empty() {
+            return Ok(BTreeSet::from([self.protocol.kind().port()]));
+        }
         let mut ports = BTreeSet::new();
         for range in self.ports.split(',') {
             let range = range.trim();
@@ -113,11 +112,17 @@ impl Inbound {
     }
 
     pub(crate) fn summary(&self) -> String {
+        if self.address.is_empty() {
+            return self.protocol.kind().text();
+        }
         let address = if self.address.contains(':') && !self.address.starts_with('[') {
             format!("[{}]", self.address)
         } else {
             self.address.clone()
         };
+        if self.ports.trim().is_empty() {
+            return format!("{} {address}", self.protocol.kind().text());
+        }
         format!("{} {address}:{}", self.protocol.kind().text(), self.ports)
     }
 }
@@ -150,6 +155,14 @@ enum Kind {
 }
 
 impl Kind {
+    fn port(self) -> u16 {
+        match self {
+            Self::Mixed => 1080,
+            Self::Shadowsocks => 8388,
+            _ => 443,
+        }
+    }
+
     fn core(self) -> Core {
         match self {
             Self::Mixed | Self::Vmess | Self::Trojan | Self::Shadowsocks | Self::Forward => {
@@ -458,6 +471,7 @@ pub struct Ech {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Listen {
+    pub enabled: bool,
     pub address: String,
     pub interface: Option<String>,
     pub routing_mark: Option<u32>,
@@ -483,6 +497,7 @@ pub struct Listen {
 impl Default for Listen {
     fn default() -> Self {
         Self {
+            enabled: true,
             address: "::".to_owned(),
             interface: None,
             routing_mark: None,
@@ -557,7 +572,7 @@ fn edit(
             item.value = destination.text();
             items.push(item);
         }
-        if existing {
+        if existing && inbound.listen.enabled {
             items.extend([
                 Item::new("copy", "复制连接".stylized()),
                 Item::new("share", "分享链接".stylized()),
@@ -583,11 +598,13 @@ fn edit(
         tls.value = inbound.tls.enabled.text();
         let mut transport = Item::new("transport", "传输".stylized());
         transport.value = inbound.transport.text();
+        let mut listen = Item::new("listen", "监听".stylized());
+        listen.value = inbound.listen.enabled.text();
         items.extend([
             Item::new("options", "协议参数".stylized()),
             transport,
             tls,
-            Item::new("listen", "监听".stylized()),
+            listen,
         ]);
         if existing && crate::keys::Keys::needed(&inbound) {
             items.push(Item::new("handshake", "握手资料".stylized()));
@@ -1016,6 +1033,7 @@ fields!(Ech {
 });
 
 fields!(Listen {
+    enabled: "启用",
     address: "地址",
     interface: "接口",
     routing_mark: "路由标记",

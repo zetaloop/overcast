@@ -126,6 +126,7 @@ impl Member {
             proxy_protocol: layer == Layer::Protocol && source.core == Core::Xray,
             ..crate::inbound::Listen::default()
         };
+        validate(&source, &member.modes, &self.users)?;
         let binding = Binding::local(port, networks)?;
         Ok(Listener {
             source,
@@ -237,6 +238,52 @@ fn configure(source: &mut Inbound, modes: &BTreeSet<Mode>) {
     }
 }
 
+fn validate(
+    source: &Inbound,
+    modes: &BTreeSet<Mode>,
+    users: &BTreeMap<Uuid, Credential>,
+) -> Result<()> {
+    let unix =
+        source.listen.address.starts_with('@') || Path::new(&source.listen.address).is_absolute();
+    let transport_udp = source.transport.udp(
+        source.tls.enabled && !source.tls.reality.enabled,
+        &source.tls.alpn,
+    );
+    if unix && source.core != Core::Xray {
+        return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
+    }
+    if unix && transport_udp {
+        return Err(format!("入站 {} 的传输需要 UDP 监听地址", source.name).into());
+    }
+    if (unix || transport_udp)
+        && source.core == Core::Xray
+        && matches!(&source.protocol, Protocol::Mixed(protocol) if protocol.socks.enabled)
+    {
+        return Err(format!(
+            "入站 {} 的 Xray SOCKS 处理器需要 TCP 地址，HTTP 可使用当前传输",
+            source.name
+        )
+        .into());
+    }
+    for (stream, packet, name) in [
+        (Mode::Shadowsocks, Mode::ShadowsocksUdp, "Shadowsocks "),
+        (Mode::Forward, Mode::ForwardUdp, ""),
+    ] {
+        if modes.contains(&packet) && (unix || transport_udp && modes.contains(&stream)) {
+            return Err(format!("入站 {} 的{name}数据报需要独立 UDP 套接字", source.name).into());
+        }
+    }
+    if users.is_empty()
+        && !matches!(source.protocol, Protocol::Mixed(_))
+        && !matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
+        && source.protocol.users()
+        && source.protocol.fallbacks().is_empty()
+    {
+        return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
+    }
+    Ok(())
+}
+
 pub struct Group<'a> {
     pub entries: BTreeSet<usize>,
     pub listeners: Vec<&'a Listener>,
@@ -271,9 +318,17 @@ pub fn build(
 ) -> Result<Vec<Listener>> {
     let step = progress.activity("分配监听资源");
     let mut groups: BTreeMap<Option<u16>, Vec<Vec<Member>>> = BTreeMap::new();
+    let mut unbound = Vec::new();
     for (index, entry) in graph.entries.iter().enumerate() {
         progress.check()?;
         let mut source = entry.inbound.clone();
+        if !source.listen.enabled {
+            source.listen = crate::inbound::Listen {
+                enabled: false,
+                address: "127.0.0.1".to_owned(),
+                ..crate::inbound::Listen::default()
+            };
+        }
         if let Some(fallbacks) = source.protocol.fallbacks_mut() {
             for fallback in fallbacks {
                 if !matches!(fallback.target, crate::endpoint::Endpoint::Address(_)) {
@@ -371,32 +426,6 @@ pub fn build(
                 .map(|account| account.network)
                 .collect::<Vec<_>>(),
         );
-        if unix && source.core != Core::Xray {
-            return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
-        }
-        if unix && transport_udp {
-            return Err(format!("入站 {} 的传输需要 UDP 监听地址", source.name).into());
-        }
-        if (unix || transport_udp)
-            && source.core == Core::Xray
-            && matches!(&source.protocol, Protocol::Mixed(protocol) if protocol.socks.enabled)
-        {
-            return Err(format!(
-                "入站 {} 的 Xray SOCKS 处理器需要 TCP 地址，HTTP 可使用当前传输",
-                source.name
-            )
-            .into());
-        }
-        for (stream, packet, name) in [
-            (Mode::Shadowsocks, Mode::ShadowsocksUdp, "Shadowsocks "),
-            (Mode::Forward, Mode::ForwardUdp, ""),
-        ] {
-            if modes.contains(&packet) && (unix || transport_udp && modes.contains(&stream)) {
-                return Err(
-                    format!("入站 {} 的{name}数据报需要独立 UDP 套接字", source.name).into(),
-                );
-            }
-        }
         let parts =
             if source.core == Core::SingBox && modes.contains(&Mode::Http3) && modes.len() > 1 {
                 let mut tcp = modes.clone();
@@ -405,7 +434,7 @@ pub fn build(
             } else {
                 vec![modes]
             };
-        let ports: Vec<_> = if unix {
+        let ports: Vec<_> = if unix || !source.listen.enabled {
             vec![None]
         } else {
             source.ports()?.into_iter().map(Some).collect()
@@ -460,6 +489,15 @@ pub fn build(
                     users: Rc::clone(&users),
                     binding,
                 };
+                if !source.listen.enabled {
+                    unbound.push(Listener {
+                        source: source.as_ref().clone(),
+                        binding: member.binding.clone(),
+                        users: users.as_ref().clone(),
+                        members: vec![member],
+                    });
+                    continue;
+                }
                 let groups = groups.entry(*port).or_default();
                 let mut combined = Vec::new();
                 for group in groups.extract_if(.., |group| {
@@ -492,411 +530,410 @@ pub fn build(
     }
     let mut result = Vec::new();
     for members in combined.into_values() {
-        progress.check()?;
-        let index = members
-            .iter()
-            .position(|candidate| {
-                members
-                    .iter()
-                    .all(|member| candidate.binding.contains(&member.binding))
-            })
-            .ok_or_else(|| conflict(&members, "监听地址与接口的组合无法合并"))?;
-        let mut binding = members[index].binding.clone();
-        let mut source = (*members[index].source).clone();
-        if source.tls.enabled && source.tls.reality.enabled {
-            source.tls.reality.private_key = members
-                .iter()
-                .find_map(|member| member.source.tls.reality.private_key.clone());
-            source.tls.reality.signature_seed = members
-                .iter()
-                .find_map(|member| member.source.tls.reality.signature_seed.clone());
-            source.tls.reality.short_ids = members
-                .iter()
-                .find_map(|member| {
-                    (!member.source.tls.reality.short_ids.is_empty())
-                        .then(|| member.source.tls.reality.short_ids.clone())
-                })
-                .unwrap_or_default();
-        }
-        let modes: BTreeSet<_> = members
-            .iter()
-            .flat_map(|member| member.modes.iter())
-            .copied()
-            .collect();
-        binding.networks = members
-            .iter()
-            .flat_map(|member| member.binding.networks.iter().copied())
-            .collect();
-        let mut users = BTreeMap::new();
-        for member in &members {
-            if member.source.core != source.core {
-                return Err(conflict(&members, "同一监听资源指定了不同核心").into());
-            }
-            if member.users.is_empty() != members[0].users.is_empty() {
-                return Err(conflict(&members, "认证与无凭据连接无法共用原生认证表").into());
-            }
-            for (&user, credential) in member.users.iter() {
-                if matches!(source.protocol, Protocol::Mixed(_))
-                    && users.get(&user).is_some_and(|other| other != credential)
-                {
-                    return Err(conflict(&members, &format!("凭据 {user} 对应不同密码")).into());
-                }
-                users.insert(user, credential.clone());
-            }
-            if binding.interface != member.binding.interface {
-                return Err(conflict(&members, "监听套接字绑定到不同接口").into());
-            }
-            same(
-                binding.settings.as_ref(),
-                member.binding.settings.as_ref(),
-                &[],
-                "监听",
-                &members,
-            )?;
-            if source.tls.enabled != member.source.tls.enabled {
-                return Err(conflict(&members, "TLS 与明文连接使用了同一监听资源").into());
-            }
-            if source.core == Core::Xray {
-                same(
-                    &super::transport::xray(&source.transport, true, store, source.tls.enabled)?,
-                    &super::transport::xray(
-                        &member.source.transport,
-                        true,
-                        store,
-                        member.source.tls.enabled,
-                    )?,
-                    &[],
-                    "传输",
-                    &members,
-                )?;
-            } else if source.core == Core::SingBox {
-                same(
-                    &super::transport::singbox(
-                        &source.transport,
-                        true,
-                        source.tls.enabled,
-                        source.tls.reality.enabled,
-                    )?
-                    .unwrap_or(serde_json::json!({})),
-                    &super::transport::singbox(
-                        &member.source.transport,
-                        true,
-                        member.source.tls.enabled,
-                        member.source.tls.reality.enabled,
-                    )?
-                    .unwrap_or(serde_json::json!({})),
-                    &[],
-                    "传输",
-                    &members,
-                )?;
-            } else {
-                same(
-                    &super::transport::mihomo_server(&source.transport)?,
-                    &super::transport::mihomo_server(&member.source.transport)?,
-                    &[],
-                    "传输",
-                    &members,
-                )?;
-            }
-            if source.tls.enabled {
-                let mut tls = member.source.tls.clone();
-                if tls.reality.enabled {
-                    if tls.reality.private_key.is_none() {
-                        tls.reality.private_key = source.tls.reality.private_key.clone();
-                    }
-                    if tls.reality.signature_seed.is_none() {
-                        tls.reality.signature_seed = source.tls.reality.signature_seed.clone();
-                    }
-                    if tls.reality.short_ids.is_empty() {
-                        tls.reality.short_ids = source.tls.reality.short_ids.clone();
-                    }
-                }
-                same(&source.tls.reality, &tls.reality, &[], "REALITY", &members)?;
-                same(
-                    &source.tls,
-                    &tls,
-                    &["server_name", "reality"],
-                    "TLS",
-                    &members,
-                )?;
-                if source.core != Core::Xray
-                    && !source.tls.reality.enabled
-                    && crate::certificate::name(&source)?
-                        != crate::certificate::name(&member.source)?
-                {
-                    return Err(conflict(&members, "这个核心的监听使用一组证书与私钥").into());
-                }
-            }
-            match (&mut source.protocol, &member.source.protocol) {
-                (Protocol::Mixed(current), Protocol::Mixed(other)) => {
-                    if current.user_level != other.user_level {
-                        return Err(conflict(&members, "用户等级不同").into());
-                    }
-                    current.udp |= other.udp;
-                    if current.http.enabled && other.http.enabled {
-                        same(
-                            &current.http,
-                            &other.http,
-                            &["enabled", "versions"],
-                            "HTTP",
-                            &members,
-                        )?;
-                    } else if other.http.enabled {
-                        current.http = other.http.clone();
-                    }
-                    if current.socks.enabled && other.socks.enabled {
-                        same(
-                            &current.socks,
-                            &other.socks,
-                            &["enabled"],
-                            "SOCKS",
-                            &members,
-                        )?;
-                    } else if other.socks.enabled {
-                        current.socks = other.socks.clone();
-                    }
-                }
-                (Protocol::Vless(current), Protocol::Vless(other)) => {
-                    same(current, other, &["encryption"], "VLESS", &members)?;
-                    match (&mut current.encryption, &other.encryption) {
-                        (None, None) => {}
-                        (Some(current), Some(other)) => {
-                            let mut other = other.clone();
-                            current.inherit(&other);
-                            other.inherit(current);
-                            if current.authentication != other.authentication
-                                || super::encryption::server(current)?
-                                    != super::encryption::server(&other)?
-                            {
-                                return Err(conflict(&members, "VLESS 加密参数不同").into());
-                            }
-                        }
-                        _ => return Err(conflict(&members, "VLESS 加密参数不同").into()),
-                    }
-                }
-                (Protocol::Vmess(current), Protocol::Vmess(other)) => {
-                    same(current, other, &[], "VMess", &members)?
-                }
-                (Protocol::Trojan(current), Protocol::Trojan(other)) => {
-                    same(current, other, &[], "Trojan", &members)?
-                }
-                (Protocol::Shadowsocks(current), Protocol::Shadowsocks(other)) => {
-                    let mut omitted = vec!["tcp", "udp", "password"];
-                    if source.core == Core::Xray {
-                        omitted.push("user_level");
-                        if current.cipher.aead() && other.cipher.aead() {
-                            omitted.push("cipher");
-                        }
-                    }
-                    same(current, other, &omitted, "Shadowsocks", &members)?;
-                    if current.password.is_none() {
-                        current.password = other.password.clone();
-                    } else if other.password.is_some() && current.password != other.password {
-                        return Err(conflict(&members, "Shadowsocks 入口共享密钥不同").into());
-                    }
-                    current.tcp |= other.tcp;
-                    current.udp |= other.udp;
-                }
-                (Protocol::Forward(current), Protocol::Forward(other)) => {
-                    same(
-                        current,
-                        other,
-                        &["outbound", "tcp", "udp"],
-                        "固定转发",
-                        &members,
-                    )?;
-                    current.tcp |= other.tcp;
-                    current.udp |= other.udp;
-                }
-                _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
-            }
-        }
-        configure(&mut source, &modes);
-        if users.is_empty()
-            && !matches!(source.protocol, Protocol::Mixed(_))
-            && !matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
-            && source.protocol.users()
-            && source.protocol.fallbacks().is_empty()
-        {
-            return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
-        }
-        let password_identity = matches!(
-            source.protocol,
-            Protocol::Trojan(_) | Protocol::Shadowsocks(_)
-        );
-        let credentials: BTreeSet<_> = members
-            .iter()
-            .flat_map(|member| {
-                member
-                    .users
-                    .iter()
-                    .map(|(uuid, credential)| (*uuid, credential.clone()))
-            })
-            .collect();
-        let mut addresses: BTreeSet<_> = members
-            .iter()
-            .map(|member| member.binding.address.clone())
-            .collect();
-        addresses.extend([Address::V4, Address::V6]);
-        let mut interfaces: BTreeSet<_> = members
-            .iter()
-            .map(|member| member.binding.interface)
-            .collect();
-        interfaces.insert(None);
-        for address in &addresses {
-            for &interface in &interfaces {
-                if !binding.accepts(address, interface) {
-                    continue;
-                }
-                for &mode in &modes {
-                    let identities: Vec<_> = if users.is_empty() || mode == Mode::SocksUdp {
-                        vec![None]
-                    } else {
-                        credentials.iter().map(Some).collect()
-                    };
-                    for identity in identities {
-                        progress.check()?;
-                        let eligible: Vec<_> = members
-                            .iter()
-                            .filter(|member| {
-                                member.binding.accepts(address, interface)
-                                    && member.modes.contains(&mode)
-                                    && identity.is_none_or(|(user, credential)| {
-                                        if password_identity {
-                                            member.users.values().any(|value| {
-                                                value.identity() == credential.identity()
-                                            })
-                                        } else {
-                                            member.users.contains_key(user)
-                                        }
-                                    })
-                            })
-                            .collect();
-                        if eligible.is_empty() {
-                            return Err(conflict(
-                                &members,
-                                "合并后的协议与凭据会产生原配置之外的接入资格",
-                            )
-                            .into());
-                        }
-                    }
-                }
-            }
-        }
-        for (position, left) in members.iter().enumerate() {
-            for right in &members[position + 1..] {
-                if !source.protocol.users() {
-                    continue;
-                }
-                for network in [Network::Tcp, Network::Udp] {
-                    if !left.carries(network) || !right.carries(network) {
-                        continue;
-                    }
-                    if source.core == Core::Mihomo
-                        && !left.modes.iter().any(|mode| {
-                            mode.carries(source.core, network)
-                                && right.modes.iter().any(|other| {
-                                    other.family() == mode.family()
-                                        && other.carries(source.core, network)
-                                })
-                        })
-                    {
-                        continue;
-                    }
-                    let identities: Vec<_> = if !network.identity(&source) || users.is_empty() {
-                        vec![(None, None)]
-                    } else if password_identity {
-                        left.users
-                            .iter()
-                            .flat_map(|(left_user, credential)| {
-                                right
-                                    .users
-                                    .iter()
-                                    .filter(move |(_, other)| {
-                                        other.identity() == credential.identity()
-                                    })
-                                    .map(move |(right_user, _)| {
-                                        (Some(*left_user), Some(*right_user))
-                                    })
-                            })
-                            .collect()
-                    } else {
-                        left.users
-                            .keys()
-                            .filter(|user| right.users.contains_key(user))
-                            .map(|user| (Some(*user), Some(*user)))
-                            .collect()
-                    };
-                    for (left_identity, right_identity) in identities {
-                        if left_identity.is_some() && left.source.users != right.source.users {
-                            return Err(conflict(&members, "相同凭据对应不同的系统用户归属").into());
-                        }
-                        if !graph.equivalent(
-                            left.entry,
-                            right.entry,
-                            network,
-                            left_identity,
-                            right_identity,
-                        )? {
-                            return Err(conflict(
-                                &members,
-                                &format!(
-                                    "{} 流量在相同接入身份下具有不同分流结果",
-                                    network.name().to_uppercase()
-                                ),
-                            )
-                            .into());
-                        }
-                    }
-                }
-            }
-        }
-        if password_identity && source.protocol.users() {
-            let mut identities: BTreeMap<_, (Uuid, bool, Credential)> = BTreeMap::new();
-            for member in &members {
-                for (&uuid, credential) in member.users.iter() {
-                    let identity = (credential.cipher, credential.password.clone());
-                    if let Some((_, _, current)) = identities.get(&identity)
-                        && current.level.unwrap_or_default() != credential.level.unwrap_or_default()
-                    {
-                        return Err(conflict(&members, "相同认证凭据对应不同的用户等级").into());
-                    }
-                    identities
-                        .entry(identity)
-                        .and_modify(|(current, system, _)| {
-                            if member.source.users {
-                                *current = uuid;
-                                *system = true;
-                            } else if !*system {
-                                *current = (*current).min(uuid);
-                            }
-                        })
-                        .or_insert((uuid, member.source.users, credential.clone()));
-                }
-            }
-            users = identities
-                .into_values()
-                .map(|(uuid, system, credential)| {
-                    let uuid = if credential.cipher.is_some() {
-                        Uuid::new_v5(&uuid, &serde_json::to_vec(&credential.identity())?)
-                    } else if system {
-                        uuid
-                    } else {
-                        Uuid::new_v5(&uuid, credential.password.as_bytes())
-                    };
-                    Ok((uuid, credential))
-                })
-                .collect::<Result<_>>()?;
-        }
-        result.push(Listener {
-            source,
-            members,
-            users,
-            binding,
-        });
+        result.push(merge(store, graph, members, progress)?);
     }
     step.finish(format!("{} 组监听", result.len()));
+    result.extend(unbound);
     Ok(result)
+}
+
+fn merge(
+    store: &Store,
+    graph: &mut Graph<'_>,
+    members: Vec<Member>,
+    progress: &Progress,
+) -> Result<Listener> {
+    progress.check()?;
+    let index = members
+        .iter()
+        .position(|candidate| {
+            members
+                .iter()
+                .all(|member| candidate.binding.contains(&member.binding))
+        })
+        .ok_or_else(|| conflict(&members, "监听地址与接口的组合无法合并"))?;
+    let mut binding = members[index].binding.clone();
+    let mut source = (*members[index].source).clone();
+    if source.tls.enabled && source.tls.reality.enabled {
+        source.tls.reality.private_key = members
+            .iter()
+            .find_map(|member| member.source.tls.reality.private_key.clone());
+        source.tls.reality.signature_seed = members
+            .iter()
+            .find_map(|member| member.source.tls.reality.signature_seed.clone());
+        source.tls.reality.short_ids = members
+            .iter()
+            .find_map(|member| {
+                (!member.source.tls.reality.short_ids.is_empty())
+                    .then(|| member.source.tls.reality.short_ids.clone())
+            })
+            .unwrap_or_default();
+    }
+    let modes: BTreeSet<_> = members
+        .iter()
+        .flat_map(|member| member.modes.iter())
+        .copied()
+        .collect();
+    binding.networks = members
+        .iter()
+        .flat_map(|member| member.binding.networks.iter().copied())
+        .collect();
+    let mut users = BTreeMap::new();
+    for member in &members {
+        if member.source.core != source.core {
+            return Err(conflict(&members, "同一监听资源指定了不同核心").into());
+        }
+        if member.users.is_empty() != members[0].users.is_empty() {
+            return Err(conflict(&members, "认证与无凭据连接无法共用原生认证表").into());
+        }
+        for (&user, credential) in member.users.iter() {
+            if matches!(source.protocol, Protocol::Mixed(_))
+                && users.get(&user).is_some_and(|other| other != credential)
+            {
+                return Err(conflict(&members, &format!("凭据 {user} 对应不同密码")).into());
+            }
+            users.insert(user, credential.clone());
+        }
+        if binding.interface != member.binding.interface {
+            return Err(conflict(&members, "监听套接字绑定到不同接口").into());
+        }
+        same(
+            binding.settings.as_ref(),
+            member.binding.settings.as_ref(),
+            &[],
+            "监听",
+            &members,
+        )?;
+        if source.tls.enabled != member.source.tls.enabled {
+            return Err(conflict(&members, "TLS 与明文连接使用了同一监听资源").into());
+        }
+        if source.core == Core::Xray {
+            same(
+                &super::transport::xray(&source.transport, true, store, source.tls.enabled)?,
+                &super::transport::xray(
+                    &member.source.transport,
+                    true,
+                    store,
+                    member.source.tls.enabled,
+                )?,
+                &[],
+                "传输",
+                &members,
+            )?;
+        } else if source.core == Core::SingBox {
+            same(
+                &super::transport::singbox(
+                    &source.transport,
+                    true,
+                    source.tls.enabled,
+                    source.tls.reality.enabled,
+                )?
+                .unwrap_or(serde_json::json!({})),
+                &super::transport::singbox(
+                    &member.source.transport,
+                    true,
+                    member.source.tls.enabled,
+                    member.source.tls.reality.enabled,
+                )?
+                .unwrap_or(serde_json::json!({})),
+                &[],
+                "传输",
+                &members,
+            )?;
+        } else {
+            same(
+                &super::transport::mihomo_server(&source.transport)?,
+                &super::transport::mihomo_server(&member.source.transport)?,
+                &[],
+                "传输",
+                &members,
+            )?;
+        }
+        if source.tls.enabled {
+            let mut tls = member.source.tls.clone();
+            if tls.reality.enabled {
+                if tls.reality.private_key.is_none() {
+                    tls.reality.private_key = source.tls.reality.private_key.clone();
+                }
+                if tls.reality.signature_seed.is_none() {
+                    tls.reality.signature_seed = source.tls.reality.signature_seed.clone();
+                }
+                if tls.reality.short_ids.is_empty() {
+                    tls.reality.short_ids = source.tls.reality.short_ids.clone();
+                }
+            }
+            same(&source.tls.reality, &tls.reality, &[], "REALITY", &members)?;
+            same(
+                &source.tls,
+                &tls,
+                &["server_name", "reality"],
+                "TLS",
+                &members,
+            )?;
+            if source.core != Core::Xray
+                && !source.tls.reality.enabled
+                && crate::certificate::name(&source)? != crate::certificate::name(&member.source)?
+            {
+                return Err(conflict(&members, "这个核心的监听使用一组证书与私钥").into());
+            }
+        }
+        match (&mut source.protocol, &member.source.protocol) {
+            (Protocol::Mixed(current), Protocol::Mixed(other)) => {
+                if current.user_level != other.user_level {
+                    return Err(conflict(&members, "用户等级不同").into());
+                }
+                current.udp |= other.udp;
+                if current.http.enabled && other.http.enabled {
+                    same(
+                        &current.http,
+                        &other.http,
+                        &["enabled", "versions"],
+                        "HTTP",
+                        &members,
+                    )?;
+                } else if other.http.enabled {
+                    current.http = other.http.clone();
+                }
+                if current.socks.enabled && other.socks.enabled {
+                    same(
+                        &current.socks,
+                        &other.socks,
+                        &["enabled"],
+                        "SOCKS",
+                        &members,
+                    )?;
+                } else if other.socks.enabled {
+                    current.socks = other.socks.clone();
+                }
+            }
+            (Protocol::Vless(current), Protocol::Vless(other)) => {
+                same(current, other, &["encryption"], "VLESS", &members)?;
+                match (&mut current.encryption, &other.encryption) {
+                    (None, None) => {}
+                    (Some(current), Some(other)) => {
+                        let mut other = other.clone();
+                        current.inherit(&other);
+                        other.inherit(current);
+                        if current.authentication != other.authentication
+                            || super::encryption::server(current)?
+                                != super::encryption::server(&other)?
+                        {
+                            return Err(conflict(&members, "VLESS 加密参数不同").into());
+                        }
+                    }
+                    _ => return Err(conflict(&members, "VLESS 加密参数不同").into()),
+                }
+            }
+            (Protocol::Vmess(current), Protocol::Vmess(other)) => {
+                same(current, other, &[], "VMess", &members)?
+            }
+            (Protocol::Trojan(current), Protocol::Trojan(other)) => {
+                same(current, other, &[], "Trojan", &members)?
+            }
+            (Protocol::Shadowsocks(current), Protocol::Shadowsocks(other)) => {
+                let mut omitted = vec!["tcp", "udp", "password"];
+                if source.core == Core::Xray {
+                    omitted.push("user_level");
+                    if current.cipher.aead() && other.cipher.aead() {
+                        omitted.push("cipher");
+                    }
+                }
+                same(current, other, &omitted, "Shadowsocks", &members)?;
+                if current.password.is_none() {
+                    current.password = other.password.clone();
+                } else if other.password.is_some() && current.password != other.password {
+                    return Err(conflict(&members, "Shadowsocks 入口共享密钥不同").into());
+                }
+                current.tcp |= other.tcp;
+                current.udp |= other.udp;
+            }
+            (Protocol::Forward(current), Protocol::Forward(other)) => {
+                same(
+                    current,
+                    other,
+                    &["outbound", "tcp", "udp"],
+                    "固定转发",
+                    &members,
+                )?;
+                current.tcp |= other.tcp;
+                current.udp |= other.udp;
+            }
+            _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
+        }
+    }
+    configure(&mut source, &modes);
+    validate(&source, &modes, &users)?;
+    let password_identity = matches!(
+        source.protocol,
+        Protocol::Trojan(_) | Protocol::Shadowsocks(_)
+    );
+    let credentials: BTreeSet<_> = members
+        .iter()
+        .flat_map(|member| {
+            member
+                .users
+                .iter()
+                .map(|(uuid, credential)| (*uuid, credential.clone()))
+        })
+        .collect();
+    let mut addresses: BTreeSet<_> = members
+        .iter()
+        .map(|member| member.binding.address.clone())
+        .collect();
+    addresses.extend([Address::V4, Address::V6]);
+    let mut interfaces: BTreeSet<_> = members
+        .iter()
+        .map(|member| member.binding.interface)
+        .collect();
+    interfaces.insert(None);
+    for address in &addresses {
+        for &interface in &interfaces {
+            if !binding.accepts(address, interface) {
+                continue;
+            }
+            for &mode in &modes {
+                let identities: Vec<_> = if users.is_empty() || mode == Mode::SocksUdp {
+                    vec![None]
+                } else {
+                    credentials.iter().map(Some).collect()
+                };
+                for identity in identities {
+                    progress.check()?;
+                    let eligible: Vec<_> = members
+                        .iter()
+                        .filter(|member| {
+                            member.binding.accepts(address, interface)
+                                && member.modes.contains(&mode)
+                                && identity.is_none_or(|(user, credential)| {
+                                    if password_identity {
+                                        member
+                                            .users
+                                            .values()
+                                            .any(|value| value.identity() == credential.identity())
+                                    } else {
+                                        member.users.contains_key(user)
+                                    }
+                                })
+                        })
+                        .collect();
+                    if eligible.is_empty() {
+                        return Err(conflict(
+                            &members,
+                            "合并后的协议与凭据会产生原配置之外的接入资格",
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+    }
+    for (position, left) in members.iter().enumerate() {
+        for right in &members[position + 1..] {
+            if !source.protocol.users() {
+                continue;
+            }
+            for network in [Network::Tcp, Network::Udp] {
+                if !left.carries(network) || !right.carries(network) {
+                    continue;
+                }
+                if source.core == Core::Mihomo
+                    && !left.modes.iter().any(|mode| {
+                        mode.carries(source.core, network)
+                            && right.modes.iter().any(|other| {
+                                other.family() == mode.family()
+                                    && other.carries(source.core, network)
+                            })
+                    })
+                {
+                    continue;
+                }
+                let identities: Vec<_> = if !network.identity(&source) || users.is_empty() {
+                    vec![(None, None)]
+                } else if password_identity {
+                    left.users
+                        .iter()
+                        .flat_map(|(left_user, credential)| {
+                            right
+                                .users
+                                .iter()
+                                .filter(move |(_, other)| other.identity() == credential.identity())
+                                .map(move |(right_user, _)| (Some(*left_user), Some(*right_user)))
+                        })
+                        .collect()
+                } else {
+                    left.users
+                        .keys()
+                        .filter(|user| right.users.contains_key(user))
+                        .map(|user| (Some(*user), Some(*user)))
+                        .collect()
+                };
+                for (left_identity, right_identity) in identities {
+                    if left_identity.is_some() && left.source.users != right.source.users {
+                        return Err(conflict(&members, "相同凭据对应不同的系统用户归属").into());
+                    }
+                    if !graph.equivalent(
+                        left.entry,
+                        right.entry,
+                        network,
+                        left_identity,
+                        right_identity,
+                    )? {
+                        return Err(conflict(
+                            &members,
+                            &format!(
+                                "{} 流量在相同接入身份下具有不同分流结果",
+                                network.name().to_uppercase()
+                            ),
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+    }
+    if password_identity && source.protocol.users() {
+        let mut identities: BTreeMap<_, (Uuid, bool, Credential)> = BTreeMap::new();
+        for member in &members {
+            for (&uuid, credential) in member.users.iter() {
+                let identity = (credential.cipher, credential.password.clone());
+                if let Some((_, _, current)) = identities.get(&identity)
+                    && current.level.unwrap_or_default() != credential.level.unwrap_or_default()
+                {
+                    return Err(conflict(&members, "相同认证凭据对应不同的用户等级").into());
+                }
+                identities
+                    .entry(identity)
+                    .and_modify(|(current, system, _)| {
+                        if member.source.users {
+                            *current = uuid;
+                            *system = true;
+                        } else if !*system {
+                            *current = (*current).min(uuid);
+                        }
+                    })
+                    .or_insert((uuid, member.source.users, credential.clone()));
+            }
+        }
+        users = identities
+            .into_values()
+            .map(|(uuid, system, credential)| {
+                let uuid = if credential.cipher.is_some() {
+                    Uuid::new_v5(&uuid, &serde_json::to_vec(&credential.identity())?)
+                } else if system {
+                    uuid
+                } else {
+                    Uuid::new_v5(&uuid, credential.password.as_bytes())
+                };
+                Ok((uuid, credential))
+            })
+            .collect::<Result<_>>()?;
+    }
+    Ok(Listener {
+        source,
+        members,
+        users,
+        binding,
+    })
 }
 
 fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, Credential> {

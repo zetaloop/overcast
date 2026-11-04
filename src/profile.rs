@@ -41,7 +41,7 @@ pub fn build(
     let mut seen = HashSet::new();
     for index in 0..builder.graph.entries.len() {
         let source = builder.graph.entries[index].inbound;
-        if inbound.is_some_and(|uuid| uuid != source.uuid) {
+        if !source.listen.enabled || inbound.is_some_and(|uuid| uuid != source.uuid) {
             continue;
         }
         let users = config
@@ -394,7 +394,6 @@ impl Builder<'_> {
         }
         let mut tls = connection::Tls {
             enabled: true,
-            server_name: Some(crate::certificate::name(source)?),
             alpn: source.tls.alpn.clone(),
             min_version: source.tls.min_version.clone(),
             max_version: source.tls.max_version.clone(),
@@ -407,6 +406,7 @@ impl Builder<'_> {
             tls.ech.config = Some(crate::ech::public(source, self.store)?);
         }
         if !source.tls.reality.enabled {
+            tls.server_name = Some(crate::certificate::name(source)?);
             if !crate::certificate::public(tls.server_name.as_ref().unwrap()) {
                 tls.certificates
                     .push(std::fs::read_to_string(crate::certificate::root(
