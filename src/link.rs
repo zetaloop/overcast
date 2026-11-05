@@ -189,6 +189,84 @@ pub fn trojan(url: &Url) -> Result<crate::trojan::Client> {
     Ok(client)
 }
 
+pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
+    let source = text.split_once("://").ok_or("链接缺少协议")?.1;
+    let end = source.find(['/', '?', '#']).unwrap_or(source.len());
+    let (authority, suffix) = source.split_at(end);
+    let (auth, endpoint) = authority.rsplit_once('@').unwrap_or(("", authority));
+    let (address, ports) = if endpoint.starts_with('[') {
+        let end = endpoint.find(']').ok_or("IPv6 地址缺少右括号")? + 1;
+        let (address, ports) = endpoint.split_at(end);
+        (
+            address,
+            if ports.is_empty() {
+                "443"
+            } else {
+                ports.strip_prefix(':').ok_or("连接端口格式不正确")?
+            },
+        )
+    } else {
+        endpoint.rsplit_once(':').unwrap_or((endpoint, "443"))
+    };
+    let port = *crate::connection::ports(ports)?.first().unwrap();
+    let auth = if auth.is_empty() {
+        String::new()
+    } else {
+        format!("{auth}@")
+    };
+    let url = Url::parse(&format!("hysteria2://{auth}{address}:{port}{suffix}"))?;
+    if !url.path().is_empty() && url.path() != "/" {
+        return Err("Hysteria 2 链接中包含路径".into());
+    }
+    let mut query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+    let mut password = percent_decode_str(url.username())
+        .decode_utf8()?
+        .into_owned();
+    if let Some(value) = url.password() {
+        password.push(':');
+        password.push_str(&percent_decode_str(value).decode_utf8()?);
+    }
+    let pin = query.remove("pinSHA256");
+    let mut tls = tls(&mut query, true)?;
+    if let Some(pin) = pin {
+        if !tls.certificate_sha256.is_empty() && tls.certificate_sha256 != [pin.clone()] {
+            return Err("链接中的证书指纹参数相互冲突".into());
+        }
+        tls.certificate_sha256 = vec![pin];
+    }
+    let obfs = query
+        .remove("obfs")
+        .filter(|value| !value.is_empty())
+        .map(|value| -> Result<_> {
+            Ok(crate::hysteria::Obfs {
+                kind: serde_json::from_value(json!(value))?,
+                password: query.remove("obfs-password").unwrap_or_default(),
+                ..crate::hysteria::Obfs::default()
+            })
+        })
+        .transpose()?;
+    remaining(query.keys(), "链接参数")?;
+    Ok(crate::hysteria::Client {
+        name: percent_decode_str(url.fragment().unwrap_or_default())
+            .decode_utf8()?
+            .into_owned(),
+        server: host(&url)?,
+        port,
+        password,
+        tls,
+        hysteria: crate::hysteria::ClientOptions {
+            obfs,
+            ports: if ports.contains([',', '-']) {
+                ports.to_owned()
+            } else {
+                String::new()
+            },
+            ..crate::hysteria::ClientOptions::default()
+        },
+        ..crate::hysteria::Client::default()
+    })
+}
+
 pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {
     let source = text.split_once("://").ok_or("链接缺少协议")?.1;
     let (source, tag) = source.split_once('#').unwrap_or((source, ""));

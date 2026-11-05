@@ -42,6 +42,7 @@ enum Mode {
     Trojan,
     Shadowsocks,
     ShadowsocksUdp,
+    Hysteria2,
     Forward,
     ForwardUdp,
 }
@@ -49,7 +50,11 @@ enum Mode {
 impl Mode {
     fn wire(self) -> Network {
         match self {
-            Self::Http3 | Self::SocksUdp | Self::ShadowsocksUdp | Self::ForwardUdp => Network::Udp,
+            Self::Http3
+            | Self::SocksUdp
+            | Self::ShadowsocksUdp
+            | Self::Hysteria2
+            | Self::ForwardUdp => Network::Udp,
             _ => Network::Tcp,
         }
     }
@@ -62,6 +67,7 @@ impl Mode {
             Self::Vmess => "VMess",
             Self::Trojan => "Trojan",
             Self::Shadowsocks | Self::ShadowsocksUdp => "Shadowsocks",
+            Self::Hysteria2 => "Hysteria 2",
             Self::Forward | Self::ForwardUdp => "TCP/UDP 转发",
         }
     }
@@ -71,7 +77,7 @@ impl Mode {
             Self::SocksUdp | Self::ShadowsocksUdp | Self::ForwardUdp => network == Network::Udp,
             Self::Forward => network == Network::Tcp,
             Self::Socks => network == Network::Tcp || core != Core::Mihomo,
-            Self::Vless | Self::Vmess | Self::Trojan | Self::Shadowsocks => true,
+            Self::Vless | Self::Vmess | Self::Trojan | Self::Shadowsocks | Self::Hysteria2 => true,
             _ => network == Network::Tcp || core == Core::SingBox,
         }
     }
@@ -189,6 +195,9 @@ fn modes(source: &Inbound, networks: &[Network]) -> BTreeSet<Mode> {
         Protocol::Trojan(_) => {
             modes.insert(Mode::Trojan);
         }
+        Protocol::Hysteria2(_) => {
+            modes.insert(Mode::Hysteria2);
+        }
         Protocol::Shadowsocks(value) => {
             if value.tcp {
                 modes.insert(Mode::Shadowsocks);
@@ -252,7 +261,7 @@ fn validate(
     if unix && source.core != Core::Xray {
         return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
     }
-    if unix && transport_udp {
+    if unix && (transport_udp || modes.iter().any(|mode| mode.wire() == Network::Udp)) {
         return Err(format!("入站 {} 的传输需要 UDP 监听地址", source.name).into());
     }
     if (unix || transport_udp)
@@ -278,8 +287,17 @@ fn validate(
         && !matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
         && source.protocol.users()
         && source.protocol.fallbacks().is_empty()
+        && !source.protocol.responds()
     {
         return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
+    }
+    if matches!(source.protocol, Protocol::Hysteria2(_)) {
+        if !source.tls.enabled || source.tls.reality.enabled || !source.transport.is_default() {
+            return super::unsupported("Hysteria 2 使用协议自身的 QUIC 与 TLS");
+        }
+        for credential in users.values() {
+            crate::hysteria::password(&credential.password)?;
+        }
     }
     Ok(())
 }
@@ -730,6 +748,9 @@ fn merge(
             (Protocol::Trojan(current), Protocol::Trojan(other)) => {
                 same(current, other, &[], "Trojan", &members)?
             }
+            (Protocol::Hysteria2(current), Protocol::Hysteria2(other)) => {
+                same(current, other, &["client"], "Hysteria 2", &members)?
+            }
             (Protocol::Shadowsocks(current), Protocol::Shadowsocks(other)) => {
                 let mut omitted = vec!["tcp", "udp", "password"];
                 if source.core == Core::Xray {
@@ -765,7 +786,7 @@ fn merge(
     validate(&source, &modes, &users)?;
     let password_identity = matches!(
         source.protocol,
-        Protocol::Trojan(_) | Protocol::Shadowsocks(_)
+        Protocol::Trojan(_) | Protocol::Shadowsocks(_) | Protocol::Hysteria2(_)
     );
     let credentials: BTreeSet<_> = members
         .iter()

@@ -238,7 +238,13 @@ impl Network {
                 value.udp
                     && (value.socks.enabled || value.http.enabled && inbound.core == Core::SingBox)
             }
-            (Self::Udp, Protocol::Vless(_) | Protocol::Vmess(_) | Protocol::Trojan(_)) => true,
+            (
+                Self::Udp,
+                Protocol::Vless(_)
+                | Protocol::Vmess(_)
+                | Protocol::Trojan(_)
+                | Protocol::Hysteria2(_),
+            ) => true,
             (Self::Udp, Protocol::Shadowsocks(value)) => value.tcp || value.udp,
             (Self::Udp, Protocol::Forward(value)) => value.udp,
         }
@@ -256,6 +262,7 @@ pub fn build<'a>(
             && config.inbounds.iter().all(|inbound| {
                 inbound.users
                     && inbound.protocol.users()
+                    && !inbound.protocol.responds()
                     && inbound
                         .protocol
                         .fallbacks()
@@ -699,7 +706,7 @@ impl<'a> Analysis<'a> {
                 }
             }
         }
-        Ok(false)
+        Ok(inbound.protocol.responds())
     }
 
     fn reaches(
@@ -760,6 +767,10 @@ impl<'a> Analysis<'a> {
                 }
             }
             if crate::native::listener::accepts(inbound, wire, Network::Tcp, layer) {
+                if inbound.protocol.responds() {
+                    result = true;
+                    break;
+                }
                 for fallback in inbound.protocol.fallbacks() {
                     match &fallback.target {
                         Endpoint::Block => {}

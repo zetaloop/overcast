@@ -23,6 +23,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
+        Connection::Hysteria2(value) => ("hysteria", None, &value.network),
         Connection::Forward(value) => ("freedom", None, &value.network),
     };
     let mut output = Map::from_iter([("protocol".to_owned(), json!(kind))]);
@@ -60,6 +61,13 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         }
     }
     let tls = match source {
+        Connection::Hysteria2(value) => {
+            settings.insert("version".to_owned(), json!(2));
+            settings.insert("address".to_owned(), json!(value.server));
+            settings.insert("port".to_owned(), json!(value.port()?));
+            stream.extend(super::hysteria::client(value, inbound::Core::Xray)?);
+            Some(&value.tls)
+        }
         Connection::Direct(_) => {
             settings.insert("finalRules".to_owned(), json!([{"action": "allow"}]));
             None
@@ -250,7 +258,11 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         }
     };
     if let Some(tls) = tls.filter(|tls| tls.enabled) {
-        let tls = source.transport().unwrap().client_tls(tls);
+        let tls = source
+            .transport()
+            .map_or(std::borrow::Cow::Borrowed(tls), |transport| {
+                transport.client_tls(tls)
+            });
         if tls.reality.enabled {
             reality_transport(source.transport().unwrap())?;
         }
@@ -577,6 +589,29 @@ pub fn listeners(
             }
             options.finish("Xray Shadowsocks 入站")?;
         }
+        Protocol::Hysteria2(value) => {
+            output.insert("protocol".to_owned(), json!("hysteria"));
+            settings.insert("version".to_owned(), json!(2));
+            settings.insert(
+                "users".to_owned(),
+                json!(
+                    users
+                        .iter()
+                        .map(|(name, credential)| {
+                            let mut user = Map::from_iter([
+                                ("email".to_owned(), json!(name)),
+                                ("auth".to_owned(), json!(credential.password)),
+                            ]);
+                            if let Some(level) = value.user_level {
+                                user.insert("level".to_owned(), json!(level));
+                            }
+                            user
+                        })
+                        .collect::<Vec<_>>()
+                ),
+            );
+            stream.extend(super::hysteria::server(value, inbound::Core::Xray, store)?);
+        }
         Protocol::Forward(value) => {
             let (server, port) = target.ok_or("转发入口缺少后继连接")?;
             output.insert("protocol".to_owned(), json!("tunnel"));
@@ -596,6 +631,17 @@ pub fn listeners(
         }
     }
     let mut options = Options::new(&source.listen)?;
+    if matches!(source.protocol, Protocol::Hysteria2(_)) {
+        options.durations(
+            stream
+                .get_mut("hysteriaSettings")
+                .unwrap()
+                .as_object_mut()
+                .unwrap(),
+            &[("udp_timeout", "udpIdleTimeout")],
+            Some(Duration::from_secs(1)),
+        )?;
+    }
     options.take("address");
     options.take("interface");
     let mut sockopt = socket(&mut options)?;
@@ -681,12 +727,14 @@ pub fn listeners(
             stream.insert("tlsSettings".to_owned(), server_tls(source, store)?);
         }
     }
-    stream.extend(transport::xray(
-        &source.transport,
-        true,
-        store,
-        source.tls.enabled,
-    )?);
+    if !matches!(source.protocol, Protocol::Hysteria2(_)) {
+        stream.extend(transport::xray(
+            &source.transport,
+            true,
+            store,
+            source.tls.enabled,
+        )?);
+    }
     output.insert("settings".to_owned(), json!(settings));
     if !stream.is_empty() {
         output.insert("streamSettings".to_owned(), json!(stream));

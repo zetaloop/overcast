@@ -41,45 +41,51 @@ pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<Str
                         &mut value.proxy.server,
                         &mut value.proxy.port,
                         &mut value.tls,
-                        &mut value.transport,
+                        Some(&mut value.transport),
                     ),
                     Connection::Socks(value) => (
                         &mut value.proxy.server,
                         &mut value.proxy.port,
                         &mut value.tls,
-                        &mut value.transport,
+                        Some(&mut value.transport),
                     ),
                     Connection::Vless(value) => (
                         &mut value.server,
                         &mut value.port,
                         &mut value.tls,
-                        &mut value.transport,
+                        Some(&mut value.transport),
                     ),
                     Connection::Vmess(value) => (
                         &mut value.server,
                         &mut value.port,
                         &mut value.tls,
-                        &mut value.transport,
+                        Some(&mut value.transport),
                     ),
                     Connection::Trojan(value) => (
                         &mut value.server,
                         &mut value.port,
                         &mut value.tls,
-                        &mut value.transport,
+                        Some(&mut value.transport),
                     ),
                     Connection::Shadowsocks(value) => (
                         &mut value.server,
                         &mut value.port,
                         &mut value.tls,
-                        &mut value.transport,
+                        Some(&mut value.transport),
                     ),
                     Connection::Forward(value) => (
                         &mut value.server,
                         &mut value.port,
                         &mut value.tls,
-                        &mut value.transport,
+                        Some(&mut value.transport),
                     ),
                     Connection::Direct(_) => unreachable!(),
+                    Connection::Hysteria2(value) => {
+                        if !value.hysteria.ports.is_empty() {
+                            return Err("多段跳跃端口连接使用连接路径 JSON 分享".into());
+                        }
+                        (&mut value.server, &mut value.port, &mut value.tls, None)
+                    }
                 };
                 if value.tls.enabled && tls.enabled {
                     return Err("嵌套 TLS 连接使用连接路径 JSON 分享".into());
@@ -94,9 +100,10 @@ pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<Str
                     *tls = value.tls;
                 }
                 if !value.transport.is_default() {
-                    if !transport.is_default() {
+                    let Some(transport) = transport.filter(|transport| transport.is_default())
+                    else {
                         return Err("嵌套传输连接使用连接路径 JSON 分享".into());
-                    }
+                    };
                     *transport = value.transport;
                 }
                 *server = value.server;
@@ -284,6 +291,44 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
                 format!("{}@", utf8_percent_encode(&value.password, COMPONENT)),
             )
         }
+        Connection::Hysteria2(value) => {
+            let mut options = Options::new(&value.hysteria)?;
+            options.take("obfs");
+            options.take("ports");
+            if value.hysteria.tcp == Some(true) {
+                options.take("tcp");
+            }
+            if value.hysteria.udp == Some(true) {
+                options.take("udp");
+            }
+            options.finish("Hysteria 2 分享链接")?;
+            tls(&value.tls, &mut query, store)?;
+            if !value.tls.enabled || value.tls.reality.enabled {
+                return Err("Hysteria 2 分享链接使用 TLS".into());
+            }
+            query.remove("security");
+            if let Some(value) = query.remove("allowInsecure") {
+                query.insert("insecure".to_owned(), value);
+            }
+            if let Some(value) = query.remove("pcs") {
+                if value.as_str().unwrap().contains(',') {
+                    return Err("Hysteria 2 分享链接使用一个证书指纹".into());
+                }
+                query.insert("pinSHA256".to_owned(), value);
+            }
+            if let Some(obfs) = &value.hysteria.obfs {
+                let mut options = Options::new(obfs)?;
+                options.take("kind");
+                options.take("password");
+                options.finish("Hysteria 2 混淆分享链接")?;
+                query.insert("obfs".to_owned(), json!(obfs.kind));
+                query.insert("obfs-password".to_owned(), json!(obfs.password));
+            }
+            (
+                "hysteria2",
+                format!("{}@", utf8_percent_encode(&value.password, COMPONENT)),
+            )
+        }
         Connection::Shadowsocks(value) => {
             if value.tls.enabled || !value.transport.is_default() {
                 return Err("Shadowsocks 分享链接通过 SIP003 插件描述传输封装".into());
@@ -321,7 +366,17 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
     {
         url.set_path(path);
     }
-    let mut value = url.to_string();
+    let mut value = if let Connection::Hysteria2(source) = source
+        && !source.hysteria.ports.is_empty()
+    {
+        crate::connection::ports(&source.hysteria.ports)?;
+        format!(
+            "{scheme}://{user}{}",
+            connection::address(&server, &source.hysteria.ports)
+        )
+    } else {
+        url.to_string()
+    };
     if !query.is_empty() {
         if scheme == "ss" && !value.ends_with('/') {
             value.push('/');

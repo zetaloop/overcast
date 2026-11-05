@@ -279,6 +279,10 @@ pub struct Quic {
     pub gso: Option<bool>,
     pub incoming_streams: Option<i64>,
     pub stateless_reset: Option<bool>,
+    pub initial_packet_size: Option<u16>,
+    pub handshake_timeout: Option<String>,
+    pub udp_mtu: Option<u16>,
+    pub cwnd: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
@@ -289,6 +293,8 @@ pub enum Congestion {
     Bbr,
     Reno,
     ForceBrutal,
+    Brutal,
+    Cubic,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
@@ -616,6 +622,8 @@ choices!(Congestion {
     Bbr: "bbr" => "BBR",
     Reno: "reno" => "Reno",
     ForceBrutal: "force-brutal" => "强制 Brutal",
+    Brutal: "brutal" => "Brutal",
+    Cubic: "cubic" => "Cubic",
 });
 
 choices!(BbrProfile {
@@ -704,4 +712,8 @@ fields!(Quic {
     gso: "分段卸载",
     incoming_streams: "入站流数",
     stateless_reset: "无状态重置",
+    initial_packet_size: "初始数据包",
+    handshake_timeout: "握手超时",
+    udp_mtu: "UDP MTU",
+    cwnd: "拥塞窗口",
 });

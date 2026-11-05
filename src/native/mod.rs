@@ -1,6 +1,7 @@
 mod binding;
 pub(crate) mod encryption;
 pub(crate) mod forward;
+mod hysteria;
 pub(crate) mod listener;
 mod mihomo;
 mod multiplex;
@@ -544,7 +545,9 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                         .map(|user| {
                             if matches!(
                                 inbound.protocol,
-                                Protocol::Trojan(_) | Protocol::Shadowsocks(_)
+                                Protocol::Trojan(_)
+                                    | Protocol::Shadowsocks(_)
+                                    | Protocol::Hysteria2(_)
                             ) {
                                 listener
                                     .users
@@ -718,7 +721,12 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 proxies.extend(service.outbounds);
                 output.insert("listeners".to_owned(), json!(service.listeners));
                 output.insert("proxies".to_owned(), json!(proxies));
-                output.insert("rules".to_owned(), json!(rules));
+                output
+                    .entry("rules")
+                    .or_insert(json!([]))
+                    .as_array_mut()
+                    .unwrap()
+                    .extend(rules.into_iter().map(Value::String));
                 output.insert("ipv6".to_owned(), json!(true));
                 output.insert("geodata-mode".to_owned(), json!(true));
                 output.insert("geosite-matcher".to_owned(), json!("mph"));
@@ -1339,6 +1347,10 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
     Ok(match source {
         Connection::Direct(_) => parent,
         Connection::Forward(value) => [value.transport.supported(&value.tls, parent), parent[1]],
+        Connection::Hysteria2(value) => [
+            parent[1] && value.hysteria.tcp.unwrap_or(true),
+            parent[1] && value.hysteria.udp.unwrap_or(true),
+        ],
         Connection::Http(value) => {
             let transport =
                 if core == Core::SingBox && value.http.version == connection::HttpVersion::Http3 {

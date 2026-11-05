@@ -48,6 +48,7 @@ pub fn outbound(
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
+        Connection::Hysteria2(value) => ("hysteria2", None, &value.network),
         Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
@@ -64,6 +65,13 @@ pub fn outbound(
     }
     match source {
         Connection::Direct(_) => {}
+        Connection::Hysteria2(value) => {
+            output.extend(super::hysteria::client(value, inbound::Core::SingBox)?);
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("server_port".to_owned(), json!(value.port()?));
+            output.insert("password".to_owned(), json!(value.password));
+            output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+        }
         Connection::Forward(_) => unreachable!(),
         Connection::Http(value) => {
             let mut options = Options::new(&value.http)?;
@@ -393,6 +401,8 @@ pub fn listeners(
                             json!({"name": name, "password": credential.password}),
                         Protocol::Shadowsocks(_) =>
                             json!({"name": name, "password": credential.password}),
+                        Protocol::Hysteria2(_) =>
+                            json!({"name": name, "password": credential.password}),
                         Protocol::Forward(_) => unreachable!(),
                     })
                     .collect::<Vec<_>>()
@@ -433,6 +443,16 @@ pub fn listeners(
         }
     }
     options.finish("sing-box 监听")?;
+    if let Protocol::Hysteria2(value) = &source.protocol {
+        output.insert("type".to_owned(), json!("hysteria2"));
+        output.extend(super::hysteria::server(
+            value,
+            inbound::Core::SingBox,
+            store,
+        )?);
+        output.insert("tls".to_owned(), server_tls(source, store)?);
+        return Ok(vec![output]);
+    }
     if let Protocol::Vless(value) = &source.protocol {
         if users.is_empty() {
             return unsupported("VLESS 入口需要认证用户");

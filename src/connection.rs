@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Display,
+    rc::Rc,
+};
 
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
@@ -32,6 +36,7 @@ pub enum Connection {
     Vmess(crate::vmess::Client),
     Trojan(crate::trojan::Client),
     Shadowsocks(crate::shadowsocks::Client),
+    Hysteria2(crate::hysteria::Client),
     Forward(crate::forward::Client),
 }
 
@@ -45,6 +50,7 @@ impl Connection {
             Self::Vmess(value) => value.core,
             Self::Trojan(value) => value.core,
             Self::Shadowsocks(value) => value.core,
+            Self::Hysteria2(value) => value.core,
             Self::Forward(value) => value.core,
         }
     }
@@ -58,6 +64,7 @@ impl Connection {
             Self::Vmess(value) => (&value.server, value.port),
             Self::Trojan(value) => (&value.server, value.port),
             Self::Shadowsocks(value) => (&value.server, value.port),
+            Self::Hysteria2(value) => (&value.server, value.port().ok()?),
             Self::Forward(value) => (&value.server, value.port),
         })
     }
@@ -71,6 +78,7 @@ impl Connection {
             Self::Vmess(value) => &value.network,
             Self::Trojan(value) => &value.network,
             Self::Shadowsocks(value) => &value.network,
+            Self::Hysteria2(value) => &value.network,
             Self::Forward(value) => &value.network,
         }
     }
@@ -83,6 +91,7 @@ impl Connection {
             Self::Vmess(value) => (&mut value.server, &mut value.tls),
             Self::Trojan(value) => (&mut value.server, &mut value.tls),
             Self::Shadowsocks(value) => (&mut value.server, &mut value.tls),
+            Self::Hysteria2(value) => (&mut value.server, &mut value.tls),
             Self::Forward(value) => (&mut value.server, &mut value.tls),
             Self::Direct(_) => return,
         };
@@ -93,6 +102,13 @@ impl Connection {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
+        if text.split_once("://").is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("hysteria2") || scheme.eq_ignore_ascii_case("hy2")
+        }) {
+            let value = Self::Hysteria2(crate::link::hysteria(text)?);
+            value.validate()?;
+            return Ok(value);
+        }
         if text
             .split_once("://")
             .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("ss"))
@@ -213,13 +229,14 @@ impl Connection {
             Self::Vmess(value) => &value.name,
             Self::Trojan(value) => &value.name,
             Self::Shadowsocks(value) => &value.name,
+            Self::Hysteria2(value) => &value.name,
             Self::Forward(value) => &value.name,
         }
     }
 
     pub fn transport(&self) -> Option<&Transport> {
         match self {
-            Self::Direct(_) => None,
+            Self::Direct(_) | Self::Hysteria2(_) => None,
             Self::Http(value) => Some(&value.transport),
             Self::Socks(value) => Some(&value.transport),
             Self::Vless(value) => Some(&value.transport),
@@ -232,7 +249,7 @@ impl Connection {
 
     pub fn multiplex(&self) -> Option<&crate::multiplex::Client> {
         match self {
-            Self::Direct(_) => None,
+            Self::Direct(_) | Self::Hysteria2(_) => None,
             Self::Http(value) => value.multiplex.as_ref(),
             Self::Socks(value) => value.multiplex.as_ref(),
             Self::Vless(value) => value.multiplex.as_ref(),
@@ -265,6 +282,17 @@ impl Connection {
             Self::Shadowsocks(value) => {
                 format!("Shadowsocks {}", address(&value.server, value.port))
             }
+            Self::Hysteria2(value) => format!(
+                "Hysteria 2 {}",
+                address(
+                    &value.server,
+                    if value.hysteria.ports.is_empty() {
+                        value.port.to_string()
+                    } else {
+                        value.hysteria.ports.clone()
+                    },
+                ),
+            ),
             Self::Forward(value) => format!("TCP/UDP {}", address(&value.server, value.port)),
         }
     }
@@ -337,6 +365,13 @@ impl Connection {
                 Rc::new(move |value, screen| apply(&Self::Forward(value.clone()), screen)),
                 creating,
             ),
+            Self::Hysteria2(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Hysteria2(value.clone()), screen)),
+                creating,
+            ),
         }
     }
 
@@ -373,6 +408,10 @@ impl Connection {
                 (value.server.as_str(), value.port)
             }
             Self::Forward(value) => (value.server.as_str(), value.port),
+            Self::Hysteria2(value) => {
+                crate::hysteria::password(&value.password)?;
+                (value.server.as_str(), value.port()?)
+            }
         };
         if server.trim().is_empty() {
             return Err("连接地址不能为空".into());
@@ -395,6 +434,7 @@ pub fn create(
         Item::new("vmess", "VMess".stylized()),
         Item::new("trojan", "Trojan".stylized()),
         Item::new("shadowsocks", "Shadowsocks".stylized()),
+        Item::new("hysteria2", "Hysteria 2".stylized()),
         Item::new("forward", "TCP/UDP 转发".stylized()),
         Item::new("direct", "直连".stylized()),
         Item::new("back", "返回".stylized()),
@@ -417,8 +457,9 @@ pub fn create(
                     3 => Connection::Vmess(crate::vmess::Client::default()),
                     4 => Connection::Trojan(crate::trojan::Client::default()),
                     5 => Connection::Shadowsocks(crate::shadowsocks::Client::default()),
-                    6 => Connection::Forward(crate::forward::Client::default()),
-                    7 => Connection::Direct(Direct::default()),
+                    6 => Connection::Hysteria2(crate::hysteria::Client::default()),
+                    7 => Connection::Forward(crate::forward::Client::default()),
+                    8 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
                 let accepted = connection.form(screen, apply, true)?;
@@ -446,12 +487,33 @@ impl Proxy {
     }
 }
 
-pub(crate) fn address(server: &str, port: u16) -> String {
+pub(crate) fn address(server: &str, port: impl Display) -> String {
     if server.contains(':') && !server.starts_with('[') {
         format!("[{server}]:{port}")
     } else {
         format!("{server}:{port}")
     }
+}
+
+pub(crate) fn ports(text: &str) -> Result<BTreeSet<u16>> {
+    let mut ports = BTreeSet::new();
+    for range in text.split(',') {
+        let range = range.trim();
+        let (first, last) = range.split_once('-').unwrap_or((range, range));
+        let first: u16 = first
+            .trim()
+            .parse()
+            .map_err(|error| format!("端口格式不正确：{error}"))?;
+        let last: u16 = last
+            .trim()
+            .parse()
+            .map_err(|error| format!("端口格式不正确：{error}"))?;
+        if first == 0 || last < first {
+            return Err("端口需要在 1～65535 之间，范围按从小到大填写".into());
+        }
+        ports.extend(first..=last);
+    }
+    Ok(ports)
 }
 
 #[derive(Clone, Deserialize, Serialize)]

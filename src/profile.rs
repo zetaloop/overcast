@@ -373,6 +373,45 @@ impl Builder<'_> {
                             ..crate::shadowsocks::Client::default()
                         }));
                     }
+                    Protocol::Hysteria2(value) => {
+                        let Some((_, password)) = credentials else {
+                            continue;
+                        };
+                        if value.ignore_client_bandwidth {
+                            let server = value
+                                .quic
+                                .download_bandwidth
+                                .as_deref()
+                                .map(crate::native::transport::mbps)
+                                .transpose()?
+                                .unwrap_or_default();
+                            let client = value
+                                .client
+                                .download_bandwidth
+                                .as_deref()
+                                .map(crate::native::transport::mbps)
+                                .transpose()?
+                                .unwrap_or_default();
+                            if server > 0.0 && client == 0.0 {
+                                return Err(
+                                    "此 HY2 入口要求客户端下载带宽，请填写客户端 QUIC 的下载带宽"
+                                        .into(),
+                                );
+                            }
+                        }
+                        clients.push(Connection::Hysteria2(crate::hysteria::Client {
+                            server,
+                            port,
+                            password: password.to_owned(),
+                            tls,
+                            hysteria: crate::hysteria::ClientOptions {
+                                obfs: value.obfs.clone(),
+                                quic: value.client.clone(),
+                                ..crate::hysteria::ClientOptions::default()
+                            },
+                            ..crate::hysteria::Client::default()
+                        }));
+                    }
                     Protocol::Forward(_) => {
                         clients.push(Connection::Forward(crate::forward::Client {
                             server,
@@ -457,6 +496,7 @@ impl Builder<'_> {
             Connection::Vmess(value) => (&mut value.core, &mut value.network, &mut value.tls),
             Connection::Trojan(value) => (&mut value.core, &mut value.network, &mut value.tls),
             Connection::Shadowsocks(value) => (&mut value.core, &mut value.network, &mut value.tls),
+            Connection::Hysteria2(value) => (&mut value.core, &mut value.network, &mut value.tls),
             Connection::Forward(value) => (&mut value.core, &mut value.network, &mut value.tls),
             Connection::Direct(_) => return Ok(target),
         };

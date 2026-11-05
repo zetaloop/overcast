@@ -10,6 +10,7 @@ mod form;
 mod forward;
 mod geodata;
 mod graph;
+mod hysteria;
 mod inbound;
 pub mod input;
 mod keys;

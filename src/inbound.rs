@@ -91,24 +91,7 @@ impl Inbound {
         if !self.listen.enabled && self.ports.trim().is_empty() {
             return Ok(BTreeSet::from([self.protocol.kind().port()]));
         }
-        let mut ports = BTreeSet::new();
-        for range in self.ports.split(',') {
-            let range = range.trim();
-            let (first, last) = range.split_once('-').unwrap_or((range, range));
-            let first: u16 = first
-                .trim()
-                .parse()
-                .map_err(|error| format!("端口格式不正确：{error}"))?;
-            let last: u16 = last
-                .trim()
-                .parse()
-                .map_err(|error| format!("端口格式不正确：{error}"))?;
-            if first == 0 || last < first {
-                return Err("端口需要在 1～65535 之间，范围按从小到大填写".into());
-            }
-            ports.extend(first..=last);
-        }
-        Ok(ports)
+        crate::connection::ports(&self.ports)
     }
 
     pub(crate) fn summary(&self) -> String {
@@ -151,6 +134,7 @@ enum Kind {
     Vmess,
     Trojan,
     Shadowsocks,
+    Hysteria2,
     Forward,
 }
 
@@ -165,9 +149,12 @@ impl Kind {
 
     fn core(self) -> Core {
         match self {
-            Self::Mixed | Self::Vmess | Self::Trojan | Self::Shadowsocks | Self::Forward => {
-                Core::SingBox
-            }
+            Self::Mixed
+            | Self::Vmess
+            | Self::Trojan
+            | Self::Shadowsocks
+            | Self::Hysteria2
+            | Self::Forward => Core::SingBox,
             Self::Vless => Core::Xray,
         }
     }
@@ -179,6 +166,7 @@ impl Kind {
             Self::Vmess => Protocol::Vmess(crate::vmess::Server::default()),
             Self::Trojan => Protocol::Trojan(crate::trojan::Server::default()),
             Self::Shadowsocks => Protocol::Shadowsocks(crate::shadowsocks::Server::default()),
+            Self::Hysteria2 => Protocol::Hysteria2(Box::default()),
             Self::Forward => Protocol::Forward(crate::forward::Server::default()),
         }
     }
@@ -192,10 +180,15 @@ pub enum Protocol {
     Vmess(crate::vmess::Server),
     Trojan(crate::trojan::Server),
     Shadowsocks(crate::shadowsocks::Server),
+    Hysteria2(Box<crate::hysteria::Server>),
     Forward(crate::forward::Server),
 }
 
 impl Protocol {
+    pub fn responds(&self) -> bool {
+        matches!(self, Self::Hysteria2(value) if value.masquerade.is_some())
+    }
+
     pub fn fallbacks(&self) -> &[Fallback] {
         match self {
             Self::Vless(value) => &value.fallbacks,
@@ -234,6 +227,7 @@ impl Protocol {
             Self::Vmess(_) => Kind::Vmess,
             Self::Trojan(_) => Kind::Trojan,
             Self::Shadowsocks(_) => Kind::Shadowsocks,
+            Self::Hysteria2(_) => Kind::Hysteria2,
             Self::Forward(_) => Kind::Forward,
         }
     }
@@ -281,6 +275,15 @@ impl Protocol {
                 &title,
                 value,
                 Rc::new(move |value, screen| apply(&Self::Forward(value.clone()), screen)),
+                false,
+            ),
+            Self::Hysteria2(value) => form::edit(
+                screen,
+                &title,
+                value.as_mut(),
+                Rc::new(move |value, screen| {
+                    apply(&Self::Hysteria2(Box::new(value.clone())), screen)
+                }),
                 false,
             ),
         }
@@ -956,6 +959,7 @@ choices!(Kind {
     Vmess: "vmess" => "VMess",
     Trojan: "trojan" => "Trojan",
     Shadowsocks: "shadowsocks" => "Shadowsocks",
+    Hysteria2: "hysteria2" => "Hysteria 2",
     Forward: "forward" => "TCP/UDP 转发",
 });
 

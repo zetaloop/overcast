@@ -42,6 +42,7 @@ pub fn outbound(
         Connection::Vmess(value) => ("vmess", None, &value.network),
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("ss", None, &value.network),
+        Connection::Hysteria2(value) => ("hysteria2", None, &value.network),
         Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
@@ -89,6 +90,13 @@ pub fn outbound(
     }
     let tls = match source {
         Connection::Forward(_) => unreachable!(),
+        Connection::Hysteria2(value) => {
+            output.extend(super::hysteria::client(value, inbound::Core::Mihomo)?);
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("port".to_owned(), json!(value.port()?));
+            output.insert("password".to_owned(), json!(value.password));
+            Some(&value.tls)
+        }
         Connection::Shadowsocks(value) => {
             if value.tls.enabled || !value.transport.is_default() {
                 return unsupported("Mihomo Shadowsocks 通过插件配置传输封装");
@@ -337,13 +345,12 @@ pub fn outbound(
         }
     };
     if let Some(tls) = tls.filter(|tls| tls.enabled) {
-        client_tls(
-            &source.transport().unwrap().client_tls(tls),
-            store,
-            &mut output,
-            globals,
-            kind,
-        )?;
+        let tls = source
+            .transport()
+            .map_or(std::borrow::Cow::Borrowed(tls), |transport| {
+                transport.client_tls(tls)
+            });
+        client_tls(&tls, store, &mut output, globals, kind)?;
         if matches!(source, Connection::Socks(_)) {
             output.remove("sni");
         }
@@ -372,40 +379,50 @@ pub fn listeners(
         ("port".to_owned(), json!(source.ports)),
         (
             "users".to_owned(),
-            json!(
-                users
-                    .iter()
-                    .map(|(name, credential)| match &source.protocol {
-                        Protocol::Mixed(_) =>
-                            json!({"username": name, "password": credential.password}),
-                        Protocol::Vless(value) => {
-                            let mut user = Map::from_iter([
-                                ("username".to_owned(), json!(name)),
-                                ("uuid".to_owned(), json!(name)),
-                            ]);
-                            if value.flow == crate::vless::Flow::Vision {
-                                user.insert("flow".to_owned(), json!("xtls-rprx-vision"));
+            if matches!(source.protocol, Protocol::Hysteria2(_)) {
+                json!(
+                    users
+                        .iter()
+                        .map(|(name, credential)| (name.clone(), json!(credential.password)))
+                        .collect::<Map<_, _>>()
+                )
+            } else {
+                json!(
+                    users
+                        .iter()
+                        .map(|(name, credential)| match &source.protocol {
+                            Protocol::Mixed(_) =>
+                                json!({"username": name, "password": credential.password}),
+                            Protocol::Vless(value) => {
+                                let mut user = Map::from_iter([
+                                    ("username".to_owned(), json!(name)),
+                                    ("uuid".to_owned(), json!(name)),
+                                ]);
+                                if value.flow == crate::vless::Flow::Vision {
+                                    user.insert("flow".to_owned(), json!("xtls-rprx-vision"));
+                                }
+                                json!(user)
                             }
-                            json!(user)
-                        }
-                        Protocol::Vmess(value) => {
-                            let mut user = Map::from_iter([
-                                ("username".to_owned(), json!(name)),
-                                ("uuid".to_owned(), json!(name)),
-                            ]);
-                            if let Some(alter_id) = value.alter_id {
-                                user.insert("alterId".to_owned(), json!(alter_id));
+                            Protocol::Vmess(value) => {
+                                let mut user = Map::from_iter([
+                                    ("username".to_owned(), json!(name)),
+                                    ("uuid".to_owned(), json!(name)),
+                                ]);
+                                if let Some(alter_id) = value.alter_id {
+                                    user.insert("alterId".to_owned(), json!(alter_id));
+                                }
+                                json!(user)
                             }
-                            json!(user)
-                        }
-                        Protocol::Trojan(_) =>
-                            json!({"username": name, "password": credential.password}),
-                        Protocol::Shadowsocks(_) =>
-                            json!({"username": name, "password": credential.password}),
-                        Protocol::Forward(_) => unreachable!(),
-                    })
-                    .collect::<Vec<_>>()
-            ),
+                            Protocol::Trojan(_) =>
+                                json!({"username": name, "password": credential.password}),
+                            Protocol::Shadowsocks(_) =>
+                                json!({"username": name, "password": credential.password}),
+                            Protocol::Hysteria2(_) => unreachable!(),
+                            Protocol::Forward(_) => unreachable!(),
+                        })
+                        .collect::<Vec<_>>()
+                )
+            },
         ),
     ]);
     let mut options = Options::new(&source.listen)?;
@@ -418,6 +435,23 @@ pub fn listeners(
     options.rename(globals, &[("tcp_multi_path", "inbound-mptcp")]);
     keep_alive(&mut options, globals)?;
     options.finish("Mihomo 监听")?;
+    if let Protocol::Hysteria2(value) = &source.protocol {
+        if value
+            .masquerade
+            .as_ref()
+            .is_some_and(|value| value.kind == crate::hysteria::MasqueradeKind::Proxy)
+        {
+            globals.insert("rules".to_owned(), json!(["IN-TYPE,INNER,direct"]));
+        }
+        output.insert("type".to_owned(), json!("hysteria2"));
+        output.extend(super::hysteria::server(
+            value,
+            inbound::Core::Mihomo,
+            store,
+        )?);
+        server_tls(source, store, &mut output)?;
+        return Ok(vec![output]);
+    }
     if let Protocol::Vless(value) = &source.protocol {
         if matches!(source.transport, crate::transport::Transport::Kcp(_)) {
             return unsupported("Mihomo VLESS 没有 KCP 传输配置");
@@ -629,7 +663,7 @@ pub fn client_tls(
     }
     let mut options = Options::new(source)?;
     options.take("reality");
-    if kind == "trojan" {
+    if matches!(kind, "trojan" | "hysteria2") {
         options.take("enabled");
     }
     options.rename(
@@ -646,8 +680,10 @@ pub fn client_tls(
             ),
         ],
     );
-    if v2ray {
+    if v2ray || kind == "hysteria2" {
         options.copy(output, &["alpn"]);
+    }
+    if v2ray {
         options.rename(output, &[("fingerprint", "client-fingerprint")]);
         if source.reality.enabled {
             source.reality.validate()?;
@@ -715,7 +751,7 @@ pub fn client_tls(
     }
     options.take("ech");
     if source.ech.enabled {
-        if !v2ray {
+        if !v2ray && kind != "hysteria2" {
             return unsupported(format!("Mihomo {kind} 出站没有 ECH 配置"));
         }
         let mut ech = Map::from_iter([("enable".to_owned(), json!(true))]);
@@ -744,6 +780,9 @@ fn server_tls(source: &Inbound, store: &Store, output: &mut Map<String, Value>) 
     options.take("reality");
     options.take("enabled");
     options.take("server_name");
+    if matches!(source.protocol, Protocol::Hysteria2(_)) {
+        options.copy(output, &["alpn"]);
+    }
     let (certificate, key) = certificate_paths(store, source)?;
     output.insert("certificate".to_owned(), json!(certificate));
     output.insert("private-key".to_owned(), json!(key));

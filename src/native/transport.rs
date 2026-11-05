@@ -1036,7 +1036,10 @@ fn pool(source: &Pool) -> Result<Map<String, Value>> {
     Ok(output)
 }
 
-fn quic(source: &Quic, inbound: bool) -> Result<Map<String, Value>> {
+pub(super) fn quic(source: &Quic, inbound: bool) -> Result<Map<String, Value>> {
+    if source.congestion == crate::transport::Congestion::Cubic {
+        return unsupported("Xray QUIC 使用 BBR、Brutal 或 Reno");
+    }
     let mut options = Options::new(source)?;
     let mut output = Map::new();
     options.copy(&mut output, &["congestion", "debug"]);
@@ -1122,7 +1125,7 @@ pub(super) fn range(text: &str, unit: Option<Duration>) -> Result<Value> {
     }
 }
 
-fn duration(text: &str, unit: Duration) -> Result<i64> {
+pub(super) fn duration(text: &str, unit: Duration) -> Result<i64> {
     let text = text.trim();
     let (negative, value) = text
         .strip_prefix('-')
@@ -1136,6 +1139,33 @@ fn duration(text: &str, unit: Duration) -> Result<i64> {
     }
     let value = i128::try_from(value.as_nanos() / unit.as_nanos())?;
     Ok(i64::try_from(if negative { -value } else { value })?)
+}
+
+pub(crate) fn mbps(text: &str) -> Result<f64> {
+    let text = text.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return Ok(0.0);
+    }
+    let end = text
+        .find(|value: char| !value.is_ascii_digit() && value != '.')
+        .unwrap_or(text.len());
+    let (amount, unit) = text.split_at(end);
+    let amount: f64 = amount
+        .parse()
+        .map_err(|error| format!("带宽格式不正确：{error}"))?;
+    let scale = match unit.trim() {
+        "" | "b" | "bps" => 0.000001,
+        "k" | "kb" | "kbps" => 0.001,
+        "m" | "mb" | "mbps" => 1.0,
+        "g" | "gb" | "gbps" => 1000.0,
+        "t" | "tb" | "tbps" => 1000000.0,
+        unit => return Err(format!("无法识别带宽单位：{unit}").into()),
+    };
+    let rate = amount * scale;
+    if !rate.is_finite() {
+        return Err("带宽数值超出支持范围".into());
+    }
+    Ok(rate)
 }
 
 pub(crate) fn early_data(path: &str, size: u32) -> String {
