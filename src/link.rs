@@ -167,23 +167,35 @@ pub fn trojan(url: &Url) -> Result<crate::trojan::Client> {
         .query_pairs()
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect::<BTreeMap<_, _>>();
-    let mut password = percent_decode_str(url.username())
-        .decode_utf8()?
-        .into_owned();
-    if let Some(value) = url.password() {
-        password.push(':');
-        password.push_str(&percent_decode_str(value).decode_utf8()?);
-    }
     let client = crate::trojan::Client {
         name: percent_decode_str(url.fragment().unwrap_or_default())
             .decode_utf8()?
             .into_owned(),
         server: host(url)?,
         port: url.port().unwrap_or(443),
-        password,
+        password: credentials(url)?,
         tls: tls(&mut query, true)?,
         transport: transport(&mut query)?,
         ..crate::trojan::Client::default()
+    };
+    remaining(query.keys(), "链接参数")?;
+    Ok(client)
+}
+
+pub fn anytls(url: &Url) -> Result<crate::anytls::Client> {
+    if !url.path().is_empty() && url.path() != "/" {
+        return Err("AnyTLS 链接中包含路径".into());
+    }
+    let mut query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+    let client = crate::anytls::Client {
+        name: percent_decode_str(url.fragment().unwrap_or_default())
+            .decode_utf8()?
+            .into_owned(),
+        server: host(url)?,
+        port: url.port().unwrap_or(443),
+        password: credentials(url)?,
+        tls: tls(&mut query, true)?,
+        ..crate::anytls::Client::default()
     };
     remaining(query.keys(), "链接参数")?;
     Ok(client)
@@ -219,13 +231,6 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
         return Err("Hysteria 2 链接中包含路径".into());
     }
     let mut query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-    let mut password = percent_decode_str(url.username())
-        .decode_utf8()?
-        .into_owned();
-    if let Some(value) = url.password() {
-        password.push(':');
-        password.push_str(&percent_decode_str(value).decode_utf8()?);
-    }
     let pin = query.remove("pinSHA256");
     let mut tls = tls(&mut query, true)?;
     if let Some(pin) = pin {
@@ -252,7 +257,7 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
             .into_owned(),
         server: host(&url)?,
         port,
-        password,
+        password: credentials(&url)?,
         tls,
         hysteria: crate::hysteria::ClientOptions {
             obfs,
@@ -334,6 +339,17 @@ pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {
     };
     remaining(query.keys(), "链接参数")?;
     Ok(client)
+}
+
+fn credentials(url: &Url) -> Result<String> {
+    let mut value = percent_decode_str(url.username())
+        .decode_utf8()?
+        .into_owned();
+    if let Some(password) = url.password() {
+        value.push(':');
+        value.push_str(&percent_decode_str(password).decode_utf8()?);
+    }
+    Ok(value)
 }
 
 pub fn host(url: &Url) -> Result<String> {

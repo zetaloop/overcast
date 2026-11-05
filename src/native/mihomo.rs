@@ -43,6 +43,7 @@ pub fn outbound(
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("ss", None, &value.network),
         Connection::Hysteria2(value) => ("hysteria2", None, &value.network),
+        Connection::AnyTls(value) => ("anytls", None, &value.network),
         Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
@@ -90,6 +91,36 @@ pub fn outbound(
     }
     let tls = match source {
         Connection::Forward(_) => unreachable!(),
+        Connection::AnyTls(value) => {
+            if !value.tls.enabled {
+                return unsupported("Mihomo AnyTLS 出站使用 TLS");
+            }
+            let mut options = Options::new(&value.anytls)?;
+            options.take("tcp");
+            options.take("udp");
+            options.rename(
+                &mut output,
+                &[
+                    ("min_idle_session", "min-idle-session"),
+                    ("client_metadata", "client-metadata"),
+                ],
+            );
+            options.invert(&mut output, "reuse", "disable-reuse");
+            options.durations(
+                &mut output,
+                &[
+                    ("idle_session_check_interval", "idle-session-check-interval"),
+                    ("idle_session_timeout", "idle-session-timeout"),
+                ],
+                Some(Duration::from_secs(1)),
+            )?;
+            options.finish("Mihomo AnyTLS")?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("port".to_owned(), json!(value.port));
+            output.insert("password".to_owned(), json!(value.password));
+            output.insert("udp".to_owned(), json!(value.anytls.udp.unwrap_or(true)));
+            Some(&value.tls)
+        }
         Connection::Hysteria2(value) => {
             output.extend(super::hysteria::client(value, inbound::Core::Mihomo)?);
             output.insert("server".to_owned(), json!(value.server));
@@ -379,7 +410,10 @@ pub fn listeners(
         ("port".to_owned(), json!(source.ports)),
         (
             "users".to_owned(),
-            if matches!(source.protocol, Protocol::Hysteria2(_)) {
+            if matches!(
+                source.protocol,
+                Protocol::Hysteria2(_) | Protocol::AnyTls(_)
+            ) {
                 json!(
                     users
                         .iter()
@@ -418,6 +452,7 @@ pub fn listeners(
                             Protocol::Shadowsocks(_) =>
                                 json!({"username": name, "password": credential.password}),
                             Protocol::Hysteria2(_) => unreachable!(),
+                            Protocol::AnyTls(_) => unreachable!(),
                             Protocol::Forward(_) => unreachable!(),
                         })
                         .collect::<Vec<_>>()
@@ -435,6 +470,27 @@ pub fn listeners(
     options.rename(globals, &[("tcp_multi_path", "inbound-mptcp")]);
     keep_alive(&mut options, globals)?;
     options.finish("Mihomo 监听")?;
+    if let Protocol::AnyTls(value) = &source.protocol {
+        if !source.transport.is_default() || source.tls.reality.enabled {
+            return unsupported("Mihomo AnyTLS 入站使用原生 TCP 与 TLS");
+        }
+        let mut options = Options::new(value)?;
+        options.take("padding_scheme");
+        options.finish("Mihomo AnyTLS 入站")?;
+        if !value.padding_scheme.is_empty() {
+            output.insert(
+                "padding-scheme".to_owned(),
+                json!(value.padding_scheme.join("\n")),
+            );
+        }
+        output.insert("type".to_owned(), json!("anytls"));
+        if source.tls.enabled {
+            server_tls(source, store, &mut output)?;
+        } else {
+            output.insert("allow-insecure".to_owned(), json!(true));
+        }
+        return Ok(vec![output]);
+    }
     if let Protocol::Hysteria2(value) = &source.protocol {
         if value
             .masquerade
@@ -663,7 +719,7 @@ pub fn client_tls(
     }
     let mut options = Options::new(source)?;
     options.take("reality");
-    if matches!(kind, "trojan" | "hysteria2") {
+    if matches!(kind, "trojan" | "hysteria2" | "anytls") {
         options.take("enabled");
     }
     options.rename(
@@ -680,10 +736,10 @@ pub fn client_tls(
             ),
         ],
     );
-    if v2ray || kind == "hysteria2" {
+    if v2ray || matches!(kind, "hysteria2" | "anytls") {
         options.copy(output, &["alpn"]);
     }
-    if v2ray {
+    if v2ray || kind == "anytls" {
         options.rename(output, &[("fingerprint", "client-fingerprint")]);
         if source.reality.enabled {
             source.reality.validate()?;
@@ -751,7 +807,7 @@ pub fn client_tls(
     }
     options.take("ech");
     if source.ech.enabled {
-        if !v2ray && kind != "hysteria2" {
+        if !v2ray && !matches!(kind, "hysteria2" | "anytls") {
             return unsupported(format!("Mihomo {kind} 出站没有 ECH 配置"));
         }
         let mut ech = Map::from_iter([("enable".to_owned(), json!(true))]);

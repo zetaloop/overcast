@@ -24,6 +24,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
         Connection::Hysteria2(value) => ("hysteria", None, &value.network),
+        Connection::AnyTls(_) => return unsupported("Xray 没有 AnyTLS 出站"),
         Connection::Forward(value) => ("freedom", None, &value.network),
     };
     let mut output = Map::from_iter([("protocol".to_owned(), json!(kind))]);
@@ -61,6 +62,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         }
     }
     let tls = match source {
+        Connection::AnyTls(_) => unreachable!(),
         Connection::Hysteria2(value) => {
             settings.insert("version".to_owned(), json!(2));
             settings.insert("address".to_owned(), json!(value.server));
@@ -589,6 +591,7 @@ pub fn listeners(
             }
             options.finish("Xray Shadowsocks 入站")?;
         }
+        Protocol::AnyTls(_) => return unsupported("Xray 没有 AnyTLS 入站"),
         Protocol::Hysteria2(value) => {
             output.insert("protocol".to_owned(), json!("hysteria"));
             settings.insert("version".to_owned(), json!(2));

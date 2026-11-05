@@ -43,6 +43,7 @@ enum Mode {
     Shadowsocks,
     ShadowsocksUdp,
     Hysteria2,
+    AnyTls,
     Forward,
     ForwardUdp,
 }
@@ -68,6 +69,7 @@ impl Mode {
             Self::Trojan => "Trojan",
             Self::Shadowsocks | Self::ShadowsocksUdp => "Shadowsocks",
             Self::Hysteria2 => "Hysteria 2",
+            Self::AnyTls => "AnyTLS",
             Self::Forward | Self::ForwardUdp => "TCP/UDP 转发",
         }
     }
@@ -77,7 +79,12 @@ impl Mode {
             Self::SocksUdp | Self::ShadowsocksUdp | Self::ForwardUdp => network == Network::Udp,
             Self::Forward => network == Network::Tcp,
             Self::Socks => network == Network::Tcp || core != Core::Mihomo,
-            Self::Vless | Self::Vmess | Self::Trojan | Self::Shadowsocks | Self::Hysteria2 => true,
+            Self::Vless
+            | Self::Vmess
+            | Self::Trojan
+            | Self::Shadowsocks
+            | Self::Hysteria2
+            | Self::AnyTls => true,
             _ => network == Network::Tcp || core == Core::SingBox,
         }
     }
@@ -197,6 +204,9 @@ fn modes(source: &Inbound, networks: &[Network]) -> BTreeSet<Mode> {
         }
         Protocol::Hysteria2(_) => {
             modes.insert(Mode::Hysteria2);
+        }
+        Protocol::AnyTls(_) => {
+            modes.insert(Mode::AnyTls);
         }
         Protocol::Shadowsocks(value) => {
             if value.tcp {
@@ -751,6 +761,9 @@ fn merge(
             (Protocol::Hysteria2(current), Protocol::Hysteria2(other)) => {
                 same(current, other, &["client"], "Hysteria 2", &members)?
             }
+            (Protocol::AnyTls(current), Protocol::AnyTls(other)) => {
+                same(current, other, &[], "AnyTLS", &members)?
+            }
             (Protocol::Shadowsocks(current), Protocol::Shadowsocks(other)) => {
                 let mut omitted = vec!["tcp", "udp", "password"];
                 if source.core == Core::Xray {
@@ -786,7 +799,10 @@ fn merge(
     validate(&source, &modes, &users)?;
     let password_identity = matches!(
         source.protocol,
-        Protocol::Trojan(_) | Protocol::Shadowsocks(_) | Protocol::Hysteria2(_)
+        Protocol::Trojan(_)
+            | Protocol::Shadowsocks(_)
+            | Protocol::Hysteria2(_)
+            | Protocol::AnyTls(_)
     );
     let credentials: BTreeSet<_> = members
         .iter()

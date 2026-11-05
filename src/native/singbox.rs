@@ -49,6 +49,7 @@ pub fn outbound(
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
         Connection::Hysteria2(value) => ("hysteria2", None, &value.network),
+        Connection::AnyTls(value) => ("anytls", None, &value.network),
         Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
@@ -69,6 +70,34 @@ pub fn outbound(
             output.extend(super::hysteria::client(value, inbound::Core::SingBox)?);
             output.insert("server".to_owned(), json!(value.server));
             output.insert("server_port".to_owned(), json!(value.port()?));
+            output.insert("password".to_owned(), json!(value.password));
+            output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+        }
+        Connection::AnyTls(value) => {
+            if !value.tls.enabled {
+                return unsupported("sing-box AnyTLS 出站使用 TLS");
+            }
+            if matches!(value.network.tcp_fast_open, Some(FastOpen::Enabled(true))) {
+                return unsupported("sing-box AnyTLS 出站与 TCP Fast Open 不兼容");
+            }
+            let mut options = Options::new(&value.anytls)?;
+            options.take("tcp");
+            options.take("udp");
+            if value.anytls.reuse == Some(true) {
+                options.take("reuse");
+            }
+            options.copy(&mut output, &["min_idle_session", "client_metadata"]);
+            options.durations(
+                &mut output,
+                &[
+                    ("idle_session_check_interval", "idle_session_check_interval"),
+                    ("idle_session_timeout", "idle_session_timeout"),
+                ],
+                None,
+            )?;
+            options.finish("sing-box AnyTLS")?;
+            output.insert("server".to_owned(), json!(value.server));
+            output.insert("server_port".to_owned(), json!(value.port));
             output.insert("password".to_owned(), json!(value.password));
             output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
         }
@@ -403,6 +432,8 @@ pub fn listeners(
                             json!({"name": name, "password": credential.password}),
                         Protocol::Hysteria2(_) =>
                             json!({"name": name, "password": credential.password}),
+                        Protocol::AnyTls(_) =>
+                            json!({"name": name, "password": credential.password}),
                         Protocol::Forward(_) => unreachable!(),
                     })
                     .collect::<Vec<_>>()
@@ -443,6 +474,19 @@ pub fn listeners(
         }
     }
     options.finish("sing-box 监听")?;
+    if let Protocol::AnyTls(value) = &source.protocol {
+        if !source.transport.is_default() {
+            return unsupported("sing-box AnyTLS 使用原生 TCP 连接");
+        }
+        let mut options = Options::new(value)?;
+        options.copy(&mut output, &["padding_scheme"]);
+        options.finish("sing-box AnyTLS 入站")?;
+        output.insert("type".to_owned(), json!("anytls"));
+        if source.tls.enabled {
+            output.insert("tls".to_owned(), server_tls(source, store)?);
+        }
+        return Ok(vec![output]);
+    }
     if let Protocol::Hysteria2(value) = &source.protocol {
         output.insert("type".to_owned(), json!("hysteria2"));
         output.extend(super::hysteria::server(

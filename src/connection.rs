@@ -37,6 +37,8 @@ pub enum Connection {
     Trojan(crate::trojan::Client),
     Shadowsocks(crate::shadowsocks::Client),
     Hysteria2(crate::hysteria::Client),
+    #[serde(rename = "anytls")]
+    AnyTls(crate::anytls::Client),
     Forward(crate::forward::Client),
 }
 
@@ -51,6 +53,7 @@ impl Connection {
             Self::Trojan(value) => value.core,
             Self::Shadowsocks(value) => value.core,
             Self::Hysteria2(value) => value.core,
+            Self::AnyTls(value) => value.core,
             Self::Forward(value) => value.core,
         }
     }
@@ -65,6 +68,7 @@ impl Connection {
             Self::Trojan(value) => (&value.server, value.port),
             Self::Shadowsocks(value) => (&value.server, value.port),
             Self::Hysteria2(value) => (&value.server, value.port().ok()?),
+            Self::AnyTls(value) => (&value.server, value.port),
             Self::Forward(value) => (&value.server, value.port),
         })
     }
@@ -79,6 +83,7 @@ impl Connection {
             Self::Trojan(value) => &value.network,
             Self::Shadowsocks(value) => &value.network,
             Self::Hysteria2(value) => &value.network,
+            Self::AnyTls(value) => &value.network,
             Self::Forward(value) => &value.network,
         }
     }
@@ -92,6 +97,7 @@ impl Connection {
             Self::Trojan(value) => (&mut value.server, &mut value.tls),
             Self::Shadowsocks(value) => (&mut value.server, &mut value.tls),
             Self::Hysteria2(value) => (&mut value.server, &mut value.tls),
+            Self::AnyTls(value) => (&mut value.server, &mut value.tls),
             Self::Forward(value) => (&mut value.server, &mut value.tls),
             Self::Direct(_) => return,
         };
@@ -126,6 +132,11 @@ impl Connection {
             return Ok(value);
         }
         let url = Url::parse(text)?;
+        if url.scheme() == "anytls" {
+            let value = Self::AnyTls(crate::link::anytls(&url)?);
+            value.validate()?;
+            return Ok(value);
+        }
         if url.scheme() == "vless" {
             let value = Self::Vless(crate::link::vless(&url)?);
             value.validate()?;
@@ -230,13 +241,14 @@ impl Connection {
             Self::Trojan(value) => &value.name,
             Self::Shadowsocks(value) => &value.name,
             Self::Hysteria2(value) => &value.name,
+            Self::AnyTls(value) => &value.name,
             Self::Forward(value) => &value.name,
         }
     }
 
     pub fn transport(&self) -> Option<&Transport> {
         match self {
-            Self::Direct(_) | Self::Hysteria2(_) => None,
+            Self::Direct(_) | Self::Hysteria2(_) | Self::AnyTls(_) => None,
             Self::Http(value) => Some(&value.transport),
             Self::Socks(value) => Some(&value.transport),
             Self::Vless(value) => Some(&value.transport),
@@ -249,7 +261,7 @@ impl Connection {
 
     pub fn multiplex(&self) -> Option<&crate::multiplex::Client> {
         match self {
-            Self::Direct(_) | Self::Hysteria2(_) => None,
+            Self::Direct(_) | Self::Hysteria2(_) | Self::AnyTls(_) => None,
             Self::Http(value) => value.multiplex.as_ref(),
             Self::Socks(value) => value.multiplex.as_ref(),
             Self::Vless(value) => value.multiplex.as_ref(),
@@ -294,6 +306,7 @@ impl Connection {
                 ),
             ),
             Self::Forward(value) => format!("TCP/UDP {}", address(&value.server, value.port)),
+            Self::AnyTls(value) => format!("AnyTLS {}", address(&value.server, value.port)),
         }
     }
 
@@ -372,6 +385,13 @@ impl Connection {
                 Rc::new(move |value, screen| apply(&Self::Hysteria2(value.clone()), screen)),
                 creating,
             ),
+            Self::AnyTls(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::AnyTls(value.clone()), screen)),
+                creating,
+            ),
         }
     }
 
@@ -412,6 +432,12 @@ impl Connection {
                 crate::hysteria::password(&value.password)?;
                 (value.server.as_str(), value.port()?)
             }
+            Self::AnyTls(value) => {
+                if value.password.is_empty() {
+                    return Err("请填写 AnyTLS 密码".into());
+                }
+                (value.server.as_str(), value.port)
+            }
         };
         if server.trim().is_empty() {
             return Err("连接地址不能为空".into());
@@ -435,6 +461,7 @@ pub fn create(
         Item::new("trojan", "Trojan".stylized()),
         Item::new("shadowsocks", "Shadowsocks".stylized()),
         Item::new("hysteria2", "Hysteria 2".stylized()),
+        Item::new("anytls", "AnyTLS".stylized()),
         Item::new("forward", "TCP/UDP 转发".stylized()),
         Item::new("direct", "直连".stylized()),
         Item::new("back", "返回".stylized()),
@@ -458,8 +485,9 @@ pub fn create(
                     4 => Connection::Trojan(crate::trojan::Client::default()),
                     5 => Connection::Shadowsocks(crate::shadowsocks::Client::default()),
                     6 => Connection::Hysteria2(crate::hysteria::Client::default()),
-                    7 => Connection::Forward(crate::forward::Client::default()),
-                    8 => Connection::Direct(Direct::default()),
+                    7 => Connection::AnyTls(crate::anytls::Client::default()),
+                    8 => Connection::Forward(crate::forward::Client::default()),
+                    9 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
                 let accepted = connection.form(screen, apply, true)?;

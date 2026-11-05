@@ -243,7 +243,8 @@ impl Network {
                 Protocol::Vless(_)
                 | Protocol::Vmess(_)
                 | Protocol::Trojan(_)
-                | Protocol::Hysteria2(_),
+                | Protocol::Hysteria2(_)
+                | Protocol::AnyTls(_),
             ) => true,
             (Self::Udp, Protocol::Shadowsocks(value)) => value.tcp || value.udp,
             (Self::Udp, Protocol::Forward(value)) => value.udp,

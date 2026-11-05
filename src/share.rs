@@ -86,6 +86,9 @@ pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<Str
                         }
                         (&mut value.server, &mut value.port, &mut value.tls, None)
                     }
+                    Connection::AnyTls(value) => {
+                        (&mut value.server, &mut value.port, &mut value.tls, None)
+                    }
                 };
                 if value.tls.enabled && tls.enabled {
                     return Err("嵌套 TLS 连接使用连接路径 JSON 分享".into());
@@ -288,6 +291,33 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             }
             (
                 "trojan",
+                format!("{}@", utf8_percent_encode(&value.password, COMPONENT)),
+            )
+        }
+        Connection::AnyTls(value) => {
+            let mut options = Options::new(&value.anytls)?;
+            if value.anytls.tcp == Some(true) {
+                options.take("tcp");
+            }
+            if value.anytls.udp == Some(true) {
+                options.take("udp");
+            }
+            if value.anytls.reuse == Some(true) {
+                options.take("reuse");
+            }
+            options.finish("AnyTLS 分享链接")?;
+            if !value.tls.enabled {
+                return Err("AnyTLS 分享链接使用 TLS".into());
+            }
+            tls(&value.tls, &mut query, store)?;
+            if !value.tls.reality.enabled {
+                query.remove("security");
+            }
+            if let Some(value) = query.remove("allowInsecure") {
+                query.insert("insecure".to_owned(), value);
+            }
+            (
+                "anytls",
                 format!("{}@", utf8_percent_encode(&value.password, COMPONENT)),
             )
         }

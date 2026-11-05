@@ -135,6 +135,7 @@ enum Kind {
     Trojan,
     Shadowsocks,
     Hysteria2,
+    AnyTls,
     Forward,
 }
 
@@ -154,6 +155,7 @@ impl Kind {
             | Self::Trojan
             | Self::Shadowsocks
             | Self::Hysteria2
+            | Self::AnyTls
             | Self::Forward => Core::SingBox,
             Self::Vless => Core::Xray,
         }
@@ -167,6 +169,7 @@ impl Kind {
             Self::Trojan => Protocol::Trojan(crate::trojan::Server::default()),
             Self::Shadowsocks => Protocol::Shadowsocks(crate::shadowsocks::Server::default()),
             Self::Hysteria2 => Protocol::Hysteria2(Box::default()),
+            Self::AnyTls => Protocol::AnyTls(crate::anytls::Server::default()),
             Self::Forward => Protocol::Forward(crate::forward::Server::default()),
         }
     }
@@ -181,6 +184,8 @@ pub enum Protocol {
     Trojan(crate::trojan::Server),
     Shadowsocks(crate::shadowsocks::Server),
     Hysteria2(Box<crate::hysteria::Server>),
+    #[serde(rename = "anytls")]
+    AnyTls(crate::anytls::Server),
     Forward(crate::forward::Server),
 }
 
@@ -228,6 +233,7 @@ impl Protocol {
             Self::Trojan(_) => Kind::Trojan,
             Self::Shadowsocks(_) => Kind::Shadowsocks,
             Self::Hysteria2(_) => Kind::Hysteria2,
+            Self::AnyTls(_) => Kind::AnyTls,
             Self::Forward(_) => Kind::Forward,
         }
     }
@@ -284,6 +290,13 @@ impl Protocol {
                 Rc::new(move |value, screen| {
                     apply(&Self::Hysteria2(Box::new(value.clone())), screen)
                 }),
+                false,
+            ),
+            Self::AnyTls(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::AnyTls(value.clone()), screen)),
                 false,
             ),
         }
@@ -960,6 +973,7 @@ choices!(Kind {
     Trojan: "trojan" => "Trojan",
     Shadowsocks: "shadowsocks" => "Shadowsocks",
     Hysteria2: "hysteria2" => "Hysteria 2",
+    AnyTls: "anytls" => "AnyTLS",
     Forward: "forward" => "TCP/UDP 转发",
 });
 

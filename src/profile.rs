@@ -412,6 +412,18 @@ impl Builder<'_> {
                             ..crate::hysteria::Client::default()
                         }));
                     }
+                    Protocol::AnyTls(_) => {
+                        let Some((_, password)) = credentials else {
+                            continue;
+                        };
+                        clients.push(Connection::AnyTls(crate::anytls::Client {
+                            server,
+                            port,
+                            password: password.to_owned(),
+                            tls,
+                            ..crate::anytls::Client::default()
+                        }));
+                    }
                     Protocol::Forward(_) => {
                         clients.push(Connection::Forward(crate::forward::Client {
                             server,
@@ -497,6 +509,7 @@ impl Builder<'_> {
             Connection::Trojan(value) => (&mut value.core, &mut value.network, &mut value.tls),
             Connection::Shadowsocks(value) => (&mut value.core, &mut value.network, &mut value.tls),
             Connection::Hysteria2(value) => (&mut value.core, &mut value.network, &mut value.tls),
+            Connection::AnyTls(value) => (&mut value.core, &mut value.network, &mut value.tls),
             Connection::Forward(value) => (&mut value.core, &mut value.network, &mut value.tls),
             Connection::Direct(_) => return Ok(target),
         };

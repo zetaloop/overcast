@@ -43,6 +43,7 @@ pub fn networks(source: &Connection) -> Result<[bool; 2]> {
     let (tls, datagrams) = match source {
         Connection::Direct(_) => return Ok([false, false]),
         Connection::Hysteria2(_) => return Ok([false, true]),
+        Connection::AnyTls(_) => return Ok([true, false]),
         Connection::Http(value) => {
             if value.http.version == HttpVersion::Http3 {
                 if value.tls.enabled && value.tls.reality.enabled {

@@ -508,6 +508,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                             | Protocol::Vmess(_)
                             | Protocol::Trojan(_)
                             | Protocol::Shadowsocks(_)
+                            | Protocol::AnyTls(_)
                     )
                 {
                     detour = Some(target_tags[0].clone());
@@ -548,6 +549,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                                 Protocol::Trojan(_)
                                     | Protocol::Shadowsocks(_)
                                     | Protocol::Hysteria2(_)
+                                    | Protocol::AnyTls(_)
                             ) {
                                 listener
                                     .users
@@ -1350,6 +1352,10 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
         Connection::Hysteria2(value) => [
             parent[1] && value.hysteria.tcp.unwrap_or(true),
             parent[1] && value.hysteria.udp.unwrap_or(true),
+        ],
+        Connection::AnyTls(value) => [
+            parent[0] && value.anytls.tcp.unwrap_or(true),
+            parent[0] && value.anytls.udp.unwrap_or(true),
         ],
         Connection::Http(value) => {
             let transport =
