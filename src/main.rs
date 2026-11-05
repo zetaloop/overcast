@@ -35,6 +35,7 @@ pub mod tui;
 mod user;
 mod vless;
 mod vmess;
+mod warp;
 
 use std::{error::Error, process::ExitCode};
 

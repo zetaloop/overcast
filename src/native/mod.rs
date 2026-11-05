@@ -11,6 +11,7 @@ mod routing;
 pub(crate) mod shadowsocks;
 mod singbox;
 pub(crate) mod transport;
+mod warp;
 mod xray;
 
 use std::{
@@ -1357,6 +1358,13 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
             parent[0] && value.anytls.tcp.unwrap_or(true),
             parent[0] && value.anytls.udp.unwrap_or(true),
         ],
+        Connection::Warp(value) => {
+            let available = parent[usize::from(value.warp.mode == crate::warp::Mode::Http3)];
+            [
+                available && value.warp.tcp.unwrap_or(true),
+                available && value.warp.udp.unwrap_or(true),
+            ]
+        }
         Connection::Http(value) => {
             let transport =
                 if core == Core::SingBox && value.http.version == connection::HttpVersion::Http3 {

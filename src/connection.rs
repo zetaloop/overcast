@@ -39,6 +39,7 @@ pub enum Connection {
     Hysteria2(crate::hysteria::Client),
     #[serde(rename = "anytls")]
     AnyTls(crate::anytls::Client),
+    Warp(crate::warp::Client),
     Forward(crate::forward::Client),
 }
 
@@ -54,6 +55,7 @@ impl Connection {
             Self::Shadowsocks(value) => value.core,
             Self::Hysteria2(value) => value.core,
             Self::AnyTls(value) => value.core,
+            Self::Warp(value) => value.core,
             Self::Forward(value) => value.core,
         }
     }
@@ -69,6 +71,7 @@ impl Connection {
             Self::Shadowsocks(value) => (&value.server, value.port),
             Self::Hysteria2(value) => (&value.server, value.port().ok()?),
             Self::AnyTls(value) => (&value.server, value.port),
+            Self::Warp(value) => (value.server(), value.port),
             Self::Forward(value) => (&value.server, value.port),
         })
     }
@@ -84,11 +87,16 @@ impl Connection {
             Self::Shadowsocks(value) => &value.network,
             Self::Hysteria2(value) => &value.network,
             Self::AnyTls(value) => &value.network,
+            Self::Warp(value) => &value.network,
             Self::Forward(value) => &value.network,
         }
     }
 
     pub fn set_server(&mut self, server: &str) {
+        if let Self::Warp(value) = self {
+            value.server = Some(server.to_owned());
+            return;
+        }
         let (address, tls) = match self {
             Self::Http(value) => (&mut value.proxy.server, &mut value.tls),
             Self::Socks(value) => (&mut value.proxy.server, &mut value.tls),
@@ -100,6 +108,7 @@ impl Connection {
             Self::AnyTls(value) => (&mut value.server, &mut value.tls),
             Self::Forward(value) => (&mut value.server, &mut value.tls),
             Self::Direct(_) => return,
+            Self::Warp(_) => unreachable!(),
         };
         if tls.enabled && tls.server_name.is_none() {
             tls.server_name = Some(address.clone());
@@ -242,13 +251,14 @@ impl Connection {
             Self::Shadowsocks(value) => &value.name,
             Self::Hysteria2(value) => &value.name,
             Self::AnyTls(value) => &value.name,
+            Self::Warp(value) => &value.name,
             Self::Forward(value) => &value.name,
         }
     }
 
     pub fn transport(&self) -> Option<&Transport> {
         match self {
-            Self::Direct(_) | Self::Hysteria2(_) | Self::AnyTls(_) => None,
+            Self::Direct(_) | Self::Hysteria2(_) | Self::AnyTls(_) | Self::Warp(_) => None,
             Self::Http(value) => Some(&value.transport),
             Self::Socks(value) => Some(&value.transport),
             Self::Vless(value) => Some(&value.transport),
@@ -261,7 +271,7 @@ impl Connection {
 
     pub fn multiplex(&self) -> Option<&crate::multiplex::Client> {
         match self {
-            Self::Direct(_) | Self::Hysteria2(_) | Self::AnyTls(_) => None,
+            Self::Direct(_) | Self::Hysteria2(_) | Self::AnyTls(_) | Self::Warp(_) => None,
             Self::Http(value) => value.multiplex.as_ref(),
             Self::Socks(value) => value.multiplex.as_ref(),
             Self::Vless(value) => value.multiplex.as_ref(),
@@ -307,6 +317,7 @@ impl Connection {
             ),
             Self::Forward(value) => format!("TCP/UDP {}", address(&value.server, value.port)),
             Self::AnyTls(value) => format!("AnyTLS {}", address(&value.server, value.port)),
+            Self::Warp(value) => format!("WARP {}", address(value.server(), value.port)),
         }
     }
 
@@ -392,6 +403,13 @@ impl Connection {
                 Rc::new(move |value, screen| apply(&Self::AnyTls(value.clone()), screen)),
                 creating,
             ),
+            Self::Warp(value) => form::edit(
+                screen,
+                &title,
+                value,
+                Rc::new(move |value, screen| apply(&Self::Warp(value.clone()), screen)),
+                creating,
+            ),
         }
     }
 
@@ -438,6 +456,10 @@ impl Connection {
                 }
                 (value.server.as_str(), value.port)
             }
+            Self::Warp(value) => {
+                value.registration.validate()?;
+                (value.server(), value.port)
+            }
         };
         if server.trim().is_empty() {
             return Err("连接地址不能为空".into());
@@ -462,6 +484,7 @@ pub fn create(
         Item::new("shadowsocks", "Shadowsocks".stylized()),
         Item::new("hysteria2", "Hysteria 2".stylized()),
         Item::new("anytls", "AnyTLS".stylized()),
+        Item::new("warp", "WARP".stylized()),
         Item::new("forward", "TCP/UDP 转发".stylized()),
         Item::new("direct", "直连".stylized()),
         Item::new("back", "返回".stylized()),
@@ -486,8 +509,9 @@ pub fn create(
                     5 => Connection::Shadowsocks(crate::shadowsocks::Client::default()),
                     6 => Connection::Hysteria2(crate::hysteria::Client::default()),
                     7 => Connection::AnyTls(crate::anytls::Client::default()),
-                    8 => Connection::Forward(crate::forward::Client::default()),
-                    9 => Connection::Direct(Direct::default()),
+                    8 => Connection::Warp(crate::warp::Client::default()),
+                    9 => Connection::Forward(crate::forward::Client::default()),
+                    10 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
                 let accepted = connection.form(screen, apply, true)?;

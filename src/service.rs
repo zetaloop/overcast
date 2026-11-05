@@ -144,6 +144,7 @@ impl Unit {
     fn arguments(&self, check: bool) -> Vec<OsString> {
         let directory = self.config.parent().unwrap();
         match self.component {
+            Component::Usque => unreachable!("registration tool in deployment"),
             Component::Xray => {
                 let mut args = vec![
                     "run".into(),

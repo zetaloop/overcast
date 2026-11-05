@@ -30,6 +30,7 @@ pub enum Component {
     SingBox,
     Mihomo,
     Caddy,
+    Usque,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -55,7 +56,13 @@ struct Package<'a> {
 }
 
 impl Component {
-    const ALL: [Self; 4] = [Self::Xray, Self::SingBox, Self::Mihomo, Self::Caddy];
+    const ALL: [Self; 5] = [
+        Self::Xray,
+        Self::SingBox,
+        Self::Mihomo,
+        Self::Caddy,
+        Self::Usque,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -63,6 +70,7 @@ impl Component {
             Self::SingBox => "sing-box",
             Self::Mihomo => "mihomo",
             Self::Caddy => "caddy",
+            Self::Usque => "usque",
         }
     }
 
@@ -72,6 +80,7 @@ impl Component {
             Self::SingBox => "sing-box",
             Self::Mihomo => "Mihomo",
             Self::Caddy => "Caddy",
+            Self::Usque => "usque",
         }
     }
 
@@ -81,6 +90,7 @@ impl Component {
             Self::SingBox => "SagerNet/sing-box",
             Self::Mihomo => "MetaCubeX/mihomo",
             Self::Caddy => "caddyserver/caddy",
+            Self::Usque => "Diniboy1123/usque",
         }
     }
 
@@ -259,6 +269,13 @@ impl Component {
                 let system = if system == "macos" { "mac" } else { system };
                 (
                     format!("caddy_{version}_{system}_{architecture}.{extension}"),
+                    self.binary(),
+                )
+            }
+            Self::Usque => {
+                let system = if system == "macos" { "darwin" } else { system };
+                (
+                    format!("usque_{version}_{system}_{architecture}.zip"),
                     self.binary(),
                 )
             }

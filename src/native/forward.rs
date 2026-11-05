@@ -44,6 +44,12 @@ pub fn networks(source: &Connection) -> Result<[bool; 2]> {
         Connection::Direct(_) => return Ok([false, false]),
         Connection::Hysteria2(_) => return Ok([false, true]),
         Connection::AnyTls(_) => return Ok([true, false]),
+        Connection::Warp(value) => {
+            return Ok(match value.warp.mode {
+                crate::warp::Mode::Http2 => [true, false],
+                crate::warp::Mode::Http3 => [false, true],
+            });
+        }
         Connection::Http(value) => {
             if value.http.version == HttpVersion::Http3 {
                 if value.tls.enabled && value.tls.reality.enabled {

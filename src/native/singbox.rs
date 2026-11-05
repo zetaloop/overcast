@@ -50,6 +50,7 @@ pub fn outbound(
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
         Connection::Hysteria2(value) => ("hysteria2", None, &value.network),
         Connection::AnyTls(value) => ("anytls", None, &value.network),
+        Connection::Warp(_) => return unsupported("sing-box 没有 WARP 认证配置"),
         Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
@@ -66,6 +67,7 @@ pub fn outbound(
     }
     match source {
         Connection::Direct(_) => {}
+        Connection::Warp(_) => unreachable!(),
         Connection::Hysteria2(value) => {
             output.extend(super::hysteria::client(value, inbound::Core::SingBox)?);
             output.insert("server".to_owned(), json!(value.server));

@@ -502,19 +502,44 @@ impl Builder<'_> {
     fn remote(&self, target: &Connection) -> Result<Connection> {
         let mut target = target.clone();
         let (core, network, tls) = match &mut target {
-            Connection::Http(value) => (&mut value.proxy.core, &mut value.network, &mut value.tls),
-            Connection::Socks(value) => (&mut value.proxy.core, &mut value.network, &mut value.tls),
-            Connection::Vless(value) => (&mut value.core, &mut value.network, &mut value.tls),
-            Connection::Vmess(value) => (&mut value.core, &mut value.network, &mut value.tls),
-            Connection::Trojan(value) => (&mut value.core, &mut value.network, &mut value.tls),
-            Connection::Shadowsocks(value) => (&mut value.core, &mut value.network, &mut value.tls),
-            Connection::Hysteria2(value) => (&mut value.core, &mut value.network, &mut value.tls),
-            Connection::AnyTls(value) => (&mut value.core, &mut value.network, &mut value.tls),
-            Connection::Forward(value) => (&mut value.core, &mut value.network, &mut value.tls),
+            Connection::Http(value) => (
+                &mut value.proxy.core,
+                &mut value.network,
+                Some(&mut value.tls),
+            ),
+            Connection::Socks(value) => (
+                &mut value.proxy.core,
+                &mut value.network,
+                Some(&mut value.tls),
+            ),
+            Connection::Vless(value) => (&mut value.core, &mut value.network, Some(&mut value.tls)),
+            Connection::Vmess(value) => (&mut value.core, &mut value.network, Some(&mut value.tls)),
+            Connection::Trojan(value) => {
+                (&mut value.core, &mut value.network, Some(&mut value.tls))
+            }
+            Connection::Shadowsocks(value) => {
+                (&mut value.core, &mut value.network, Some(&mut value.tls))
+            }
+            Connection::Hysteria2(value) => {
+                (&mut value.core, &mut value.network, Some(&mut value.tls))
+            }
+            Connection::AnyTls(value) => {
+                (&mut value.core, &mut value.network, Some(&mut value.tls))
+            }
+            Connection::Forward(value) => {
+                (&mut value.core, &mut value.network, Some(&mut value.tls))
+            }
+            Connection::Warp(value) => {
+                value.server = Some(value.server().to_owned());
+                (&mut value.core, &mut value.network, None)
+            }
             Connection::Direct(_) => return Ok(target),
         };
         *core = connection::Core::Auto;
         *network = connection::Network::default();
+        let Some(tls) = tls else {
+            return Ok(target);
+        };
         for file in tls.certificate_files.drain(..) {
             tls.certificates
                 .push(std::fs::read_to_string(self.store.directory.join(file))?);

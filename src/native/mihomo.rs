@@ -44,6 +44,7 @@ pub fn outbound(
         Connection::Shadowsocks(value) => ("ss", None, &value.network),
         Connection::Hysteria2(value) => ("hysteria2", None, &value.network),
         Connection::AnyTls(value) => ("anytls", None, &value.network),
+        Connection::Warp(value) => ("masque", None, &value.network),
         Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
@@ -91,6 +92,12 @@ pub fn outbound(
     }
     let tls = match source {
         Connection::Forward(_) => unreachable!(),
+        Connection::Warp(value) => {
+            output.extend(super::warp::mihomo(value)?);
+            output.insert("server".to_owned(), json!(value.server()));
+            output.insert("port".to_owned(), json!(value.port));
+            None
+        }
         Connection::AnyTls(value) => {
             if !value.tls.enabled {
                 return unsupported("Mihomo AnyTLS 出站使用 TLS");

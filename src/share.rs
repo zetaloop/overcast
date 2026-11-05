@@ -80,6 +80,7 @@ pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<Str
                         Some(&mut value.transport),
                     ),
                     Connection::Direct(_) => unreachable!(),
+                    Connection::Warp(_) => return Err("WARP 连接使用连接路径 JSON 分享".into()),
                     Connection::Hysteria2(value) => {
                         if !value.hysteria.ports.is_empty() {
                             return Err("多段跳跃端口连接使用连接路径 JSON 分享".into());
@@ -127,6 +128,7 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
     let mut query = Map::new();
     let (scheme, user) = match source {
         Connection::Direct(_) => unreachable!(),
+        Connection::Warp(_) => return Err("WARP 连接使用连接路径 JSON 分享".into()),
         Connection::Forward(_) => {
             return Err("此连接使用连接路径 JSON 分享".into());
         }
