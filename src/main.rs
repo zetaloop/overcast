@@ -16,6 +16,7 @@ mod inbound;
 pub mod input;
 mod keys;
 mod link;
+mod maintenance;
 mod multiplex;
 mod native;
 mod outbound;
@@ -47,8 +48,19 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 fn run() -> Result<()> {
     let mut args = std::env::args().skip(1).peekable();
-    if args.next_if_eq("--run").is_some() {
-        return service::run(Store::open(args.next().map(Into::into))?);
+    match args.peek().map(String::as_str) {
+        Some("--run") => {
+            args.next();
+            return service::run(Store::open(args.next().map(Into::into))?);
+        }
+        Some("--update") => {
+            args.next();
+            return maintenance::update(
+                &Store::open(args.next().map(Into::into))?,
+                &progress::Progress::default(),
+            );
+        }
+        _ => {}
     }
     let store = Store::open(None)?;
     let mut screen = Screen::open(args)?;
@@ -64,7 +76,7 @@ fn run() -> Result<()> {
         Item::new("outbounds", "出站".stylized()),
         Item::new("users", "用户".stylized()),
         Item::new("rules", "分流".stylized()),
-        Item::new("components", "组件".stylized()),
+        Item::new("maintenance", "维护".stylized()),
         Item::new("about", "关于".stylized()),
         Item::new("exit", "退出".foreground(AnsiColor::BrightRed)),
     ];
@@ -85,7 +97,7 @@ fn run() -> Result<()> {
             1 => outbound::run(&mut screen, &store),
             2 => user::run(&mut screen, &store),
             3 => route::run(&mut screen, &store),
-            4 => component::run(&mut screen, &store),
+            4 => maintenance::run(&mut screen, &store),
             5 => screen.about(),
             _ => break,
         };

@@ -23,12 +23,14 @@ struct Builder<'a> {
 
 pub fn build(
     store: &Store,
-    config: &Config,
+    deployment: &crate::service::Deployment,
     inbound: Option<Uuid>,
     user: Option<Uuid>,
     progress: &Progress,
 ) -> Result<Vec<Selection>> {
-    let Some(graph) = crate::native::analyze(store, config, progress)? else {
+    let config = &deployment.config;
+    let mut geodata = deployment.geodata;
+    let Some(graph) = crate::native::analyze(store, config, &mut geodata, progress)? else {
         return Ok(Vec::new());
     };
     let mut builder = Builder {
@@ -75,8 +77,8 @@ pub fn copy(
     links: bool,
 ) -> Result<()> {
     let text = screen.work("生成连接资料", "", |progress| {
-        let config = store.load()?;
-        let profiles = build(store, &config, inbound, user, progress)?;
+        let deployment = crate::service::Deployment::load(store)?;
+        let profiles = build(store, &deployment, inbound, user, progress)?;
         if links {
             Ok(profiles
                 .iter()

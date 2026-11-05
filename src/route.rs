@@ -374,12 +374,10 @@ pub(crate) fn destination(
 }
 
 fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
-    let catalog = match Catalog::load(store)? {
-        Some(catalog) => catalog,
-        None => screen.work("准备规则数据", "", |progress| {
-            Catalog::update(store, progress)
-        })?,
-    };
+    let mut resources = crate::resource::Resources::load(store)?;
+    let catalog = screen.work("准备规则数据", "", |progress| {
+        Catalog::ensure(store, &mut resources.geodata, progress)
+    })?;
     let config = store.load()?;
     let condition = &get(&config.rules, path)?.condition;
     let bindings = condition.bindings(&config);
@@ -402,9 +400,10 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
     .collect();
     let apply = |text: &str, screen: &mut Screen| {
         screen.work("编辑条件", text, |progress| {
-            store.update(progress, |config| {
+            store.update(progress, |config, resources| {
                 let condition = Condition::parse(text, config, &catalog, &bindings)?;
                 get_mut(&mut config.rules, path)?.condition = condition;
+                resources.geodata = Some(catalog.release);
                 Ok(())
             })
         })
@@ -562,7 +561,7 @@ fn move_rule(
             KeyCode::Escape => return Ok(None),
             KeyCode::Enter => {
                 let result = screen.work(menu.title, "", |progress| {
-                    store.update(progress, |config| {
+                    store.update(progress, |config, _| {
                         config.rules = rules.clone();
                         Ok(())
                     })
@@ -612,7 +611,7 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
                     destination(screen, store, rule.destination, true, |_, _| Ok(true)).and_then(
                         |destination| match destination {
                             Some(destination) => screen.work(menu.title, "", |progress| {
-                                store.update(progress, |config| {
+                                store.update(progress, |config, _| {
                                     get_mut(&mut config.rules, &path)?.destination = destination;
                                     Ok(())
                                 })
@@ -623,7 +622,7 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
                 }
                 "new" => {
                     let index = screen.work(menu.title, "", |progress| {
-                        store.update(progress, |config| {
+                        store.update(progress, |config, _| {
                             let rule = get_mut(&mut config.rules, &path)?;
                             let index = rule.children.len();
                             rule.children.push(Rule {
@@ -645,7 +644,7 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
                 }),
                 "delete" => {
                     let result = screen.work(menu.title, "", |progress| {
-                        store.update(progress, |config| {
+                        store.update(progress, |config, _| {
                             let (&index, parent) = path.split_last().ok_or("找不到规则")?;
                             let siblings = children(&mut config.rules, parent)?;
                             if index >= siblings.len() {
@@ -706,7 +705,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             Action::Select => match items[selected].key.as_str() {
                 "new" => {
                     let index = screen.work(menu.title, "", |progress| {
-                        store.update(progress, |config| {
+                        store.update(progress, |config, _| {
                             let index = config.rules.len();
                             config.rules.push(Rule::default());
                             Ok(index)
@@ -719,7 +718,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                 }
                 "update" => screen
                     .work("更新规则数据", "", |progress| {
-                        Catalog::update(store, progress)
+                        crate::maintenance::rules(store, progress)
                     })
                     .map(|_| ()),
                 _ => return Ok(()),

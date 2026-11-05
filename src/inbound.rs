@@ -547,7 +547,7 @@ fn edit(
     let apply: form::Apply<'_, Inbound> = Rc::new(|edited, screen| {
         if existing {
             screen.work("保存入站", &format!(" -- {}", edited.name), |progress| {
-                store.update(progress, |config| {
+                store.update(progress, |config, _| {
                     let current = config
                         .inbounds
                         .iter_mut()
@@ -779,7 +779,7 @@ fn edit(
                             "生成握手资料",
                             &format!(" -- {}", inbound.name),
                             |progress| {
-                                store.update(progress, |config| {
+                                store.update(progress, |config, _| {
                                     let source = config
                                         .inbounds
                                         .iter()
@@ -802,7 +802,7 @@ fn edit(
                         "保存入站",
                         &format!(" -- {}", inbound.name),
                         |progress| {
-                            store.update(progress, |config| {
+                            store.update(progress, |config, _| {
                                 let mut value = inbound.clone();
                                 if value.name.trim().is_empty() {
                                     value.name = value.summary();
@@ -822,7 +822,7 @@ fn edit(
                         "删除入站",
                         &format!(" -- {}", inbound.name),
                         |progress| {
-                            store.update(progress, |config| {
+                            store.update(progress, |config, _| {
                                 config.inbounds.retain(|value| value.uuid != inbound.uuid);
                                 for rule in &mut config.rules {
                                     rule.remove_destination(crate::route::Destination::Inbound(

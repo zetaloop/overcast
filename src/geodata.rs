@@ -26,6 +26,15 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn ensure(store: &Store, release: &mut Option<u64>, progress: &Progress) -> Result<Self> {
+        if let Some(release) = *release {
+            return Self::load(store, release);
+        }
+        let catalog = Self::update(store, progress)?;
+        *release = Some(catalog.release);
+        Ok(catalog)
+    }
+
     pub fn directory(&self, store: &Store) -> PathBuf {
         store
             .directory
@@ -33,13 +42,13 @@ impl Catalog {
             .join(self.release.to_string())
     }
 
-    pub fn load(store: &Store) -> Result<Option<Self>> {
-        let path = store.directory.join("geodata/index.json");
-        match File::open(&path) {
-            Ok(file) => Ok(Some(serde_json::from_reader(BufReader::new(file))?)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+    pub fn load(store: &Store, release: u64) -> Result<Self> {
+        let path = store
+            .directory
+            .join("geodata")
+            .join(release.to_string())
+            .join("index.json");
+        Ok(serde_json::from_reader(BufReader::new(File::open(path)?))?)
     }
 
     pub fn update(store: &Store, progress: &Progress) -> Result<Self> {
@@ -128,7 +137,7 @@ impl Catalog {
             asns,
         };
         progress.check()?;
-        store.write(&root.join("index.json"), |file| {
+        store.write(&directory.join("index.json"), |file| {
             serde_json::to_writer(file, &catalog)?;
             Ok(())
         })?;

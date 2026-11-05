@@ -1,18 +1,46 @@
 use std::{
+    collections::BTreeMap,
     env,
     error::Error,
     fmt,
+    fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     time::{Duration, Instant, SystemTime},
 };
 
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::{Agent, Body, http::Response};
 
 use crate::{
     Result,
+    component::{Component, Installed},
+    config::Store,
     progress::{Progress, Step},
 };
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Resources {
+    pub components: BTreeMap<Component, Installed>,
+    pub geodata: Option<u64>,
+}
+
+impl Resources {
+    pub fn load(store: &Store) -> Result<Self> {
+        match File::open(store.directory.join("resources.json")) {
+            Ok(file) => Ok(serde_json::from_reader(io::BufReader::new(file))?),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save(&self, store: &Store) -> Result<()> {
+        store.write(&store.directory.join("resources.json"), |file| {
+            serde_json::to_writer_pretty(file, self)?;
+            Ok(())
+        })
+    }
+}
 
 #[derive(Deserialize)]
 pub struct Release {

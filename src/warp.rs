@@ -187,19 +187,21 @@ impl Registration {
 }
 
 fn register(store: &Store, progress: &Progress) -> Result<Registration> {
-    let config = store.load()?;
-    let program = config
+    let resources = crate::resource::Resources::load(store)?;
+    let program = resources
         .components
         .get(&Component::Usque)
-        .filter(|settings| settings.installed.is_some())
-        .map(|settings| Component::Usque.program(store, settings))
+        .map(|installed| Component::Usque.program(store, installed))
         .transpose()?;
     let program = match program {
         Some(program) if program.try_exists()? => program,
-        _ => store.update(progress, |config| {
-            let settings = config.components.entry(Component::Usque).or_default();
-            Component::Usque.ensure(store, settings, progress)?;
-            Component::Usque.program(store, settings)
+        _ => store.update(progress, |config, resources| {
+            let preview = config
+                .components
+                .get(&Component::Usque)
+                .is_some_and(|settings| settings.preview);
+            Component::Usque.ensure(store, preview, resources, progress)?;
+            Component::Usque.program(store, &resources.components[&Component::Usque])
         })?,
     };
     progress.check()?;

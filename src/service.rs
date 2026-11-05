@@ -32,14 +32,18 @@ use crate::{
     Result, certificate,
     component::Component,
     config::{Config, Store},
-    native::{Instance, State},
+    native::{Instance, Prepared},
     progress::Progress,
+    resource::Resources,
 };
 
-#[derive(Default, Deserialize, Serialize)]
-struct Deployment {
-    id: Uuid,
-    ports: BTreeMap<String, u16>,
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Deployment {
+    pub id: Uuid,
+    pub config: Config,
+    pub geodata: Option<u64>,
+    pub ports: BTreeMap<String, u16>,
     units: Vec<Unit>,
 }
 
@@ -49,6 +53,7 @@ struct Unit {
     name: String,
     program: PathBuf,
     config: PathBuf,
+    assets: Vec<String>,
     environment: BTreeMap<String, String>,
     certificates: BTreeSet<String>,
 }
@@ -66,20 +71,50 @@ enum Event {
 }
 
 impl Deployment {
-    fn load(store: &Store, config: &Config) -> Result<Self> {
-        let Some(id) = config.runtime else {
-            return Ok(Self::default());
+    pub fn load(store: &Store) -> Result<Self> {
+        match fs::read(store.directory.join("deployment.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn prepare(
+        store: &Store,
+        config: &Config,
+        resources: &mut Resources,
+        prepared: Option<&Prepared>,
+        previous: &Self,
+        progress: &Progress,
+    ) -> Result<Self> {
+        let mut deployment = Self {
+            id: Uuid::new_v4(),
+            config: config.clone(),
+            geodata: resources.geodata,
+            ..Self::default()
         };
-        let directory = store.directory.join("runtime").join(id.to_string());
-        let state: State = serde_json::from_slice(&fs::read(directory.join("state.json"))?)?;
-        let mut units = Vec::new();
+        let Some(prepared) = prepared else {
+            return Ok(deployment);
+        };
+        let state = &prepared.state;
         for Instance {
             component,
             file,
+            assets,
             environment,
+            certificates,
         } in &state.instances
         {
-            let config_file = directory.join(file);
+            component.ensure(
+                store,
+                config
+                    .components
+                    .get(component)
+                    .is_some_and(|settings| settings.preview),
+                resources,
+                &progress.group(component.name()),
+            )?;
+            let config_file = prepared.directory().join(file);
             let stem = config_file
                 .parent()
                 .unwrap()
@@ -87,43 +122,35 @@ impl Deployment {
                 .unwrap()
                 .to_string_lossy();
             let name = stem.into_owned();
-            let settings = config
+            let installed = resources
                 .components
                 .get(component)
-                .ok_or_else(|| format!("{} 尚未安装", component.name()))?;
-            units.push(Unit {
+                .ok_or_else(|| format!("缺少 {} 程序", component.name()))?;
+            let mut unit = Unit {
                 component: *component,
                 name,
-                program: component.program(store, settings)?,
+                program: component.program(store, installed)?,
                 config: config_file,
+                assets: assets.clone(),
                 environment: environment.clone(),
-                certificates: if *component == Component::Caddy {
-                    BTreeSet::new()
-                } else {
-                    state.certificates.clone()
-                },
-            });
+                certificates: certificates.clone(),
+            };
+            if let Some(old) = previous.units.iter().find(|old| old.name == unit.name)
+                && unit.equivalent(old)?
+            {
+                unit = old.clone();
+            }
+            deployment.units.push(unit);
         }
-        Ok(Self {
-            id: Uuid::new_v4(),
-            ports: state.ports,
-            units,
-        })
+        deployment.ports = state.ports.clone();
+        Ok(deployment)
     }
 
-    fn saved(store: &Store) -> Result<Self> {
-        match fs::read(store.directory.join("services.json")) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    fn save(&self, store: &Store) -> Result<()> {
-        store.write(&store.directory.join("services.json"), |file| {
-            serde_json::to_writer_pretty(file, self)?;
-            Ok(())
-        })
+    pub fn directories(&self) -> BTreeSet<PathBuf> {
+        self.units
+            .iter()
+            .map(|unit| unit.config.parent().unwrap().to_owned())
+            .collect()
     }
 
     fn certificates(&self) -> BTreeSet<String> {
@@ -131,6 +158,13 @@ impl Deployment {
             .iter()
             .flat_map(|unit| unit.certificates.iter().cloned())
             .collect()
+    }
+
+    fn save(&self, store: &Store) -> Result<()> {
+        store.write(&store.directory.join("deployment.json"), |file| {
+            serde_json::to_writer_pretty(file, self)?;
+            Ok(())
+        })
     }
 
     fn caddy(&self) -> Option<&Unit> {
@@ -141,6 +175,35 @@ impl Deployment {
 }
 
 impl Unit {
+    fn equivalent(&self, other: &Self) -> Result<bool> {
+        if self.component != other.component
+            || self.program != other.program
+            || self.environment != other.environment
+            || self.certificates != other.certificates
+            || self.assets != other.assets
+        {
+            return Ok(false);
+        }
+        for (file, previous) in std::iter::once((self.config.clone(), other.config.clone())).chain(
+            self.assets.iter().map(|name| {
+                (
+                    self.config.parent().unwrap().join(name),
+                    other.config.parent().unwrap().join(name),
+                )
+            }),
+        ) {
+            let previous = match fs::read(previous) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            if fs::read(file)? != previous {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn arguments(&self, check: bool) -> Vec<OsString> {
         let directory = self.config.parent().unwrap();
         match self.component {
@@ -201,46 +264,22 @@ impl Unit {
     }
 }
 
-pub fn prepare(store: &Store, config: &mut Config, progress: &Progress) -> Result<()> {
-    let Some(id) = config.runtime else {
-        return Ok(());
-    };
-    let state: State = serde_json::from_slice(&fs::read(
-        store
-            .directory
-            .join("runtime")
-            .join(id.to_string())
-            .join("state.json"),
-    )?)?;
-    let components: BTreeSet<_> = state
-        .instances
+pub fn apply(
+    store: &Store,
+    previous: &Deployment,
+    target: &Deployment,
+    progress: &Progress,
+) -> Result<()> {
+    for unit in target
+        .units
         .iter()
-        .map(|instance| instance.component)
-        .collect();
-    for component in components {
-        component.ensure(
-            store,
-            config.components.entry(component).or_default(),
-            &progress.group(component.name()),
-        )?;
-    }
-    Ok(())
-}
-
-pub fn apply(store: &Store, previous: &Config, target: &Config, progress: &Progress) -> Result<()> {
-    let deployment = Deployment::load(store, target)?;
-    for unit in &deployment.units {
+        .filter(|unit| !previous.units.contains(unit))
+    {
         unit.check(progress)?;
     }
     progress.check()?;
-    deployment.save(store)?;
-    if let Err(error) = switch(
-        store,
-        previous.running,
-        target.running,
-        &deployment,
-        progress,
-    ) {
+    target.save(store)?;
+    if let Err(error) = switch(store, previous, target, progress) {
         let step = progress.activity("恢复部署");
         match restore(store, target, previous, &Progress::default()) {
             Ok(()) => step.finish("已恢复此前部署"),
@@ -253,29 +292,21 @@ pub fn apply(store: &Store, previous: &Config, target: &Config, progress: &Progr
 
 pub fn restore(
     store: &Store,
-    current: &Config,
-    previous: &Config,
+    current: &Deployment,
+    previous: &Deployment,
     progress: &Progress,
 ) -> Result<()> {
-    let deployment = Deployment::load(store, previous)?;
-    deployment.save(store)?;
-    switch(
-        store,
-        current.running,
-        previous.running,
-        &deployment,
-        progress,
-    )
+    previous.save(store)?;
+    switch(store, current, previous, progress)
 }
 
 fn switch(
     store: &Store,
-    previous: bool,
-    running: bool,
+    previous: &Deployment,
     target: &Deployment,
     progress: &Progress,
 ) -> Result<()> {
-    match (previous, running) {
+    match (previous.config.running, target.config.running) {
         (false, false) => {}
         (true, false) => {
             let step = progress.activity("停止服务");
@@ -288,6 +319,7 @@ fn switch(
             wait(store, target.id, progress)?;
             step.finish(format!("{} 个核心", target.units.len()));
         }
+        (true, true) if previous.units == target.units => {}
         (true, true) => {
             let step = progress.activity("应用服务");
             platform::reload()?;
@@ -394,7 +426,7 @@ fn orchestrate(
     loop {
         if pending {
             pending = false;
-            let target = Deployment::saved(store)?;
+            let target = Deployment::load(store)?;
             let result = orchestrator.transition(&deployment, &target);
             retries.clear();
             if let Err(error) = &result {

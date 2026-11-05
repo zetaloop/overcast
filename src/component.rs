@@ -19,7 +19,7 @@ use crate::{
     Result,
     config::Store,
     progress::{Progress, Step},
-    resource::{self, Asset, Release},
+    resource::{self, Asset, Release, Resources},
     tui::{Action, Item, Menu, Screen},
 };
 
@@ -37,7 +37,6 @@ pub enum Component {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub preview: bool,
-    pub installed: Option<Installed>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -56,7 +55,7 @@ struct Package<'a> {
 }
 
 impl Component {
-    const ALL: [Self; 5] = [
+    pub const ALL: [Self; 5] = [
         Self::Xray,
         Self::SingBox,
         Self::Mihomo,
@@ -98,29 +97,38 @@ impl Component {
         format!("{}{}", self.key(), env::consts::EXE_SUFFIX)
     }
 
-    pub fn program(self, store: &Store, settings: &Settings) -> Result<PathBuf> {
-        let installed = settings
-            .installed
-            .as_ref()
-            .ok_or_else(|| format!("{} 尚未安装", self.name()))?;
+    pub fn program(self, store: &Store, installed: &Installed) -> Result<PathBuf> {
         Ok(self
             .directory(store, &installed.tag)?
             .join(installed.asset.to_string())
             .join(&installed.path))
     }
 
-    pub fn ensure(self, store: &Store, settings: &mut Settings, progress: &Progress) -> Result<()> {
-        if settings.installed.is_some() && self.program(store, settings)?.try_exists()? {
+    pub fn ensure(
+        self,
+        store: &Store,
+        preview: bool,
+        resources: &mut Resources,
+        progress: &Progress,
+    ) -> Result<()> {
+        if let Some(installed) = resources.components.get(&self)
+            && self.program(store, installed)?.try_exists()?
+        {
             return Ok(());
         }
         let client = resource::client();
         let release = self.release(
             &client,
-            settings.installed.as_ref().map(|value| value.tag.as_str()),
-            settings.preview,
+            resources
+                .components
+                .get(&self)
+                .map(|value| value.tag.as_str()),
+            preview,
             progress,
         )?;
-        settings.installed = Some(self.install(store, &client, &release, progress)?);
+        resources
+            .components
+            .insert(self, self.install(store, &client, &release, progress)?);
         Ok(())
     }
 
@@ -460,15 +468,21 @@ fn amd64() -> &'static str {
     }
 }
 
-fn edit(screen: &mut Screen, store: &Store, client: &Agent, component: Component) -> Result<()> {
+pub fn edit(
+    screen: &mut Screen,
+    store: &Store,
+    client: &Agent,
+    component: Component,
+) -> Result<()> {
     let mut selected = 0;
     let mut notice = String::new();
     let mut latest: Option<Release> = None;
     loop {
         let config = store.load()?;
+        let resources = Resources::load(store)?;
         let settings = config.components.get(&component);
         let preview = settings.is_some_and(|settings| settings.preview);
-        let installed = settings.and_then(|settings| settings.installed.as_ref());
+        let installed = resources.components.get(&component);
         let heading = format!(
             "当前版本：{}",
             installed.map_or("未安装", |installed| installed.version.as_str())
@@ -528,9 +542,8 @@ fn edit(screen: &mut Screen, store: &Store, client: &Agent, component: Component
                         let release =
                             component.release(client, version.as_deref(), preview, progress)?;
                         let installed = component.install(store, client, &release, progress)?;
-                        store.update(progress, |config| {
-                            config.components.entry(component).or_default().installed =
-                                Some(installed);
+                        store.update(progress, |_, resources| {
+                            resources.components.insert(component, installed);
                             Ok(())
                         })?;
                         Ok(release)
@@ -543,7 +556,7 @@ fn edit(screen: &mut Screen, store: &Store, client: &Agent, component: Component
             }
             "preview" => screen
                 .work(component.name(), "", |progress| {
-                    store.update(progress, |config| {
+                    store.update(progress, |config, _| {
                         config.components.entry(component).or_default().preview = !preview;
                         Ok(())
                     })
@@ -559,109 +572,43 @@ fn edit(screen: &mut Screen, store: &Store, client: &Agent, component: Component
     }
 }
 
-pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
+pub fn update(
+    store: &Store,
+    config: &crate::config::Config,
+    resources: &mut Resources,
+    progress: &Progress,
+) -> Result<()> {
     let client = resource::client();
-    let mut selected = 0;
-    let mut notice = String::new();
-    loop {
-        let config = store.load()?;
-        let mut items: Vec<_> = Component::ALL
-            .iter()
+    let installed = thread::scope(|scope| {
+        let tasks: Vec<_> = resources
+            .components
+            .keys()
             .map(|component| {
-                let mut item = Item::new(component.key(), component.name().stylized());
-                item.value = config
+                let progress = progress.group(component.name());
+                let client = &client;
+                let preview = config
                     .components
                     .get(component)
-                    .and_then(|settings| settings.installed.as_ref())
-                    .map_or_else(
-                        || "未安装".to_owned(),
-                        |installed| installed.version.clone(),
-                    );
-                item
+                    .is_some_and(|settings| settings.preview);
+                scope.spawn(move || {
+                    let result = component
+                        .release(client, None, preview, &progress)
+                        .and_then(|release| component.install(store, client, &release, &progress));
+                    if let Err(error) = &result {
+                        progress.fail(&error.to_string());
+                    }
+                    result.map(|installed| (*component, installed))
+                })
             })
             .collect();
-        let mut running = Item::new("running", "运行服务".stylized());
-        running.marker = if config.running { "■" } else { "□" };
-        items.extend([
-            running,
-            Item::new("update", "更新已安装组件".stylized()),
-            Item::new("back", "返回".stylized()),
-        ]);
-        let menu = Menu {
-            title: "组件",
-            heading: "",
-            items: &items,
-            help: "方向键 选择\n回车键 确定\nEsc 返回",
-        };
-        match screen.select(&menu, &mut selected, &notice)? {
-            Action::Back => return Ok(()),
-            Action::Select => {}
-            _ => continue,
-        }
-        let result = if let Some(component) = Component::ALL.get(selected) {
-            edit(screen, store, &client, *component)
-        } else if items[selected].key == "running" {
-            screen.work(
-                if config.running {
-                    "停止服务"
-                } else {
-                    "启动服务"
-                },
-                "",
-                |progress| {
-                    store.update(progress, |config| {
-                        config.running = !config.running;
-                        Ok(())
-                    })
-                },
-            )
-        } else if items[selected].key == "update" {
-            screen.work("更新组件", "", |progress| {
-                let installed = thread::scope(|scope| {
-                    let tasks: Vec<_> = config
-                        .components
-                        .iter()
-                        .filter(|(_, settings)| settings.installed.is_some())
-                        .map(|(component, settings)| {
-                            let progress = progress.group(component.name());
-                            let client = &client;
-                            scope.spawn(move || {
-                                let result = component
-                                    .release(client, None, settings.preview, &progress)
-                                    .and_then(|release| {
-                                        component.install(store, client, &release, &progress)
-                                    });
-                                if let Err(error) = &result {
-                                    progress.fail(&error.to_string());
-                                }
-                                result.map(|installed| (*component, installed))
-                            })
-                        })
-                        .collect();
-                    tasks
-                        .into_iter()
-                        .map(|task| {
-                            task.join()
-                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })?;
-                if !installed.is_empty() {
-                    store.update(progress, |config| {
-                        for (component, installed) in installed {
-                            config.components.entry(component).or_default().installed =
-                                Some(installed);
-                        }
-                        Ok(())
-                    })?;
-                }
-                Ok(())
+        tasks
+            .into_iter()
+            .map(|task| {
+                task.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })
-        } else {
-            return Ok(());
-        };
-        notice = result
-            .err()
-            .map_or_else(String::new, |error| error.to_string());
-    }
+            .collect::<Result<Vec<_>>>()
+    })?;
+    resources.components.extend(installed);
+    Ok(())
 }

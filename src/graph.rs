@@ -255,6 +255,7 @@ impl Network {
 pub fn build<'a>(
     store: &Store,
     config: &'a Config,
+    geodata: &mut Option<u64>,
     progress: &'a Progress,
     mut reachable: impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
 ) -> Result<Option<Graph<'a>>> {
@@ -287,7 +288,7 @@ pub fn build<'a>(
         collect(&rule.condition, &mut conditions, &mut seen);
         pending.extend(&rule.children);
     }
-    let targets = Targets::load(store, conditions, progress)?;
+    let targets = Targets::load(store, geodata, conditions, progress)?;
     let mut graph = Analysis::new(&targets, config, progress)?;
     let step = progress.activity("分析分流");
     let mut entries = Vec::new();

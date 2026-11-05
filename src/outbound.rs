@@ -127,7 +127,7 @@ impl From<Connection> for Selection {
 
 fn paste(store: &Store, selections: Vec<Selection>, progress: &Progress) -> Result<usize> {
     let mut index = 0;
-    store.update(progress, |config| {
+    store.update(progress, |config, _| {
         index = config.outbounds.len();
         for selection in selections {
             let mut outbound = Outbound {
@@ -235,7 +235,7 @@ fn edit(
     let apply: form::Apply<'_, Outbound> = Rc::new(|edited, screen| {
         if existing {
             screen.work("保存出站", &format!(" -- {}", edited.name), |progress| {
-                store.update(progress, |config| {
+                store.update(progress, |config, _| {
                     let current = config
                         .outbounds
                         .iter_mut()
@@ -399,7 +399,7 @@ fn edit(
                         "保存出站",
                         &format!(" -- {}", outbound.name),
                         |progress| {
-                            store.update(progress, |config| {
+                            store.update(progress, |config, _| {
                                 let mut value = outbound.clone();
                                 if value.name.trim().is_empty() {
                                     value.name = value.summary();
@@ -420,7 +420,7 @@ fn edit(
                         "删除出站",
                         &format!(" -- {}", outbound.name),
                         |progress| {
-                            store.update(progress, |config| {
+                            store.update(progress, |config, _| {
                                 config
                                     .outbounds
                                     .retain(|current| current.uuid != outbound.uuid);

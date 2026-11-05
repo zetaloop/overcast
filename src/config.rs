@@ -20,6 +20,7 @@ use crate::{
     native,
     outbound::Outbound,
     progress::Progress,
+    resource::Resources,
     route::Rule,
     service,
     user::User,
@@ -28,8 +29,6 @@ use crate::{
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<Uuid>,
     pub users: Vec<User>,
     pub inbounds: Vec<Inbound>,
     pub outbounds: Vec<Outbound>,
@@ -74,6 +73,7 @@ impl Config {
     }
 }
 
+#[derive(Clone)]
 pub struct Store {
     pub directory: PathBuf,
     #[cfg(unix)]
@@ -174,53 +174,91 @@ impl Store {
     pub fn update<T>(
         &self,
         progress: &Progress,
-        change: impl FnOnce(&mut Config) -> Result<T>,
+        change: impl FnOnce(&mut Config, &mut Resources) -> Result<T>,
     ) -> Result<T> {
         let _lock = self.lock()?;
         progress.check()?;
-        let previous = self.load()?;
-        let mut config = previous.clone();
-        let result = change(&mut config)?;
-        config.validate()?;
-        config
-            .keys
-            .retain(|uuid, _| config.inbounds.iter().any(|inbound| inbound.uuid == *uuid));
-        let prepared = native::prepare(self, &config, progress)?;
-        if let Some(prepared) = &prepared {
-            config.keys = prepared.keys.clone();
-        }
-        config.runtime = prepared.as_ref().map(|prepared| prepared.id);
-        service::prepare(self, &mut config, progress)?;
+        let previous = service::Deployment::load(self)?;
+        let mut config = self.load()?;
+        let mut resources = Resources::load(self)?;
+        let planned = (|| -> Result<_> {
+            let result = change(&mut config, &mut resources)?;
+            config.validate()?;
+            config
+                .keys
+                .retain(|uuid, _| config.inbounds.iter().any(|inbound| inbound.uuid == *uuid));
+            let prepared = native::prepare(
+                self,
+                &config,
+                &mut resources.geodata,
+                &previous.ports,
+                progress,
+            )?;
+            if let Some(prepared) = &prepared {
+                config.keys = prepared.keys.clone();
+            }
+            let target = service::Deployment::prepare(
+                self,
+                &config,
+                &mut resources,
+                prepared.as_ref(),
+                &previous,
+                progress,
+            )?;
+            Ok((result, prepared, target))
+        })();
+        resources.save(self)?;
+        let (result, mut prepared, target) = planned?;
         progress.check()?;
         let path = self.directory.join("config.json");
-        service::apply(self, &previous, &config, progress)?;
+        let mut directories = previous.directories();
+        if let Some(prepared) = &prepared {
+            directories.extend(prepared.state.instances.iter().map(|instance| {
+                prepared
+                    .directory()
+                    .join(&instance.file)
+                    .parent()
+                    .unwrap()
+                    .to_owned()
+            }));
+        }
+        let used = target.directories();
+        if prepared.as_ref().is_some_and(|prepared| {
+            used.iter()
+                .any(|directory| directory.starts_with(prepared.directory()))
+        }) {
+            prepared.take().unwrap().keep();
+        }
+        service::apply(self, &previous, &target, progress)?;
         if let Err(error) = self.write(&path, |file| {
             serde_json::to_writer_pretty(&mut *file, &config)?;
             file.write_all(b"\n")?;
             Ok(())
         }) {
             let step = progress.activity("恢复部署");
-            match service::restore(self, &config, &previous, &Progress::default()) {
+            match service::restore(self, &target, &previous, &Progress::default()) {
                 Ok(()) => step.finish("已恢复此前部署"),
                 Err(recovery) => return Err(format!("{error}；恢复部署失败：{recovery}").into()),
             }
             return Err(error);
         }
-        if let Some(prepared) = prepared {
-            prepared.keep();
-        }
-        if let Some(previous) = previous
-            .runtime
-            .filter(|previous| Some(*previous) != config.runtime)
-        {
-            let directory = self.directory.join("runtime").join(previous.to_string());
-            if let Err(error) = fs::remove_dir_all(&directory)
+        for directory in directories.difference(&used) {
+            if let Err(error) = fs::remove_dir_all(directory)
                 && error.kind() != ErrorKind::NotFound
             {
                 progress.record(
                     "清理旧配置失败",
                     &format!("{}：{error}", directory.display()),
                 );
+            }
+            if let Some(parent) = directory.parent()
+                && let Err(error) = fs::remove_dir(parent)
+                && !matches!(
+                    error.kind(),
+                    ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+                )
+            {
+                progress.record("清理旧配置失败", &format!("{}：{error}", parent.display()));
             }
         }
         Ok(result)

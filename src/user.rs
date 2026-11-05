@@ -104,7 +104,7 @@ fn edit(
         let apply = |edited: User, screen: &mut Screen| {
             if let Some(uuid) = original {
                 screen.work("保存用户", &format!(" -- {}", edited.name), |progress| {
-                    store.update(progress, |config| {
+                    store.update(progress, |config, _| {
                         let current = config
                             .users
                             .iter_mut()
@@ -170,7 +170,7 @@ fn edit(
             "create" => {
                 let result =
                     screen.work("保存用户", &format!(" -- {}", user.name), |progress| {
-                        store.update(progress, |config| {
+                        store.update(progress, |config, _| {
                             config.users.push(user.clone());
                             Ok(())
                         })
@@ -184,7 +184,7 @@ fn edit(
             "delete" => {
                 let result =
                     screen.work("删除用户", &format!(" -- {}", user.name), |progress| {
-                        store.update(progress, |config| {
+                        store.update(progress, |config, _| {
                             config.users.retain(|user| Some(user.uuid) != original);
                             Ok(())
                         })

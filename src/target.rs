@@ -75,17 +75,19 @@ impl Targets {
         Ok((address.is_none(), values))
     }
 
-    pub fn load(store: &Store, conditions: Vec<Condition>, progress: &Progress) -> Result<Self> {
+    pub fn load(
+        store: &Store,
+        geodata: &mut Option<u64>,
+        conditions: Vec<Condition>,
+        progress: &Progress,
+    ) -> Result<Self> {
         let mut domains = Vec::new();
         let mut ips = Vec::new();
         let needs_sites = conditions.iter().any(|c| matches!(c, Condition::Site(_)));
         let needs_ips = conditions.iter().any(|c| matches!(c, Condition::Geoip(_)));
         let needs_asns = conditions.iter().any(|c| matches!(c, Condition::Asn(_)));
         let directory = if needs_sites || needs_ips || needs_asns {
-            let catalog = match Catalog::load(store)? {
-                Some(catalog) => catalog,
-                None => Catalog::update(store, progress)?,
-            };
+            let catalog = Catalog::ensure(store, geodata, progress)?;
             Some(catalog.directory(store))
         } else {
             None

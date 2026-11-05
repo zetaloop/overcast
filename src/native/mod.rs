@@ -24,7 +24,6 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -43,30 +42,33 @@ use crate::{
 };
 
 pub struct Prepared {
-    pub id: Uuid,
     pub keys: BTreeMap<Uuid, crate::keys::Keys>,
+    pub state: State,
     directory: TempDir,
 }
 
 impl Prepared {
+    pub fn directory(&self) -> &std::path::Path {
+        self.directory.path()
+    }
+
     pub fn keep(self) {
         let _ = self.directory.keep();
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Default)]
 pub struct State {
     pub ports: BTreeMap<String, u16>,
     pub instances: Vec<Instance>,
-    pub certificates: BTreeSet<String>,
 }
 
-#[derive(Deserialize, Serialize)]
 pub struct Instance {
     pub component: Component,
     pub file: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub assets: Vec<String>,
     pub environment: BTreeMap<String, String>,
+    pub certificates: BTreeSet<String>,
 }
 
 struct Service {
@@ -76,6 +78,7 @@ struct Service {
     listeners: Vec<Value>,
     outbounds: Vec<Value>,
     rules: Vec<routing::Rule>,
+    certificates: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -156,21 +159,18 @@ pub fn available(
     })
 }
 
-pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Option<Prepared>> {
+pub fn prepare(
+    store: &Store,
+    config: &Config,
+    geodata: &mut Option<u64>,
+    ports: &BTreeMap<String, u16>,
+    progress: &Progress,
+) -> Result<Option<Prepared>> {
     let mut builder = Builder::new(store, config, progress);
-    let Some(mut graph) = builder.graph()? else {
+    let Some(mut graph) = builder.graph(geodata)? else {
         return Ok(None);
     };
-    if let Some(id) = config.runtime {
-        let bytes = fs::read(
-            store
-                .directory
-                .join("runtime")
-                .join(id.to_string())
-                .join("state.json"),
-        )?;
-        builder.previous = serde_json::from_slice::<State>(&bytes)?.ports;
-    }
+    builder.previous = ports.clone();
     let mut listeners = listener::build(store, &mut graph, &config.keys, progress)?;
     let members: Vec<_> = listeners
         .iter()
@@ -290,28 +290,6 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         }
         current += 1;
     }
-    let certificates: BTreeSet<_> = listeners
-        .iter()
-        .filter(|listener| listener.source.tls.enabled && !listener.source.tls.reality.enabled)
-        .flat_map(|listener| &listener.members)
-        .map(|member| certificate::name(graph.entries[member.entry].inbound))
-        .collect::<Result<_>>()?;
-    let caddy = if certificates.is_empty() {
-        None
-    } else {
-        if certificates.iter().any(|name| certificate::public(name))
-            && let Some(listener) = listeners
-                .iter()
-                .find(|listener| listener.binding.intersects(&http))
-        {
-            return Err(format!(
-                "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
-                listener.source.name
-            )
-            .into());
-        }
-        Some(builder.port("caddy", BTreeSet::from([graph::Network::Tcp]))?)
-    };
     let mut keys = config.keys.clone();
     reality::prepare(&listeners, &graph, &mut keys, progress)?;
     encryption::prepare(&listeners, &graph, &mut keys, progress)?;
@@ -391,6 +369,13 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 value.contains_key("fallback") || value.contains_key("fallback_for_alpn")
             });
         let service = builder.service(core, globals, BTreeMap::new());
+        if inbound.tls.enabled && !inbound.tls.reality.enabled {
+            for member in &listener.members {
+                builder.services[service]
+                    .certificates
+                    .insert(certificate::name(graph.entries[member.entry].inbound)?);
+            }
+        }
         let mut tags = Vec::new();
         for (part, mut value) in values.into_iter().enumerate() {
             progress.check()?;
@@ -637,6 +622,27 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
             }
         }
     }
+    let certificates: BTreeSet<_> = builder
+        .services
+        .iter()
+        .flat_map(|service| service.certificates.iter().cloned())
+        .collect();
+    let caddy = if certificates.is_empty() {
+        None
+    } else {
+        if certificates.iter().any(|name| certificate::public(name))
+            && let Some(listener) = listeners
+                .iter()
+                .find(|listener| listener.binding.intersects(&http))
+        {
+            return Err(format!(
+                "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
+                listener.source.name
+            )
+            .into());
+        }
+        Some(builder.port("caddy", BTreeSet::from([graph::Network::Tcp]))?)
+    };
     progress.check()?;
     let id = Uuid::new_v4();
     let root = store.directory.join("runtime");
@@ -649,9 +655,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
     let mut state = State {
         ports: builder.ports,
         instances: Vec::new(),
-        certificates,
     };
-    let mut all_matchers = routing::Matchers::new(&graph.targets);
     for (index, service) in builder.services.into_iter().enumerate() {
         progress.check()?;
         let mut matchers = routing::Matchers::new(&graph.targets);
@@ -661,18 +665,17 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
         let file = format!("{name}/config.json");
         let mut output = service.globals;
         let mut environment = service.environment;
+        let mut assets = Vec::new();
         match service.core {
             Core::Xray => {
-                environment.insert(
-                    "XRAY_LOCATION_ASSET".to_owned(),
-                    working.to_string_lossy().into_owned(),
-                );
+                environment.insert("XRAY_LOCATION_ASSET".to_owned(), ".".to_owned());
                 let script = matchers.xray(&service.rules);
                 let script_path = working.join("routing.lua");
                 store.write(&script_path, |file| {
                     file.write_all(script.as_bytes())?;
                     Ok(())
                 })?;
+                assets.push("routing.lua".to_owned());
                 let mut direct =
                     xray::outbound(&Connection::Direct(connection::Direct::default()), store)?;
                 direct.insert("tag".to_owned(), json!("direct"));
@@ -687,7 +690,7 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 output.insert(
                     "routing".to_owned(),
                     json!({
-                        "script": script_path,
+                        "script": "routing.lua",
                     }),
                 );
             }
@@ -735,7 +738,10 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 output.insert("geosite-matcher".to_owned(), json!("mph"));
             }
         }
-        all_matchers.used.extend(matchers.used);
+        if service.core != Core::SingBox {
+            matchers.write(store, &working)?;
+            assets.extend(["geoip.dat".to_owned(), "geosite.dat".to_owned()]);
+        }
         store.write(&directory.path().join(&file), |file| {
             serde_json::to_writer_pretty(file, &output)?;
             Ok(())
@@ -747,63 +753,50 @@ pub fn prepare(store: &Store, config: &Config, progress: &Progress) -> Result<Op
                 Core::Mihomo => Component::Mihomo,
             },
             file,
+            assets,
             environment,
+            certificates: service.certificates,
         });
-    }
-    all_matchers.write(store, directory.path())?;
-    for instance in &state.instances {
-        let working = directory
-            .path()
-            .join(&instance.file)
-            .parent()
-            .unwrap()
-            .to_owned();
-        for name in ["geoip.dat", "geosite.dat"] {
-            fs::hard_link(directory.path().join(name), working.join(name))?;
-        }
     }
     if let Some(port) = caddy {
         let working = directory.path().join("caddy");
         store.create_dir(&working)?;
         store.write(&working.join("config.json"), |file| {
-            serde_json::to_writer_pretty(
-                file,
-                &certificate::config(store, &state.certificates, port),
-            )?;
+            serde_json::to_writer_pretty(file, &certificate::config(store, &certificates, port))?;
             Ok(())
         })?;
         state.instances.push(Instance {
             component: Component::Caddy,
             file: "caddy/config.json".to_owned(),
+            assets: Vec::new(),
             environment: BTreeMap::new(),
+            certificates: BTreeSet::new(),
         });
     }
-    store.write(&directory.path().join("state.json"), |file| {
-        serde_json::to_writer_pretty(file, &state)?;
-        Ok(())
-    })?;
     progress.check()?;
     step.finish(format!("{} 个服务实例", state.instances.len()));
     Ok(Some(Prepared {
-        id,
         directory,
         keys,
+        state,
     }))
 }
 
 pub fn analyze<'a>(
     store: &'a Store,
     config: &'a Config,
+    geodata: &mut Option<u64>,
     progress: &'a Progress,
 ) -> Result<Option<graph::Graph<'a>>> {
-    Builder::new(store, config, progress).graph()
+    Builder::new(store, config, progress).graph(geodata)
 }
 
 impl<'a> Builder<'a> {
-    fn graph(&mut self) -> Result<Option<graph::Graph<'a>>> {
+    fn graph(&mut self, geodata: &mut Option<u64>) -> Result<Option<graph::Graph<'a>>> {
         graph::build(
             self.store,
             self.config,
+            geodata,
             self.progress,
             |core, destination, network, payload| {
                 self.available(core, destination, network, payload)
@@ -936,6 +929,7 @@ impl<'a> Builder<'a> {
             listeners: Vec::new(),
             outbounds: Vec::new(),
             rules: Vec::new(),
+            certificates: BTreeSet::new(),
         });
         index
     }
