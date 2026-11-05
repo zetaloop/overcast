@@ -32,6 +32,7 @@ use crate::{
     Result, certificate,
     component::Component,
     config::{Config, Store},
+    maintenance,
     native::{Instance, Prepared},
     progress::Progress,
     resource::Resources,
@@ -68,6 +69,7 @@ enum Event {
     Reload,
     Stop,
     Exited(String, u64, std::io::Result<ExitStatus>),
+    Maintained(Result<()>),
 }
 
 impl Deployment {
@@ -87,6 +89,7 @@ impl Deployment {
         previous: &Self,
         progress: &Progress,
     ) -> Result<Self> {
+        config.maintenance.next()?;
         let mut deployment = Self {
             id: Uuid::new_v4(),
             config: config.clone(),
@@ -319,7 +322,9 @@ fn switch(
             wait(store, target.id, progress)?;
             step.finish(format!("{} 个核心", target.units.len()));
         }
-        (true, true) if previous.units == target.units => {}
+        (true, true)
+            if previous.units == target.units
+                && previous.config.maintenance == target.config.maintenance => {}
         (true, true) => {
             let step = progress.activity("应用服务");
             platform::reload()?;
@@ -422,6 +427,7 @@ fn orchestrate(
     let mut deployment = Deployment::default();
     let mut retries: BTreeMap<String, Instant> = BTreeMap::new();
     let mut delays: BTreeMap<String, Duration> = BTreeMap::new();
+    let mut maintenance = None;
     let mut pending = true;
     loop {
         if pending {
@@ -442,9 +448,16 @@ fn orchestrate(
                 )?;
                 Ok(())
             })?;
+            if maintenance.is_none() || deployment.config.maintenance != target.config.maintenance {
+                maintenance = target
+                    .config
+                    .maintenance
+                    .next()?
+                    .map(|delay| Instant::now() + delay);
+            }
             deployment = target;
         }
-        let deadline = retries.values().copied().min();
+        let deadline = retries.values().copied().chain(maintenance).min();
         let event = match deadline {
             Some(deadline) => {
                 events.recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -476,6 +489,11 @@ fn orchestrate(
                     retries.insert(name, Instant::now() + delay);
                 }
             }
+            Ok(Event::Maintained(result)) => {
+                if let Err(error) = result {
+                    log(store, &format!("定时维护失败：{error}"));
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {
                 let now = Instant::now();
                 let due: Vec<_> = retries
@@ -494,6 +512,19 @@ fn orchestrate(
                         delays.insert(name.clone(), delay);
                         retries.insert(name, now + delay);
                     }
+                }
+                if maintenance.is_some_and(|at| at <= now) {
+                    let store = store.clone();
+                    let sender = orchestrator.sender.clone();
+                    thread::spawn(move || {
+                        let result = maintenance::update(&store, &Progress::default());
+                        let _ = sender.send(Event::Maintained(result));
+                    });
+                    maintenance = deployment
+                        .config
+                        .maintenance
+                        .next()?
+                        .map(|delay| now + delay);
                 }
             }
         }

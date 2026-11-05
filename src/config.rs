@@ -34,6 +34,7 @@ pub struct Config {
     pub outbounds: Vec<Outbound>,
     pub rules: Vec<Rule>,
     pub components: BTreeMap<Component, Settings>,
+    pub maintenance: crate::maintenance::Schedule,
     pub running: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<Uuid, crate::keys::Keys>,
