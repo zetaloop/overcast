@@ -258,7 +258,7 @@ fn service(_: Vec<OsString>) {
     };
     let result = contain().and_then(|_job| {
         report(&handle, ServiceState::Running, ServiceExitCode::Win32(0))?;
-        orchestrate(store, sender, events, &progress)
+        super::finish(store, orchestrate(store, sender, events, &progress))
     });
     if let Err(error) = &result {
         super::log(store, &error.to_string());

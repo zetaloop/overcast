@@ -32,7 +32,7 @@ fn external() -> Result<bool> {
 pub(super) fn install(store: &Store) -> Result<()> {
     if !external()? {
         let unit = format!(
-            "[Unit]\nDescription=Overcast\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nExecStart={} --run {}\nExecReload=/bin/kill -HUP $MAINPID\nKillMode=mixed\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n",
+            "[Unit]\nDescription=Overcast\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=exec\nExecStart={} --run {}\nExecReload=/bin/kill -HUP $MAINPID\nKillMode=mixed\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n",
             quote(&std::env::current_exe()?)?,
             quote(&store.directory)?,
         );

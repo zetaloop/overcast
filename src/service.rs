@@ -384,7 +384,7 @@ pub fn run(store: Store) -> Result<()> {
                 }
             }
         });
-        orchestrate(&store, sender, events, &progress)
+        finish(&store, orchestrate(&store, sender, events, &progress))
     }
     #[cfg(windows)]
     {
@@ -438,16 +438,11 @@ fn orchestrate(
             if let Err(error) = &result {
                 log(store, &format!("应用部署失败：{error}"));
             }
-            store.write(&store.directory.join("status.json"), |file| {
-                serde_json::to_writer(
-                    file,
-                    &Status {
-                        id: target.id,
-                        error: result.err().map(|error| error.to_string()),
-                    },
-                )?;
-                Ok(())
-            })?;
+            report(
+                store,
+                target.id,
+                result.err().map(|error| error.to_string()),
+            )?;
             if maintenance.is_none() || deployment.config.maintenance != target.config.maintenance {
                 maintenance = target
                     .config
@@ -714,6 +709,24 @@ fn kill(pid: u32) {
 #[cfg(windows)]
 fn kill(pid: u32) {
     windows::kill(pid);
+}
+
+fn report(store: &Store, id: Uuid, error: Option<String>) -> Result<()> {
+    store.write(&store.directory.join("status.json"), |file| {
+        serde_json::to_writer(file, &Status { id, error })?;
+        Ok(())
+    })
+}
+
+// Waiting clients learn from the status file when the service stops before applying their deployment.
+fn finish(store: &Store, result: Result<()>) -> Result<()> {
+    let error = match &result {
+        Ok(()) => "服务已停止".to_owned(),
+        Err(error) => format!("服务已停止：{error}"),
+    };
+    let id = Deployment::load(store).map_or_else(|_| Uuid::nil(), |deployment| deployment.id);
+    let _ = report(store, id, Some(error));
+    result
 }
 
 fn log(store: &Store, message: &str) {
