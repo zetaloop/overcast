@@ -633,7 +633,7 @@ pub fn prepare(
         if certificates.iter().any(|name| certificate::public(name))
             && let Some(listener) = listeners
                 .iter()
-                .find(|listener| listener.binding.intersects(&http))
+                .find(|listener| listener.binding.overlaps(&http))
         {
             return Err(format!(
                 "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
