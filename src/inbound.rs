@@ -1074,6 +1074,10 @@ fields!(Tls {
     key_log: "密钥日志文件",
     ech: "ECH",
     reality: "REALITY",
+} groups {
+    certificates: "客户端认证" => [client_auth, client_certificates, client_certificate_files, client_certificate_sha256, client_public_key_sha256],
+    protocol: "版本与密码" => [min_version, max_version, cipher_suites, curves],
+    handshake: "握手" => [session_resumption, reject_unknown_sni, handshake_timeout, kernel_tx, kernel_rx, key_log],
 });
 
 fields!(Ech {
@@ -1104,4 +1108,9 @@ fields!(Listen {
     proxy_protocol: "PROXY protocol",
     forwarded_sources: "转发来源",
     socket_options: "自定义套接字选项",
+} groups {
+    tcp: "TCP" => [tcp_fast_open, tcp_multi_path, tcp_keep_alive, tcp_keep_alive_idle, tcp_keep_alive_interval, tcp_congestion, tcp_window, tcp_max_segment, tcp_user_timeout],
+    udp: "UDP" => [udp_fragment, udp_timeout],
+    binding: "绑定与路由" => [routing_mark, namespace, reuse_address, ipv6_only, socket_options],
+    forwarding: "来源信息" => [proxy_protocol, forwarded_sources],
 });

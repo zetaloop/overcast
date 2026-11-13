@@ -82,8 +82,18 @@ pub trait Field {
 
 pub type Fields<'a> = Vec<Box<dyn Field + 'a>>;
 
+pub struct Group {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub fields: &'static [&'static str],
+}
+
 pub trait Form: Clone + Default {
     fn fields<'a>(&'a mut self, defaults: Self, apply: Apply<'a, Self>) -> Fields<'a>;
+
+    fn groups(&self) -> Vec<Group> {
+        Vec::new()
+    }
 }
 
 struct Binding<'a, T> {
@@ -134,6 +144,17 @@ pub fn edit<T: Form>(
     apply: Apply<'_, T>,
     creating: bool,
 ) -> Result<bool> {
+    edit_group(screen, title, value, apply, creating, None)
+}
+
+fn edit_group<T: Form>(
+    screen: &mut Screen,
+    title: &str,
+    value: &mut T,
+    apply: Apply<'_, T>,
+    creating: bool,
+    group: Option<&Group>,
+) -> Result<bool> {
     let update: Apply<'_, T> = if creating {
         Rc::new(|_, _| Ok(()))
     } else {
@@ -143,8 +164,27 @@ pub fn edit<T: Form>(
     let mut notice = String::new();
     let mut changed = false;
     loop {
+        let groups = if group.is_none() {
+            value.groups()
+        } else {
+            Vec::new()
+        };
         let mut fields = value.fields(T::default(), update.clone());
+        fields.retain(|field| {
+            let item = field.item();
+            match group {
+                Some(group) => group.fields.contains(&item.key.as_str()),
+                None => !groups
+                    .iter()
+                    .any(|group| group.fields.contains(&item.key.as_str())),
+            }
+        });
         let mut items: Vec<_> = fields.iter().map(|field| field.item()).collect();
+        items.extend(
+            groups
+                .iter()
+                .map(|group| Item::new(group.key, group.label.stylized())),
+        );
         if creating {
             items.push(Item::new("create", "确定".stylized()));
         }
@@ -165,12 +205,24 @@ pub fn edit<T: Form>(
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(!creating && changed),
             Action::Select if selected == items.len() - 1 => return Ok(!creating && changed),
-            Action::Select if selected == fields.len() => {
+            Action::Select if creating && items[selected].key == "create" => {
                 drop(fields);
                 match apply(value, screen) {
                     Ok(()) => return Ok(true),
                     Err(error) => Err(error),
                 }
+            }
+            Action::Select if selected >= fields.len() => {
+                let group = &groups[selected - fields.len()];
+                drop(fields);
+                edit_group(
+                    screen,
+                    &format!("{title} / {}", group.label),
+                    value,
+                    update.clone(),
+                    false,
+                    Some(group),
+                )
             }
             Action::Select => fields[selected].edit(screen, &menu, selected),
             Action::Key(key) if key.code == KeyCode::Delete && selected < fields.len() => {
@@ -599,7 +651,7 @@ pub fn choose<T: Clone>(
 }
 
 macro_rules! fields {
-    ($ty:ty { $($field:ident: $label:tt),* $(,)? }) => {
+    ($ty:ty { $($field:ident: $label:tt),* $(,)? } $(groups { $($key:ident: $group:literal => [$($member:ident),* $(,)?]),* $(,)? })?) => {
         impl $crate::form::Form for $ty {
             fn fields<'a>(&'a mut self, defaults: Self, apply: $crate::form::Apply<'a, Self>) -> $crate::form::Fields<'a> {
                 let original = std::rc::Rc::new(self.clone());
@@ -611,9 +663,25 @@ macro_rules! fields {
                 })*
                 fields
             }
+
+            fn groups(&self) -> Vec<$crate::form::Group> {
+                [$($crate::form::fields!(@groups &self.$field, $label)),*]
+                    .into_iter()
+                    .flatten()
+                    .chain([$($($crate::form::Group {
+                        key: stringify!($key),
+                        label: $group,
+                        fields: &[$(stringify!($member)),*],
+                    }),*)?])
+                    .collect()
+            }
         }
         $crate::form::group!($ty);
     };
+    (@groups $field:expr, ..) => {
+        $crate::form::Form::groups($field)
+    };
+    (@groups $field:expr, $label:literal) => { Vec::<$crate::form::Group>::new() };
     (@push $fields:ident, $field:ident, $default:expr, .., $apply:ident) => {
         $fields.extend($crate::form::Form::fields($field, $default, $apply));
     };

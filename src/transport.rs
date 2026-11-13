@@ -674,6 +674,11 @@ fields!(XHttpOptions {
     stream_keep_alive: "流上传保活间隔",
     header_limit: "请求头大小上限",
     pool: "连接复用",
+} groups {
+    request: "请求与会话" => [upload_method, session_placement, session_key, session_alphabet, session_length, sequence_placement, sequence_key, data_placement, data_key, chunk_size],
+    padding: "填充" => [padding_size, padding_obfuscation, padding_key, padding_header, padding_placement, padding_method],
+    upload: "上传" => [upload_size, upload_interval, buffered_uploads, stream_keep_alive],
+    protocol: "协议头" => [grpc_header, sse_header, header_limit],
 });
 
 fields!(Pool {
@@ -716,4 +721,9 @@ fields!(Quic {
     handshake_timeout: "握手超时",
     udp_mtu: "UDP MTU",
     cwnd: "拥塞窗口",
+} groups {
+    congestion: "拥塞控制" => [congestion, bbr_profile, upload_bandwidth, download_bandwidth, loss_compensation, cwnd],
+    windows: "接收窗口" => [initial_stream_window, max_stream_window, initial_connection_window, max_connection_window, incoming_streams, initial_packet_size],
+    connection: "连接参数" => [idle_timeout, keep_alive, path_mtu_discovery, gso, handshake_timeout, udp_mtu],
+    protocol: "协议选项" => [debug, chrome_fingerprint, stateless_reset],
 });

@@ -1021,6 +1021,10 @@ fields!(Tls {
     key_log: "密钥日志文件",
     ech: "ECH",
     reality: "REALITY",
+} groups {
+    certificates: "证书" => [verify_names, system_roots, certificates, certificate_files, certificate_sha256, public_key_sha256, client_certificate, client_certificate_file, client_key, client_key_file],
+    protocol: "版本与密码" => [min_version, max_version, cipher_suites, curves, fingerprint, engine],
+    handshake: "握手" => [handshake_timeout, session_resumption, kernel_tx, kernel_rx, fragment, fragment_delay, record_fragment, spoof, spoof_method, key_log],
 });
 
 fields!(Ech {
@@ -1059,6 +1063,10 @@ fields!(Network {
     fallback_network_types: "备用接口类型",
     fallback_delay: "备用连接延迟",
     socket_options: "自定义套接字选项",
+} groups {
+    binding: "绑定与路由" => [bind_address_no_port, reuse_address, routing_mark, namespace, protect_path, network_strategy, network_types, fallback_network_types, fallback_delay, socket_options],
+    tcp: "TCP" => [tcp_fast_open, tcp_multi_path, tcp_keep_alive, tcp_keep_alive_idle, tcp_keep_alive_interval, tcp_congestion, tcp_window, tcp_max_segment, tcp_user_timeout],
+    address: "地址选择" => [connect_timeout, address_port_strategy, ipv6_only, happy_eyeballs],
 });
 
 fields!(HappyEyeballs {
