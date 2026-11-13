@@ -317,7 +317,6 @@ impl Component {
         let path = if !directory.try_exists()? {
             store.create_dir(&parent)?;
             let mut download = NamedTempFile::new_in(&parent)?;
-            store.own(download.path())?;
             let step = progress.start("下载程序", asset.size, "字节");
             resource::retry(progress, &step, || {
                 step.set(0);
@@ -335,7 +334,6 @@ impl Component {
             step.finish(&asset.name);
             download.seek(SeekFrom::Start(0))?;
             let unpacked = tempdir_in(&parent)?;
-            store.own(unpacked.path())?;
             let step = progress.activity("展开程序");
             unpack(
                 download.as_file_mut(),
@@ -358,7 +356,6 @@ impl Component {
             fs::set_permissions(binary, fs::Permissions::from_mode(0o700))?;
             for path in &paths {
                 progress.check()?;
-                store.own(path)?;
                 if path.symlink_metadata()?.is_file() {
                     OpenOptions::new().write(true).open(path)?.sync_all()?;
                 }

@@ -6,9 +6,6 @@ use std::{
     path::{Path, PathBuf, absolute},
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
@@ -77,61 +74,52 @@ impl Config {
 #[derive(Clone)]
 pub struct Store {
     pub directory: PathBuf,
-    #[cfg(unix)]
-    owner: Option<(u32, u32)>,
+}
+
+fn default_directory() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    return Ok("/var/lib/overcast".into());
+    #[cfg(target_os = "macos")]
+    return Ok("/Library/Application Support/Overcast".into());
+    #[cfg(windows)]
+    {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt, ptr};
+        use windows_sys::Win32::{
+            System::Com::CoTaskMemFree,
+            UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath},
+        };
+
+        let mut path = ptr::null_mut();
+        let result =
+            unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, ptr::null_mut(), &mut path) };
+        if result < 0 {
+            unsafe { CoTaskMemFree(path.cast()) };
+            return Err(format!("无法获取应用数据目录：HRESULT {result:#010x}").into());
+        }
+        let directory = unsafe {
+            let mut length = 0;
+            while *path.add(length) != 0 {
+                length += 1;
+            }
+            let directory = PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(
+                path, length,
+            )));
+            CoTaskMemFree(path.cast());
+            directory
+        };
+        Ok(directory.join("Overcast"))
+    }
 }
 
 impl Store {
     pub fn open(directory: Option<PathBuf>) -> Result<Self> {
-        #[cfg(unix)]
-        let account = match env::var("SUDO_UID") {
-            Ok(uid) => {
-                let uid = nix::unistd::Uid::from_raw(
-                    uid.parse()
-                        .map_err(|error| format!("无法解析 SUDO_UID：{error}"))?,
-                );
-                Some(
-                    nix::unistd::User::from_uid(uid)?
-                        .ok_or_else(|| format!("找不到发起操作的账号：{uid}"))?,
-                )
-            }
-            Err(env::VarError::NotPresent) => None,
-            Err(error) => return Err(error.into()),
-        };
-        #[cfg(unix)]
-        let home = match &account {
-            Some(account) => Some(account.dir.clone()),
-            None => env::home_dir(),
-        };
-        #[cfg(not(unix))]
-        let home = env::home_dir();
-
         let directory = absolute(
             match directory.or_else(|| env::var_os("OVERCAST_HOME").map(PathBuf::from)) {
                 Some(directory) => directory,
-                None => home.ok_or("无法确定账号的主目录")?.join(".overcast"),
+                None => default_directory()?,
             },
         )?;
-        #[cfg(unix)]
-        let owner = if nix::unistd::geteuid().is_root() {
-            let (uid, gid) = match fs::metadata(&directory) {
-                Ok(metadata) => (metadata.uid(), metadata.gid()),
-                Err(error) if error.kind() == ErrorKind::NotFound => {
-                    account.as_ref().map_or((0, 0), |account| {
-                        (account.uid.as_raw(), account.gid.as_raw())
-                    })
-                }
-                Err(error) => return Err(error.into()),
-            };
-            (uid != 0).then_some((uid, gid))
-        } else {
-            None
-        };
-        Ok(Self {
-            directory,
-            #[cfg(unix)]
-            owner,
-        })
+        Ok(Self { directory })
     }
 
     pub fn load(&self) -> Result<Config> {
@@ -156,13 +144,8 @@ impl Store {
         let path = self.directory.join("config.lock");
         let mut options = OpenOptions::new();
         options.read(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
         let lock = match options.create_new(true).open(&path) {
-            Ok(file) => {
-                self.own(&path)?;
-                file
-            }
+            Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 options.create_new(false).open(&path)?
             }
@@ -269,7 +252,6 @@ impl Store {
         let directory = path.parent().ok_or("文件路径缺少目录")?;
         let mut file = NamedTempFile::new_in(directory)?;
         write(file.as_file_mut())?;
-        self.own(file.path())?;
         file.as_file().sync_all()?;
         file.persist(path)
             .map_err(|error| format!("无法保存 {}：{}", path.display(), error.error))?;
@@ -277,33 +259,7 @@ impl Store {
     }
 
     pub fn create_dir(&self, directory: &Path) -> Result<()> {
-        let mut missing = Vec::new();
-        for path in directory.ancestors() {
-            if path.try_exists()? {
-                break;
-            }
-            missing.push(path);
-        }
-        for path in missing.into_iter().rev() {
-            let builder = &mut fs::DirBuilder::new();
-            #[cfg(unix)]
-            builder.mode(0o700);
-            match builder.create(path) {
-                Ok(()) => self.own(path)?,
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(())
-    }
-
-    pub fn own(&self, path: &Path) -> Result<()> {
-        #[cfg(unix)]
-        if let Some((uid, gid)) = self.owner {
-            std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
-        }
-        #[cfg(not(unix))]
-        let _ = path;
+        fs::create_dir_all(directory)?;
         Ok(())
     }
 }

@@ -10,7 +10,7 @@
   
   Turn on **Run service** under **Maintenance** to start at boot and apply configuration changes as you save them. Registering the service requires administrator privileges.
   
-  Overcast stores its data in `~/.overcast`. Set `OVERCAST_HOME` to use another directory.
+  Overcast stores its data in `/var/lib/overcast` on Linux, `/Library/Application Support/Overcast` on macOS, and `%ProgramData%\Overcast` on Windows. Set `OVERCAST_HOME` to use another directory.
   
   ## Build
   

@@ -218,7 +218,6 @@ fn register(store: &Store, progress: &Progress) -> Result<Registration> {
         .args(["register", "--accept-tos"])
         .output()?;
     if file.try_exists()? {
-        store.own(&file)?;
         OpenOptions::new().write(true).open(&file)?.sync_all()?;
         progress.record("登记资料", &file.to_string_lossy());
     }

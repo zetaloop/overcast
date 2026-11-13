@@ -651,7 +651,6 @@ pub fn prepare(
         .prefix(&id.to_string())
         .rand_bytes(0)
         .tempdir_in(&root)?;
-    store.own(directory.path())?;
     let mut state = State {
         ports: builder.ports,
         instances: Vec::new(),
