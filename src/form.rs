@@ -19,6 +19,10 @@ pub trait Value: Clone + Default {
         ">"
     }
 
+    fn choices() -> Vec<(&'static str, &'static str, Self)> {
+        Vec::new()
+    }
+
     fn edit(
         &mut self,
         screen: &mut Screen,
@@ -230,6 +234,10 @@ impl Value for bool {
         if *self { "■" } else { "□" }
     }
 
+    fn choices() -> Vec<(&'static str, &'static str, Self)> {
+        vec![("on", "开启", true), ("off", "关闭", false)]
+    }
+
     fn run(
         &mut self,
         screen: &mut Screen,
@@ -244,7 +252,13 @@ impl Value for bool {
 
 impl<T: Value> Value for Option<T> {
     fn text(&self) -> String {
-        self.as_ref().map_or_else(|| "默认".to_owned(), Value::text)
+        self.as_ref().map_or_else(
+            || "默认".to_owned(),
+            |value| match value.text() {
+                text if text.is_empty() => "已设置".to_owned(),
+                text => text,
+            },
+        )
     }
 
     fn marker(&self) -> &'static str {
@@ -259,6 +273,29 @@ impl<T: Value> Value for Option<T> {
         apply: Apply<'_, Self>,
         creating: bool,
     ) -> Result<bool> {
+        let choices = T::choices();
+        if !choices.is_empty() {
+            let choices: Vec<_> = std::iter::once(("default", "默认", None))
+                .chain(
+                    choices
+                        .into_iter()
+                        .map(|(key, label, value)| (key, label, Some(value))),
+                )
+                .collect();
+            let current = match self.as_ref() {
+                None => 0,
+                Some(value) => choices
+                    .iter()
+                    .position(|(_, _, choice)| {
+                        choice
+                            .as_ref()
+                            .is_some_and(|choice| choice.text() == value.text())
+                    })
+                    .unwrap(),
+            };
+            let title = format!("{} / {}", menu.title, menu.items[selected].label.content);
+            return choose(self, screen, &title, &choices, current, apply, creating);
+        }
         let creating = creating || self.is_none();
         let mut value = self.clone().unwrap_or_default();
         let apply = map(Rc::new(self.clone()), apply, |option, value| {
@@ -274,6 +311,18 @@ impl<T: Value> Value for Option<T> {
 }
 
 impl<T: Value> Value for Vec<T> {
+    fn text(&self) -> String {
+        if self.is_empty() {
+            return "空".to_owned();
+        }
+        let values: Vec<_> = self.iter().map(Value::text).collect();
+        if values.iter().any(String::is_empty) {
+            format!("{} 项", self.len())
+        } else {
+            values.join("、")
+        }
+    }
+
     fn run(
         &mut self,
         screen: &mut Screen,
@@ -385,6 +434,14 @@ impl<T: Value> Value for Vec<T> {
 }
 
 impl<T: Value> Value for BTreeMap<String, T> {
+    fn text(&self) -> String {
+        if self.is_empty() {
+            "空".to_owned()
+        } else {
+            self.keys().cloned().collect::<Vec<_>>().join("、")
+        }
+    }
+
     fn run(
         &mut self,
         screen: &mut Screen,
@@ -504,37 +561,38 @@ impl<T: Value> Value for BTreeMap<String, T> {
     }
 }
 
-pub fn choose<T: PartialEq + Clone>(
+pub fn choose<T: Clone>(
     value: &mut T,
     screen: &mut Screen,
-    parent: &Menu<'_>,
-    field: usize,
+    title: &str,
     choices: &[(&str, &str, T)],
+    current: usize,
     apply: Apply<'_, T>,
+    creating: bool,
 ) -> Result<bool> {
-    let title = format!("{} / {}", parent.title, parent.items[field].label.content);
     let mut items: Vec<_> = choices
         .iter()
         .map(|(key, label, _)| Item::new(*key, (*label).to_owned().stylized()))
         .collect();
+    items[current].marker = "■";
     items.push(Item::new("back", "返回".stylized()));
     let menu = Menu {
-        title: &title,
+        title,
         heading: "",
         items: &items,
         help: "方向键 选择\n回车键 确定\nEsc 返回",
     };
-    let mut selected = choices
-        .iter()
-        .position(|(_, _, choice)| choice == value)
-        .unwrap_or(0);
+    let mut selected = current;
+    let mut notice = String::new();
     loop {
-        match screen.select(&menu, &mut selected, "")? {
+        match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(false),
             Action::Select if selected == choices.len() => return Ok(false),
-            Action::Select => {
-                return set(screen, value, choices[selected].2.clone(), &apply);
-            }
+            Action::Select if !creating && selected == current => return Ok(false),
+            Action::Select => match set(screen, value, choices[selected].2.clone(), &apply) {
+                Ok(changed) => return Ok(changed),
+                Err(error) => notice = error.to_string(),
+            },
             _ => {}
         }
     }
@@ -589,8 +647,15 @@ macro_rules! choices {
                 match self { $(Self::$variant => $label.to_owned()),* }
             }
 
-            fn run(&mut self, screen: &mut $crate::tui::Screen, menu: &$crate::tui::Menu<'_>, selected: usize, apply: $crate::form::Apply<'_, Self>, _: bool) -> $crate::Result<bool> {
-                $crate::form::choose(self, screen, menu, selected, &[$(($key, $label, Self::$variant)),*], apply)
+            fn choices() -> Vec<(&'static str, &'static str, Self)> {
+                vec![$(($key, $label, Self::$variant)),*]
+            }
+
+            fn run(&mut self, screen: &mut $crate::tui::Screen, menu: &$crate::tui::Menu<'_>, selected: usize, apply: $crate::form::Apply<'_, Self>, creating: bool) -> $crate::Result<bool> {
+                let choices = Self::choices();
+                let current = choices.iter().position(|(_, _, value)| value == self).unwrap();
+                let title = format!("{} / {}", menu.title, menu.items[selected].label.content);
+                $crate::form::choose(self, screen, &title, &choices, current, apply, creating)
             }
         }
     };
