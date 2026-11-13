@@ -34,6 +34,7 @@ type Line = Stylized<'static>;
 pub struct Item {
     pub key: String,
     pub marker: &'static str,
+    pub branch: Option<String>,
     pub label: Line,
     pub value: String,
     pub detail: String,
@@ -44,6 +45,7 @@ impl Item {
         Self {
             key: key.into(),
             marker: ">",
+            branch: None,
             label,
             value: String::new(),
             detail: String::new(),
@@ -215,9 +217,17 @@ impl Screen {
         let items = menu.items;
         let label_width = items
             .iter()
+            .filter(|item| item.branch.is_none())
             .map(|item| visible(&item.label.content).width())
             .max()
             .unwrap_or_default();
+        let destination_width = items
+            .iter()
+            .filter(|item| item.branch.is_some())
+            .map(|item| visible(&item.value).width())
+            .max()
+            .unwrap_or_default()
+            .min(width as usize / 3);
         let item = &items[selected];
         let editing = editor.is_some();
         let value =
@@ -265,6 +275,17 @@ impl Screen {
                 .map(|(index, item)| {
                     let label = visible(&item.label.content);
                     let mut line = item.label.clone();
+                    if let Some(branch) = &item.branch {
+                        let available =
+                            (width as usize).saturating_sub(branch.width() + destination_width + 5);
+                        let label = clip(&label, available);
+                        line.content = Cow::Owned(format!(
+                            "  {branch}{label}{} → {}",
+                            " ".repeat(available.saturating_sub(label.width())),
+                            clip(&item.value, destination_width),
+                        ));
+                        return line;
+                    }
                     line.content = Cow::Owned(format!(
                         "  {} {}{}    {}",
                         item.marker,
@@ -284,13 +305,19 @@ impl Screen {
         lines.extend(footer);
         let row = offset + selected - start;
         let label = visible(&item.label.content);
-        let end = label.len() + label_width - label.width() + 7;
+        let end = label.len() + label_width.saturating_sub(label.width()) + 7;
         let (highlight, cursor) = match value {
             Some((_, cursor, selection)) => (
                 end + 1 + selection.start..end + 1 + selection.end,
                 Some((label_width + 8 + cursor, row + 2)),
             ),
-            None => (0..end, None),
+            None => (
+                match &item.branch {
+                    Some(branch) => 2 + branch.len()..lines[row].content.len(),
+                    None => 0..end,
+                },
+                None,
+            ),
         };
         self.draw(menu.title, &lines, &[(row, highlight)], cursor)
     }

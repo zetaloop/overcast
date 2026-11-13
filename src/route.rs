@@ -152,6 +152,7 @@ fn rows(rules: &[Rule], config: &Config) -> (Vec<Vec<usize>>, Vec<Item>) {
         rules: &[Rule],
         config: &Config,
         path: &mut Vec<usize>,
+        prefix: &str,
         rows: &mut Vec<(Vec<usize>, Item)>,
     ) {
         for (index, rule) in rules.iter().enumerate() {
@@ -161,19 +162,27 @@ fn rows(rules: &[Rule], config: &Config) -> (Vec<Vec<usize>>, Vec<Item>) {
                 .map(|index| (index + 1).to_string())
                 .collect::<Vec<_>>()
                 .join(".");
-            let label = format!(
-                "{}{} → {}",
-                "  ".repeat(path.len() - 1),
-                rule.condition.text(config),
-                rule.destination.name(config),
+            let label = match &rule.condition {
+                Condition::Always => "全部".to_owned(),
+                condition => condition.text(config),
+            };
+            let last = index + 1 == rules.len();
+            let mut item = Item::new(key, label.stylized());
+            item.branch = Some(format!("{prefix}{}", if last { "└─ " } else { "├─ " }));
+            item.value = rule.destination.name(config);
+            rows.push((path.clone(), item));
+            append(
+                &rule.children,
+                config,
+                path,
+                &format!("{prefix}{}", if last { "   " } else { "│  " }),
+                rows,
             );
-            rows.push((path.clone(), Item::new(key, label.stylized())));
-            append(&rule.children, config, path, rows);
             path.pop();
         }
     }
     let mut rows = Vec::new();
-    append(rules, config, &mut Vec::new(), &mut rows);
+    append(rules, config, &mut Vec::new(), "", &mut rows);
     rows.into_iter().unzip()
 }
 
@@ -534,7 +543,7 @@ fn move_rule(
             title: "移动规则",
             heading: "",
             items: &items,
-            help: "↑↓ 调整顺序\n←→ 调整层级\n回车键 确定\nEsc 取消",
+            help: "方向键 移动\n回车键 确定\nEsc 取消",
         };
         screen.menu(&menu, selected, &notice, None)?;
         let key = if let Some(argument) = screen.arguments.pop_front() {
@@ -589,7 +598,7 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
         let rule = get(&config.rules, &path)?;
         let mut items = vec![
             Item::new("condition", "条件".stylized()),
-            Item::new("destination", "出站".stylized()),
+            Item::new("destination", "去向".stylized()),
             Item::new("new", "新增子规则".stylized()),
             Item::new("move", "移动规则".stylized()),
             Item::new("delete", "删除规则".foreground(AnsiColor::BrightRed)),
@@ -690,7 +699,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             title: "分流",
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nM 移动规则\nEsc 返回",
+            help: "方向键 选择\n回车键 编辑\nEsc 返回",
         };
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),
