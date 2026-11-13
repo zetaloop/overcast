@@ -535,6 +535,9 @@ fields!(Http {
     random_headers: "随机标头值",
     idle_timeout: "空闲超时",
     ping_timeout: "心跳超时",
+} groups {
+    headers: "请求头" => [headers, random_headers],
+    connection: "连接" => [idle_timeout, ping_timeout],
 });
 
 fields!(Kcp {
@@ -550,6 +553,10 @@ fields!(Kcp {
     seed: "加密种子",
     header: "数据包伪装",
     domain: "DNS 域名",
+} groups {
+    packet: "数据包" => [mtu, interval, checksum, write_buffer, read_buffer],
+    congestion: "拥塞控制" => [upload, download, window_multiplier, congestion],
+    obfuscation: "伪装" => [seed, header, domain],
 });
 
 choices!(Header {
@@ -589,6 +596,9 @@ fields!(Grpc {
     connections: "连接数",
     min_streams: "最小并发流数",
     max_streams: "最大并发流数",
+} groups {
+    streams: "多路复用" => [multi_mode, connections, min_streams, max_streams, receive_window],
+    keep_alive: "保活" => [keep_alive, ping_timeout, permit_without_stream],
 });
 
 choices!(Mode {
