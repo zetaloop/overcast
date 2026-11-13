@@ -26,6 +26,7 @@ use std::{
 
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use termina::style::StyleExt;
 use uuid::Uuid;
 
 use crate::{
@@ -36,6 +37,7 @@ use crate::{
     native::{Instance, Prepared},
     progress::{Progress, Step},
     resource::Resources,
+    tui::{Action, Item, Menu, Screen},
 };
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -288,6 +290,66 @@ impl Unit {
             .envs(&self.environment)
             .current_dir(self.config.parent().unwrap());
         command
+    }
+}
+
+pub fn logs(screen: &mut Screen, store: &Store) -> Result<()> {
+    let directory = store.directory.join("logs");
+    let mut paths = Vec::new();
+    match fs::read_dir(&directory) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_file()
+                    && path.extension().is_some_and(|extension| extension == "log")
+                {
+                    paths.push(path);
+                }
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    paths.sort();
+    if paths.is_empty() {
+        return screen.view("运行日志", "尚无运行日志");
+    }
+    let mut selected = 0;
+    let mut notice = String::new();
+    loop {
+        let items: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                Item::new(name.clone().into_owned(), name.into_owned().stylized())
+            })
+            .chain(std::iter::once(Item::new("back", "返回".stylized())))
+            .collect();
+        let menu = Menu {
+            title: "运行日志",
+            heading: "",
+            items: &items,
+            help: "方向键 选择\n回车键 查看\nEsc 返回",
+        };
+        match screen.select(&menu, &mut selected, &notice)? {
+            Action::Back => return Ok(()),
+            Action::Select if selected == paths.len() => return Ok(()),
+            Action::Select => {
+                let bytes = match fs::read(&paths[selected]) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        notice = error.to_string();
+                        continue;
+                    }
+                };
+                let text = String::from_utf8_lossy(&bytes);
+                let title = paths[selected].file_name().unwrap().to_string_lossy();
+                screen.view(&title, &text)?;
+                notice.clear();
+            }
+            _ => {}
+        }
     }
 }
 

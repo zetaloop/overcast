@@ -328,6 +328,75 @@ impl Screen {
         self.draw(menu.title, &lines, &[(row, highlight)], cursor)
     }
 
+    pub fn view(&mut self, title: &str, text: &str) -> Result<()> {
+        let mut width = self.dimensions()?.cols as usize;
+        let wrap = |width| {
+            text.lines()
+                .flat_map(|line| wrap(line, width))
+                .map(StyleExt::stylized)
+                .collect::<Vec<_>>()
+        };
+        let mut lines = wrap(width);
+        if lines.is_empty() {
+            lines.push("日志为空".to_owned().stylized());
+        }
+        let mut first = lines.len().saturating_sub(1);
+        let back = [Item::new("back", "返回".stylized())];
+        let mut notice = String::new();
+        while !self.exiting {
+            let dimensions = self.dimensions()?;
+            if dimensions.cols as usize != width {
+                width = dimensions.cols as usize;
+                lines = wrap(width);
+                if lines.is_empty() {
+                    lines.push("日志为空".to_owned().stylized());
+                }
+                first = lines.len().saturating_sub(1);
+            }
+            let footer: Vec<_> = crate::input::wrap(&notice, width)
+                .into_iter()
+                .map(|line| line.foreground(AnsiColor::BrightRed))
+                .chain(["方向键 滚动".bold(), "  > 返回".stylized()])
+                .collect();
+            let count = (dimensions.rows as usize)
+                .saturating_sub(footer.len() + 2)
+                .max(1);
+            let last = lines.len().saturating_sub(count);
+            first = first.min(last);
+            let mut page: Vec<_> = lines.iter().skip(first).take(count).cloned().collect();
+            page.extend(footer);
+            let row = page.len() - 1;
+            self.draw(title, &page, &[(row, 0..page[row].content.len())], None)?;
+            if let Some(argument) = self.arguments.pop_front() {
+                match choice(&back, 0, &argument) {
+                    Ok(_) => return Ok(()),
+                    Err(error) => {
+                        notice = error;
+                        self.arguments.clear();
+                    }
+                }
+                continue;
+            }
+            if let Some(Event::Key(key)) = self.event(true)? {
+                match key.code {
+                    KeyCode::Escape
+                    | KeyCode::Left
+                    | KeyCode::Enter
+                    | KeyCode::Right
+                    | KeyCode::Char(' ') => return Ok(()),
+                    KeyCode::Up => first = first.saturating_sub(1),
+                    KeyCode::Down => first = (first + 1).min(last),
+                    KeyCode::PageUp => first = first.saturating_sub(count),
+                    KeyCode::PageDown => first = (first + count).min(last),
+                    KeyCode::Home => first = 0,
+                    KeyCode::End => first = last,
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn prompt<'a>(
         &mut self,
         title: &str,

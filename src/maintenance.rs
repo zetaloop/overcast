@@ -223,17 +223,6 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
     loop {
         let config = store.load()?;
         let resources = Resources::load(store)?;
-        let mut items: Vec<_> = Component::ALL
-            .iter()
-            .map(|component| {
-                let mut item = Item::new(component.key(), component.name().stylized());
-                item.value = resources.components.get(component).map_or_else(
-                    || "未安装".to_owned(),
-                    |installed| installed.version.clone(),
-                );
-                item
-            })
-            .collect();
         let mut running = Item::new("running", "运行服务".stylized());
         running.marker = if config.running { "■" } else { "□" };
         let mut schedule = Item::new("schedule", "定时维护".stylized());
@@ -243,13 +232,22 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             "关闭"
         }
         .to_owned();
-        items.extend([
+        let mut items = vec![
             running,
+            Item::new("logs", "运行日志".stylized()),
             Item::new("rules", "更新规则数据".stylized()),
             Item::new("update", "更新全部".stylized()),
             schedule,
-            Item::new("back", "返回".stylized()),
-        ]);
+        ];
+        items.extend(Component::ALL.iter().map(|component| {
+            let mut item = Item::new(component.key(), component.name().stylized());
+            item.value = resources.components.get(component).map_or_else(
+                || "未安装".to_owned(),
+                |installed| installed.version.clone(),
+            );
+            item
+        }));
+        items.push(Item::new("back", "返回".stylized()));
         let menu = Menu {
             title: "维护",
             heading: "",
@@ -261,7 +259,10 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             Action::Select => {}
             _ => continue,
         }
-        let result = if let Some(component) = Component::ALL.get(selected) {
+        let result = if let Some(component) = Component::ALL
+            .iter()
+            .find(|component| component.key() == items[selected].key)
+        {
             component::edit(screen, store, &client, *component)
         } else {
             match items[selected].key.as_str() {
@@ -279,6 +280,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                         })
                     },
                 ),
+                "logs" => crate::service::logs(screen, store),
                 "rules" => screen.work("更新规则数据", "", |progress| rules(store, progress)),
                 "update" => screen.work("更新资源", "", |progress| update(store, progress)),
                 "schedule" => form::edit(
