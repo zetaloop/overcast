@@ -73,6 +73,7 @@ pub struct Screen {
     alternate: Arc<AtomicBool>,
     pub(crate) arguments: VecDeque<String>,
     events: VecDeque<Event>,
+    copied: bool,
     pub exiting: bool,
 }
 
@@ -87,6 +88,7 @@ impl Screen {
             alternate: Arc::new(AtomicBool::new(true)),
             arguments: arguments.into_iter().collect(),
             events: VecDeque::new(),
+            copied: false,
             exiting: false,
         };
         screen.output.enter_raw_mode()?;
@@ -249,6 +251,10 @@ impl Screen {
                     .map(|line| line.foreground(AnsiColor::BrightRed)),
             );
         }
+        if std::mem::take(&mut self.copied) && notice.is_empty() {
+            footer.push(String::new().stylized());
+            footer.push("已复制".foreground(AnsiColor::Green));
+        }
         footer.push(String::new().stylized());
         let help = if editing {
             "回车键 确定\nEsc 取消\nCtrl+A 全选\nCtrl+C 复制 / Ctrl+X 剪切"
@@ -305,7 +311,7 @@ impl Screen {
         lines.extend(footer);
         let row = offset + selected - start;
         let label = visible(&item.label.content);
-        let end = label.len() + label_width.saturating_sub(label.width()) + 7;
+        let end = label.len() + label_width.saturating_sub(label.width()) + item.marker.len() + 6;
         let (highlight, cursor) = match value {
             Some((_, cursor, selection)) => (
                 end + 1 + selection.start..end + 1 + selection.end,
@@ -589,6 +595,7 @@ impl Screen {
             Osc::SetSelection(Selection::CLIPBOARD, text)
         )?;
         self.output.flush()?;
+        self.copied = true;
         Ok(())
     }
 

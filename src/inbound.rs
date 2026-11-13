@@ -592,12 +592,6 @@ fn edit(
             item.value = destination.text();
             items.push(item);
         }
-        if existing && !changing && inbound.listen.enabled {
-            items.extend([
-                Item::new("copy", "复制连接".stylized()),
-                Item::new("share", "分享链接".stylized()),
-            ]);
-        }
         if inbound.protocol.users() {
             let mut users = Item::new("users", "用户支持".stylized());
             users.marker = inbound.users.marker();
@@ -626,6 +620,9 @@ fn edit(
             tls,
             listen,
         ]);
+        if existing && !changing && inbound.listen.enabled {
+            items.push(Item::new("export", "连接资料".stylized()));
+        }
         if existing && !changing && crate::keys::Keys::needed(&inbound) {
             items.push(Item::new("handshake", "握手资料".stylized()));
         }
@@ -688,13 +685,7 @@ fn edit(
                 form::set(screen, &mut inbound, edited, &apply).map(|_| ())
             }
             Action::Select => match items[selected].key.as_str() {
-                "copy" | "share" => crate::profile::copy(
-                    screen,
-                    store,
-                    Some(inbound.uuid),
-                    None,
-                    items[selected].key == "share",
-                ),
+                "export" => crate::profile::copy(screen, store, Some(inbound.uuid), None),
                 "name" => edit!(name),
                 "address" => edit!(address),
                 "ports" => edit!(ports),

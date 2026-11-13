@@ -6,6 +6,7 @@ use base64::{
 };
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Map, Value, json};
+use termina::style::StyleExt;
 use url::{Host, Url};
 
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
     connection::{self, Connection, HttpVersion, SocksVersion, Tls},
     native::options::Options,
     transport::{Header, Transport},
+    tui::{Action, Item, Menu, Screen},
 };
 
 const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -21,6 +23,39 @@ const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'.')
     .remove(b'~');
+
+pub fn copy(
+    screen: &mut Screen,
+    title: &str,
+    generate: impl Fn(&mut Screen, bool) -> Result<String>,
+) -> Result<()> {
+    let items = [
+        Item::new("links", "分享链接".stylized()),
+        Item::new("config", "Overcast 配置".stylized()),
+        Item::new("back", "返回".stylized()),
+    ];
+    let menu = Menu {
+        title,
+        heading: "",
+        items: &items,
+        help: "方向键 选择\n回车键 复制\nEsc 返回",
+    };
+    let mut selected = 0;
+    let mut notice = String::new();
+    loop {
+        match screen.select(&menu, &mut selected, &notice)? {
+            Action::Back => return Ok(()),
+            Action::Select if selected == 2 => return Ok(()),
+            Action::Select => {
+                notice = match generate(screen, selected == 0).and_then(|text| screen.copy(&text)) {
+                    Ok(()) => String::new(),
+                    Err(error) => error.to_string(),
+                };
+            }
+            _ => {}
+        }
+    }
+}
 
 pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<String> {
     let mut values = Vec::new();

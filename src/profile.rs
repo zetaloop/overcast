@@ -74,22 +74,25 @@ pub fn copy(
     store: &Store,
     inbound: Option<Uuid>,
     user: Option<Uuid>,
-    links: bool,
 ) -> Result<()> {
-    let text = screen.work("生成连接资料", "", |progress| {
-        let deployment = crate::service::Deployment::load(store)?;
-        let profiles = build(store, &deployment, inbound, user, progress)?;
-        if links {
-            Ok(profiles
-                .iter()
-                .map(|profile| crate::share::path(&profile.connections, &profile.name, store))
-                .collect::<Result<Vec<_>>>()?
-                .join("\n"))
-        } else {
-            Ok(serde_json::to_string(&profiles)?)
-        }
-    })?;
-    screen.copy(&text)
+    crate::share::copy(screen, "连接资料", |screen, links| {
+        screen.work("生成连接资料", "", |progress| {
+            let deployment = crate::service::Deployment::load(store)?;
+            let profiles = build(store, &deployment, inbound, user, progress)?;
+            if profiles.is_empty() {
+                return Err("当前没有可用的接入连接".into());
+            }
+            if links {
+                Ok(profiles
+                    .iter()
+                    .map(|profile| crate::share::path(&profile.connections, &profile.name, store))
+                    .collect::<Result<Vec<_>>>()?
+                    .join("\n"))
+            } else {
+                Ok(serde_json::to_string(&profiles)?)
+            }
+        })
+    })
 }
 
 impl Builder<'_> {

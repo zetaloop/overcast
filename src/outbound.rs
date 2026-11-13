@@ -229,14 +229,6 @@ fn copy_connections(screen: &mut Screen, outbound: &Outbound) -> Result<()> {
     }
 }
 
-fn share(screen: &mut Screen, store: &Store, outbound: &Outbound) -> Result<()> {
-    screen.copy(&crate::share::path(
-        &outbound.connections,
-        &outbound.name,
-        store,
-    )?)
-}
-
 fn edit(
     screen: &mut Screen,
     store: &Store,
@@ -275,7 +267,10 @@ fn edit(
                 .iter()
                 .enumerate()
                 .map(|(index, connection)| {
-                    Item::new((index + 1).to_string(), connection.summary().stylized())
+                    let mut item =
+                        Item::new((index + 1).to_string(), connection.summary().stylized());
+                    item.marker = "↓";
+                    item
                 }),
         );
         items.push(Item::new("add", "添加连接".stylized()));
@@ -283,9 +278,8 @@ fn edit(
             items.push(Item::new("create", "创建".stylized()));
         }
         items.extend([
-            Item::new("copy", "复制出站".stylized()),
-            Item::new("select", "复制连接".stylized()),
-            Item::new("share", "分享链接".stylized()),
+            Item::new("export", "连接资料".stylized()),
+            Item::new("select", "复制部分连接".stylized()),
         ]);
         if existing {
             items.push(Item::new(
@@ -298,7 +292,7 @@ fn edit(
             title: &title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nC 复制连接\nL 分享链接\nDel 删除连接\nAlt+↑↓ 移动\nEsc 返回",
+            help: "方向键 选择\n回车键 编辑\nEsc 返回",
         };
         let action = screen.select(&menu, &mut selected, &notice)?;
         let connection = selected
@@ -403,7 +397,13 @@ fn edit(
                     }
                     Ok(())
                 }
-                "copy" => outbound.selection().copy(screen),
+                "export" => crate::share::copy(screen, "连接资料", |_, links| {
+                    if links {
+                        crate::share::path(&outbound.connections, &outbound.name, store)
+                    } else {
+                        Ok(serde_json::to_string(&outbound.selection())?)
+                    }
+                }),
                 "select" => copy_connections(screen, &outbound),
                 "create" => {
                     let result = screen.work(
@@ -425,7 +425,6 @@ fn edit(
                     }
                     result
                 }
-                "share" => share(screen, store, &outbound),
                 "delete" => {
                     screen.work(
                         "删除出站",
@@ -499,7 +498,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             title: "出站",
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 确定\nC 复制出站\nEsc 返回",
+            help: "方向键 选择\n回车键 确定\nEsc 返回",
         };
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),

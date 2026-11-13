@@ -121,14 +121,12 @@ impl Keys {
             help: "方向键 选择\n回车键 复制\nEsc 返回",
         };
         let mut selected = 0;
-        let mut notice = "";
         loop {
-            match screen.select(&menu, &mut selected, notice)? {
+            match screen.select(&menu, &mut selected, "")? {
                 Action::Back => return Ok(()),
                 Action::Select if selected == values.len() => return Ok(()),
                 Action::Select => {
                     screen.copy(&values[selected].2)?;
-                    notice = "已复制";
                 }
                 _ => {}
             }
