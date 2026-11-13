@@ -276,7 +276,7 @@ pub fn apply(
     for unit in target
         .units
         .iter()
-        .filter(|unit| !previous.units.contains(unit))
+        .filter(|unit| unit.certificates.is_empty() && !previous.units.contains(unit))
     {
         unit.check(progress)?;
     }
@@ -587,6 +587,13 @@ impl Orchestrator<'_> {
             && let Some(name) = &caddy
         {
             self.stop(name);
+        }
+        for unit in target
+            .units
+            .iter()
+            .filter(|unit| unit.component != Component::Caddy && changed.contains(&unit.name))
+        {
+            unit.check(self.progress)?;
         }
         let obsolete: Vec<_> = self
             .running

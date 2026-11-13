@@ -98,12 +98,9 @@ pub fn wait(store: &Store, names: &BTreeSet<String>, progress: &Progress) -> Res
         }
         changed.notify();
     })?;
-    for name in names {
-        let (certificate, _) = paths(store, name);
-        let directory = certificate.parent().unwrap();
-        store.create_dir(directory)?;
-        watcher.watch(directory, RecursiveMode::NonRecursive)?;
-    }
+    let directory = store.directory.join("caddy");
+    store.create_dir(&directory)?;
+    watcher.watch(&directory, RecursiveMode::Recursive)?;
     let step = progress.activity("准备证书");
     progress.until(|| {
         if let Some(error) = failure.lock().expect("certificate lock poisoned").take() {
