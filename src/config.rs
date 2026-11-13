@@ -38,6 +38,31 @@ pub struct Config {
 }
 
 impl Config {
+    pub(crate) fn runtime(&self) -> Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self)?;
+        let fields = value.as_object_mut().unwrap();
+        for field in ["components", "maintenance", "running"] {
+            fields.remove(field);
+        }
+        for field in ["users", "inbounds", "outbounds"] {
+            for object in fields[field].as_array_mut().unwrap() {
+                let object = object.as_object_mut().unwrap();
+                object.remove("name");
+                if let Some(connections) = object.get_mut("connections") {
+                    for connection in connections.as_array_mut().unwrap() {
+                        let connection = connection.as_object_mut().unwrap();
+                        if let Some(proxy) = connection.get_mut("proxy") {
+                            proxy.as_object_mut().unwrap().remove("name");
+                        } else {
+                            connection.remove("name");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(value)
+    }
+
     fn validate(&self) -> Result<()> {
         let mut identifiers = HashSet::new();
         let mut passwords = HashMap::new();
@@ -168,9 +193,13 @@ impl Store {
         let planned = (|| -> Result<_> {
             let result = change(&mut config, &mut resources)?;
             config.validate()?;
+            config.maintenance.next()?;
             config
                 .keys
                 .retain(|uuid, _| config.inbounds.iter().any(|inbound| inbound.uuid == *uuid));
+            if let Some(target) = previous.reuse(self, &config, &resources)? {
+                return Ok((result, None, target));
+            }
             let prepared = native::prepare(
                 self,
                 &config,
@@ -224,7 +253,7 @@ impl Store {
                 Ok(()) => step.finish("已恢复此前部署"),
                 Err(recovery) => return Err(format!("{error}；恢复部署失败：{recovery}").into()),
             }
-            return Err(error);
+            return Err(format!("{error}\n已恢复此前部署").into());
         }
         for directory in directories.difference(&used) {
             if let Err(error) = fs::remove_dir_all(directory)

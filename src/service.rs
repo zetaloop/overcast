@@ -34,7 +34,7 @@ use crate::{
     config::{Config, Store},
     maintenance,
     native::{Instance, Prepared},
-    progress::Progress,
+    progress::{Progress, Step},
     resource::Resources,
 };
 
@@ -62,6 +62,7 @@ struct Unit {
 #[derive(Default, Deserialize, Serialize)]
 struct Status {
     id: Uuid,
+    activity: Option<String>,
     error: Option<String>,
 }
 
@@ -81,6 +82,30 @@ impl Deployment {
         }
     }
 
+    pub fn reuse(
+        &self,
+        store: &Store,
+        config: &Config,
+        resources: &Resources,
+    ) -> Result<Option<Self>> {
+        if self.config.runtime()? != config.runtime()? || self.geodata != resources.geodata {
+            return Ok(None);
+        }
+        for unit in &self.units {
+            let Some(installed) = resources.components.get(&unit.component) else {
+                return Ok(None);
+            };
+            if unit.component.program(store, installed)? != unit.program {
+                return Ok(None);
+            }
+        }
+        Ok(Some(Self {
+            id: Uuid::new_v4(),
+            config: config.clone(),
+            ..self.clone()
+        }))
+    }
+
     pub fn prepare(
         store: &Store,
         config: &Config,
@@ -89,7 +114,6 @@ impl Deployment {
         previous: &Self,
         progress: &Progress,
     ) -> Result<Self> {
-        config.maintenance.next()?;
         let mut deployment = Self {
             id: Uuid::new_v4(),
             config: config.clone(),
@@ -288,7 +312,7 @@ pub fn apply(
             Ok(()) => step.finish("已恢复此前部署"),
             Err(recovery) => return Err(format!("{error}；恢复部署失败：{recovery}").into()),
         }
-        return Err(error);
+        return Err(format!("{error}\n已恢复此前部署").into());
     }
     Ok(())
 }
@@ -318,24 +342,26 @@ fn switch(
         }
         (false, true) => {
             let step = progress.activity("启动服务");
+            report(store, target.id, Some("启动编排器".to_owned()), None)?;
             platform::install(store)?;
-            wait(store, target.id, progress)?;
-            step.finish(format!("{} 个核心", target.units.len()));
+            wait(store, target.id, progress, &step)?;
+            step.finish("已启动");
         }
         (true, true)
             if previous.units == target.units
                 && previous.config.maintenance == target.config.maintenance => {}
         (true, true) => {
             let step = progress.activity("应用服务");
+            report(store, target.id, Some("载入配置".to_owned()), None)?;
             platform::reload()?;
-            wait(store, target.id, progress)?;
-            step.finish(format!("{} 个核心", target.units.len()));
+            wait(store, target.id, progress, &step)?;
+            step.finish("已应用");
         }
     }
     Ok(())
 }
 
-fn wait(store: &Store, id: Uuid, progress: &Progress) -> Result<()> {
+fn wait(store: &Store, id: Uuid, progress: &Progress, step: &Step) -> Result<()> {
     let path = store.directory.join("status.json");
     let changed = progress.clone();
     let mut watcher =
@@ -349,6 +375,10 @@ fn wait(store: &Store, id: Uuid, progress: &Progress) -> Result<()> {
             Err(error) => return Err(error.into()),
         };
         if status.id != id {
+            return Ok(false);
+        }
+        if let Some(activity) = status.activity {
+            step.detail(activity);
             return Ok(false);
         }
         if let Some(error) = status.error {
@@ -441,6 +471,7 @@ fn orchestrate(
             report(
                 store,
                 target.id,
+                None,
                 result.err().map(|error| error.to_string()),
             )?;
             if maintenance.is_none() || deployment.config.maintenance != target.config.maintenance {
@@ -560,6 +591,7 @@ impl Orchestrator<'_> {
             .find(|process| process.unit.component == Component::Caddy)
             .map(|process| process.unit.name.clone());
         if let Some(unit) = target.caddy().filter(|unit| changed.contains(&unit.name)) {
+            report(self.store, target.id, Some("准备 Caddy".to_owned()), None)?;
             unit.check(self.progress)?;
             match caddy
                 .as_ref()
@@ -582,7 +614,17 @@ impl Orchestrator<'_> {
                     self.start(unit)?;
                 }
             }
-            certificate::wait(self.store, &target.certificates(), self.progress)?;
+            let certificates = target.certificates();
+            report(
+                self.store,
+                target.id,
+                Some(format!(
+                    "准备证书：{}",
+                    certificates.iter().cloned().collect::<Vec<_>>().join("、")
+                )),
+                None,
+            )?;
+            certificate::wait(self.store, &certificates, self.progress)?;
         } else if target.caddy().is_none()
             && let Some(name) = &caddy
         {
@@ -593,6 +635,12 @@ impl Orchestrator<'_> {
             .iter()
             .filter(|unit| unit.component != Component::Caddy && changed.contains(&unit.name))
         {
+            report(
+                self.store,
+                target.id,
+                Some(format!("检查 {} 配置", unit.component.name())),
+                None,
+            )?;
             unit.check(self.progress)?;
         }
         let obsolete: Vec<_> = self
@@ -609,6 +657,7 @@ impl Orchestrator<'_> {
             .map(|process| process.unit.name.clone())
             .collect();
         for name in obsolete {
+            report(self.store, target.id, Some(format!("停止 {name}")), None)?;
             self.stop(&name);
         }
         for unit in target
@@ -617,6 +666,12 @@ impl Orchestrator<'_> {
             .filter(|unit| unit.component != Component::Caddy && changed.contains(&unit.name))
         {
             self.progress.check()?;
+            report(
+                self.store,
+                target.id,
+                Some(format!("启动 {}", unit.component.name())),
+                None,
+            )?;
             self.start(unit)?;
         }
         Ok(())
@@ -718,9 +773,16 @@ fn kill(pid: u32) {
     windows::kill(pid);
 }
 
-fn report(store: &Store, id: Uuid, error: Option<String>) -> Result<()> {
+fn report(store: &Store, id: Uuid, activity: Option<String>, error: Option<String>) -> Result<()> {
     store.write(&store.directory.join("status.json"), |file| {
-        serde_json::to_writer(file, &Status { id, error })?;
+        serde_json::to_writer(
+            file,
+            &Status {
+                id,
+                activity,
+                error,
+            },
+        )?;
         Ok(())
     })
 }
@@ -732,7 +794,7 @@ fn finish(store: &Store, result: Result<()>) -> Result<()> {
         Err(error) => format!("服务已停止：{error}"),
     };
     let id = Deployment::load(store).map_or_else(|_| Uuid::nil(), |deployment| deployment.id);
-    let _ = report(store, id, Some(error));
+    let _ = report(store, id, None, Some(error));
     result
 }
 

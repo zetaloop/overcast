@@ -20,7 +20,6 @@ pub struct Step {
     completed: Arc<AtomicU64>,
     requested: Arc<AtomicBool>,
     text: Arc<Mutex<Text>>,
-    records: Arc<Mutex<Vec<Arc<Record>>>>,
 }
 
 #[derive(Clone, Default)]
@@ -49,17 +48,6 @@ impl Step {
         self.text.lock().expect("progress lock poisoned").detail = detail.into();
     }
 
-    pub fn record(&self, detail: impl Into<String>) {
-        self.records
-            .lock()
-            .expect("progress lock poisoned")
-            .push(Arc::new(Record {
-                group: self.group.clone(),
-                name: self.name.clone(),
-                detail: detail.into(),
-            }));
-    }
-
     pub fn request(&self) {
         self.requested.store(true, Ordering::Relaxed);
     }
@@ -71,8 +59,10 @@ impl Step {
 
     pub fn finish(&self, result: impl Into<String>) {
         self.set(self.total);
-        self.record(result);
-        self.text.lock().expect("progress lock poisoned").finished = true;
+        *self.text.lock().expect("progress lock poisoned") = Text {
+            detail: result.into(),
+            finished: true,
+        };
     }
 
     pub fn text(&self) -> Text {
@@ -106,7 +96,6 @@ impl Progress {
             completed: Arc::default(),
             requested: Arc::new(AtomicBool::new(true)),
             text: Arc::default(),
-            records: self.records.clone(),
         };
         self.steps
             .lock()

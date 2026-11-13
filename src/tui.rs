@@ -580,7 +580,7 @@ impl Screen {
             });
             let result: Result<T> = (|| {
                 let started = Instant::now();
-                let mut deadline = started + FRAME;
+                let mut deadline = started + Duration::from_millis(150);
                 let mut cancelled = false;
                 loop {
                     match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -601,7 +601,7 @@ impl Screen {
                     lines.push(String::new().stylized());
                     let records = progress.records();
                     let mut current = Vec::new();
-                    if let Some((step, text)) = steps.iter().rev().find_map(|step| {
+                    for (step, text) in steps.iter().filter_map(|step| {
                         let text = step.text();
                         (!text.finished).then_some((step, text))
                     }) {
@@ -626,19 +626,15 @@ impl Screen {
                             )
                             .stylized(),
                         );
-                        if step.total == 0
-                            && let Some(line) = detail.next()
-                        {
+                        if let Some(line) = detail.next() {
                             current.push(clip(&format!("  {line}"), width as usize).stylized());
                         }
-                        current.push(
-                            clip(
-                                &format!("  {}", detail.collect::<Vec<_>>().join("；")),
-                                width as usize,
-                            )
-                            .stylized(),
-                        );
+                        let detail = detail.collect::<Vec<_>>().join("；");
+                        if !detail.is_empty() {
+                            current.push(clip(&format!("  {detail}"), width as usize).stylized());
+                        }
                     }
+                    current.truncate((height as usize).saturating_sub(lines.len() + 4));
                     let available =
                         (height as usize).saturating_sub(lines.len() + current.len() + 4);
                     let logs = records.iter().flat_map(|record| {
