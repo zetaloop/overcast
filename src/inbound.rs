@@ -544,27 +544,31 @@ fn edit(
     existing: bool,
     mut inbound: Inbound,
 ) -> Result<Option<Uuid>> {
-    let apply: form::Apply<'_, Inbound> = Rc::new(|edited, screen| {
-        if existing {
-            screen.work("保存入站", &format!(" -- {}", edited.name), |progress| {
-                store.update(progress, |config, _| {
-                    let current = config
-                        .inbounds
-                        .iter_mut()
-                        .find(|current| current.uuid == edited.uuid)
-                        .ok_or("入站已被删除")?;
-                    *current = edited.clone();
-                    Ok(())
-                })
-            })?;
-        }
-        Ok(())
-    });
     let mut protocols = BTreeMap::new();
+    let mut previous = None;
     let mut selected = if existing { 0 } else { 3 };
     let mut notice = String::new();
     loop {
-        let title = if existing {
+        let changing = previous.is_some();
+        let apply: form::Apply<'_, Inbound> = Rc::new(|edited, screen| {
+            if existing && !changing {
+                screen.work("保存入站", &edited.name, |progress| {
+                    store.update(progress, |config, _| {
+                        let current = config
+                            .inbounds
+                            .iter_mut()
+                            .find(|current| current.uuid == edited.uuid)
+                            .ok_or("入站已被删除")?;
+                        *current = edited.clone();
+                        Ok(())
+                    })
+                })?;
+            }
+            Ok(())
+        });
+        let title = if changing {
+            format!("更换协议 / {}", inbound.name)
+        } else if existing {
             format!("入站 / {}", inbound.name)
         } else {
             "创建入站".to_owned()
@@ -588,7 +592,7 @@ fn edit(
             item.value = destination.text();
             items.push(item);
         }
-        if existing && inbound.listen.enabled {
+        if existing && !changing && inbound.listen.enabled {
             items.extend([
                 Item::new("copy", "复制连接".stylized()),
                 Item::new("share", "分享链接".stylized()),
@@ -622,22 +626,42 @@ fn edit(
             tls,
             listen,
         ]);
-        if existing && crate::keys::Keys::needed(&inbound) {
+        if existing && !changing && crate::keys::Keys::needed(&inbound) {
             items.push(Item::new("handshake", "握手资料".stylized()));
         }
-        items.push(if existing {
+        items.push(if changing {
+            Item::new("apply", "应用".stylized())
+        } else if existing {
             Item::new("delete", "删除入站".foreground(AnsiColor::BrightRed))
         } else {
             Item::new("create", "创建".stylized())
         });
-        items.push(Item::new("back", "返回".stylized()));
+        items.push(Item::new(
+            "back",
+            if changing { "取消" } else { "返回" }.stylized(),
+        ));
         let menu = Menu {
             title: &title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nEsc 返回",
+            help: if changing {
+                "方向键 选择\n回车键 编辑\nEsc 取消"
+            } else {
+                "方向键 选择\n回车键 编辑\nEsc 返回"
+            },
         };
         let action = screen.select(&menu, &mut selected, &notice)?;
+        if matches!(action, Action::Back)
+            || matches!(action, Action::Select) && items[selected].key == "back"
+        {
+            if let Some(original) = previous.take() {
+                inbound = original;
+                selected = 1;
+                notice.clear();
+                continue;
+            }
+            return Ok(existing.then_some(inbound.uuid));
+        }
         let original = Rc::new(inbound.clone());
         macro_rules! edit {
             ($field:ident) => {
@@ -721,14 +745,13 @@ fn edit(
                             .unwrap_or_else(|| kind.protocol());
                         edited
                     };
-                    match kind.edit(
-                        screen,
-                        &menu,
-                        selected,
-                        Rc::new(|kind, screen| apply(&candidate(*kind), screen)),
-                    ) {
+                    match kind.edit(screen, &menu, selected, Rc::new(|_, _| Ok(()))) {
                         Ok(true) => {
-                            inbound = candidate(kind);
+                            let edited = candidate(kind);
+                            if existing && kind != inbound.protocol.kind() {
+                                previous.get_or_insert_with(|| inbound.clone());
+                            }
+                            inbound = edited;
                             Ok(())
                         }
                         Ok(false) => Ok(()),
@@ -797,23 +820,32 @@ fn edit(
                     };
                     keys.show(source, screen)
                 }),
-                "create" => {
-                    let result = screen.work(
-                        "保存入站",
-                        &format!(" -- {}", inbound.name),
-                        |progress| {
-                            store.update(progress, |config, _| {
-                                let mut value = inbound.clone();
-                                if value.name.trim().is_empty() {
-                                    value.name = value.summary();
-                                }
+                "create" | "apply" => {
+                    let result = screen.work("保存入站", &inbound.name, |progress| {
+                        store.update(progress, |config, _| {
+                            let mut value = inbound.clone();
+                            if value.name.trim().is_empty() {
+                                value.name = value.summary();
+                            }
+                            if existing {
+                                *config
+                                    .inbounds
+                                    .iter_mut()
+                                    .find(|current| current.uuid == inbound.uuid)
+                                    .ok_or("入站已被删除")? = value;
+                            } else {
                                 config.inbounds.push(value);
-                                Ok(())
-                            })
-                        },
-                    );
+                            }
+                            Ok(())
+                        })
+                    });
                     if result.is_ok() {
-                        return Ok(Some(inbound.uuid));
+                        if existing {
+                            previous = None;
+                            selected = 1;
+                        } else {
+                            return Ok(Some(inbound.uuid));
+                        }
                     }
                     result
                 }
