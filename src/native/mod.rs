@@ -151,7 +151,7 @@ pub fn available(
     let payload = Payload::from(&source.protocol);
     Ok(match destination {
         Destination::Block => true,
-        Destination::Direct | Destination::Inbound(_) => false,
+        Destination::Inbound(_) => false,
         Destination::Outbound(uuid) => Builder::new(store, config, progress)
             .chains(uuid, source.core, payload)?
             .iter()
@@ -381,7 +381,7 @@ pub fn prepare(
             progress.check()?;
             if inbound.tls.enabled
                 && inbound.tls.reality.enabled
-                && let Destination::Outbound(uuid) = inbound.tls.reality.outbound
+                && let Some(Destination::Outbound(uuid)) = inbound.tls.reality.outbound
             {
                 let endpoint = builder.outbound(uuid, core, graph::Network::Tcp, Payload::Proxy)?;
                 let parent = builder.bridge(service, &endpoint)?;
@@ -564,7 +564,6 @@ pub fn prepare(
                     };
                     let outbound = match rule.destination {
                         Destination::Block => "block".to_owned(),
-                        Destination::Direct => "direct".to_owned(),
                         Destination::Outbound(uuid) => {
                             let endpoint =
                                 builder.outbound(uuid, core, account.network, payload)?;
@@ -812,7 +811,6 @@ impl<'a> Builder<'a> {
     ) -> Result<bool> {
         Ok(match destination {
             Destination::Block | Destination::Inbound(_) => false,
-            Destination::Direct => payload == Payload::Proxy,
             Destination::Outbound(uuid) => {
                 self.config
                     .outbounds

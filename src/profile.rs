@@ -134,7 +134,7 @@ impl Builder<'_> {
         for (network, destination) in routes {
             match destination {
                 Destination::Block => {}
-                Destination::Direct | Destination::Outbound(_) if payload == Payload::Proxy => {
+                Destination::Outbound(_) if payload == Payload::Proxy => {
                     result.extend(
                         clients
                             .iter()
@@ -206,7 +206,6 @@ impl Builder<'_> {
                         result.push((authenticated, vec![client.clone(), self.remote(target)?]));
                     }
                 }
-                Destination::Direct => {}
             }
         }
         visiting.remove(&index);

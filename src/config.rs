@@ -23,7 +23,7 @@ use crate::{
     user::User,
 };
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub users: Vec<User>,
@@ -35,6 +35,21 @@ pub struct Config {
     pub running: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<Uuid, crate::keys::Keys>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            users: Vec::new(),
+            inbounds: Vec::new(),
+            outbounds: vec![Outbound::default_direct()],
+            rules: Vec::new(),
+            components: BTreeMap::new(),
+            maintenance: Default::default(),
+            running: false,
+            keys: BTreeMap::new(),
+        }
+    }
 }
 
 impl Config {

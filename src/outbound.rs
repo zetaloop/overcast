@@ -33,6 +33,17 @@ pub(crate) struct Selection {
 }
 
 impl Outbound {
+    pub(crate) fn default_direct() -> Self {
+        Self {
+            uuid: Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                b"https://github.com/zetaloop/overcast/direct",
+            ),
+            name: "直连".to_owned(),
+            connections: vec![Connection::Direct(connection::Direct::default())],
+        }
+    }
+
     fn new() -> Self {
         Self {
             uuid: Uuid::new_v4(),
@@ -436,6 +447,13 @@ fn edit(
                                             == crate::route::Destination::Outbound(outbound.uuid)
                                     {
                                         value.outbound = crate::route::Destination::Block;
+                                    }
+                                    if let Some(crate::route::Destination::Outbound(uuid)) =
+                                        inbound.tls.reality.outbound
+                                        && uuid == outbound.uuid
+                                    {
+                                        inbound.tls.reality.outbound =
+                                            Some(crate::route::Destination::Block);
                                     }
                                 }
                                 Ok(())

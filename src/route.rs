@@ -58,7 +58,6 @@ impl Rule {
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
 pub enum Destination {
-    Direct,
     #[default]
     Block,
     Outbound(Uuid),
@@ -68,7 +67,6 @@ pub enum Destination {
 impl Destination {
     fn name(self, config: &Config) -> String {
         match self {
-            Self::Direct => "直连".to_owned(),
             Self::Block => "黑洞".to_owned(),
             Self::Outbound(uuid) => config
                 .outbounds
@@ -88,7 +86,6 @@ impl Destination {
 
     fn key(self) -> String {
         match self {
-            Self::Direct => "direct".to_owned(),
             Self::Block => "block".to_owned(),
             Self::Outbound(uuid) => uuid.to_string(),
             Self::Inbound(uuid) => format!("inbound:{uuid}"),
@@ -298,7 +295,7 @@ pub(crate) fn destination(
 ) -> Result<Option<Destination>> {
     loop {
         let config = store.load()?;
-        let mut values = vec![Destination::Direct, Destination::Block];
+        let mut values = vec![Destination::Block];
         values.extend(
             config
                 .outbounds

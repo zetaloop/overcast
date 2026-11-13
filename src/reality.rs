@@ -15,14 +15,14 @@ pub struct Client {
     pub debug: bool,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Server {
     pub enabled: bool,
     pub target: String,
     pub target_network: Option<String>,
     pub network: Network,
-    pub outbound: Destination,
+    pub outbound: Option<Destination>,
     pub server_names: Vec<String>,
     pub private_key: Option<String>,
     pub short_ids: Vec<String>,
@@ -35,30 +35,6 @@ pub struct Server {
     pub upload: Limit,
     pub download: Limit,
     pub debug: bool,
-}
-
-impl Default for Server {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            target: String::new(),
-            target_network: None,
-            network: Network::default(),
-            outbound: Destination::Direct,
-            server_names: Vec::new(),
-            private_key: None,
-            short_ids: Vec::new(),
-            max_time_difference: None,
-            proxy_protocol: None,
-            min_client_version: None,
-            max_client_version: None,
-            signature: false,
-            signature_seed: None,
-            upload: Limit::default(),
-            download: Limit::default(),
-            debug: false,
-        }
-    }
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -272,7 +248,7 @@ fields!(Server {
     target: "握手目标",
     target_network: "目标网络类型",
     network: "目标连接参数",
-    outbound: "目标出口",
+    outbound: "经出站连接",
     server_names: "服务名",
     private_key: "私钥",
     short_ids: "短标识",

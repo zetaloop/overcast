@@ -760,7 +760,7 @@ impl<'a> Analysis<'a> {
                             Destination::Inbound(uuid) => {
                                 pending.push((uuid, network, Layer::Transport))
                             }
-                            Destination::Direct | Destination::Outbound(_) => {
+                            Destination::Outbound(_) => {
                                 result = true;
                                 break 'search;
                             }
@@ -797,26 +797,12 @@ impl<'a> Analysis<'a> {
         inbound: &Inbound,
         reachable: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
     ) -> Result<bool> {
-        if inbound.tls.enabled && inbound.tls.reality.enabled {
-            match inbound.tls.reality.outbound {
-                Destination::Block | Destination::Inbound(_) => return Ok(false),
-                Destination::Outbound(uuid)
-                    if !self
-                        .config
-                        .outbounds
-                        .iter()
-                        .any(|outbound| outbound.uuid == uuid)
-                        || !reachable(
-                            inbound.core,
-                            Destination::Outbound(uuid),
-                            Network::Tcp,
-                            Payload::Proxy,
-                        )? =>
-                {
-                    return Ok(false);
-                }
-                _ => {}
-            }
+        if inbound.tls.enabled
+            && inbound.tls.reality.enabled
+            && let Some(destination) = inbound.tls.reality.outbound
+            && !reachable(inbound.core, destination, Network::Tcp, Payload::Proxy)?
+        {
+            return Ok(false);
         }
         Ok(
             !matches!(&inbound.protocol, Protocol::Mixed(protocol) if !protocol.http.enabled && !protocol.socks.enabled),
