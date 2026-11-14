@@ -334,12 +334,12 @@ pub fn listeners(
     store: &Store,
     target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
-    if source.quic() && source.listen.proxy_protocol {
+    if source.quic() && source.listen.socket.proxy_protocol {
         return unsupported("UDP 传输监听没有 PROXY protocol 支持");
     }
     let mut output = Map::from_iter([
         ("listen".to_owned(), json!(source.listen.address)),
-        ("port".to_owned(), json!(source.ports)),
+        ("port".to_owned(), json!(source.listen.ports)),
     ]);
     let mut settings = Map::new();
     let mut stream = Map::new();
@@ -641,7 +641,7 @@ pub fn listeners(
             }
         }
     }
-    let mut options = Options::new(&source.listen)?;
+    let mut options = Options::new(&source.listen.socket)?;
     if matches!(source.protocol, Protocol::Hysteria2(_)) {
         options.durations(
             stream
@@ -653,11 +653,10 @@ pub fn listeners(
             Some(Duration::from_secs(1)),
         )?;
     }
-    options.take("address");
     options.take("interface");
     let mut sockopt = socket(&mut options)?;
     let mut custom = Vec::new();
-    if source.listen.tcp_keep_alive == Some(true)
+    if source.listen.socket.tcp_keep_alive == Some(true)
         && !["tcpKeepAliveIdle", "tcpKeepAliveInterval"]
             .iter()
             .any(|name| {
@@ -693,6 +692,7 @@ pub fn listeners(
     }
     if let Some(interface) = source
         .listen
+        .socket
         .interface
         .as_deref()
         .filter(|value| !value.is_empty())

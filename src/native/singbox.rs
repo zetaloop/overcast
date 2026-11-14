@@ -445,8 +445,7 @@ pub fn listeners(
             ),
         ),
     ]);
-    let mut options = Options::new(&source.listen)?;
-    options.take("address");
+    let mut options = Options::new(&source.listen.socket)?;
     options.rename(
         &mut output,
         &[
@@ -469,7 +468,7 @@ pub fn listeners(
         ],
         None,
     )?;
-    if let Some(value) = &source.listen.tcp_fast_open {
+    if let Some(value) = &source.listen.socket.tcp_fast_open {
         match value {
             FastOpen::Enabled(value) => {
                 output.insert("tcp_fast_open".to_owned(), json!(value));

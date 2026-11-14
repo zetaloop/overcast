@@ -236,7 +236,7 @@ impl Builder<'_> {
         for port in source.ports()? {
             self.progress.check()?;
             for security in self.security(&source)? {
-                let server = source.address.clone();
+                let server = source.listen.host.clone();
                 let transport = source.transport.clone();
                 match &source.protocol {
                     Protocol::Mixed(value) => {

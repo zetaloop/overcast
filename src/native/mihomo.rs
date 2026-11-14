@@ -414,7 +414,7 @@ pub fn listeners(
 ) -> Result<Vec<Map<String, Value>>> {
     let mut output = Map::from_iter([
         ("listen".to_owned(), json!(source.listen.address)),
-        ("port".to_owned(), json!(source.ports)),
+        ("port".to_owned(), json!(source.listen.ports)),
         (
             "users".to_owned(),
             if matches!(
@@ -467,10 +467,9 @@ pub fn listeners(
             },
         ),
     ]);
-    let mut options = Options::new(&source.listen)?;
-    options.take("address");
+    let mut options = Options::new(&source.listen.socket)?;
     options.rename(&mut output, &[("routing_mark", "routing-mark")]);
-    if let Some(FastOpen::Enabled(value)) = &source.listen.tcp_fast_open {
+    if let Some(FastOpen::Enabled(value)) = &source.listen.socket.tcp_fast_open {
         options.take("tcp_fast_open");
         globals.insert("inbound-tfo".to_owned(), json!(value));
     }

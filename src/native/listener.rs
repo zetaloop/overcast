@@ -133,10 +133,14 @@ impl Member {
             networks = BTreeSet::from([Network::Tcp]);
         }
         configure(&mut source, &member.modes);
-        source.ports = port.to_string();
         source.listen = crate::inbound::Listen {
+            host: source.listen.host,
+            ports: port.to_string(),
             address: "127.0.0.1".to_owned(),
-            proxy_protocol: layer == Layer::Protocol && source.core == Core::Xray,
+            socket: crate::inbound::Socket {
+                proxy_protocol: layer == Layer::Protocol && source.core == Core::Xray,
+                ..Default::default()
+            },
             ..crate::inbound::Listen::default()
         };
         validate(&source, &member.modes, &self.users)?;
@@ -341,11 +345,8 @@ pub fn build(
         progress.check()?;
         let mut source = entry.inbound.clone();
         if !source.listen.enabled {
-            source.listen = crate::inbound::Listen {
-                enabled: false,
-                address: "127.0.0.1".to_owned(),
-                ..crate::inbound::Listen::default()
-            };
+            source.listen.address = "127.0.0.1".to_owned();
+            source.listen.socket = Default::default();
         }
         if let Some(fallbacks) = source.protocol.fallbacks_mut() {
             for fallback in fallbacks {
@@ -415,13 +416,14 @@ pub fn build(
         if source.listen.address == "localhost" {
             source.listen.address = "127.0.0.1".to_owned();
         }
-        for value in [&mut source.listen.interface, &mut source.listen.namespace] {
+        let socket = &mut source.listen.socket;
+        for value in [&mut socket.interface, &mut socket.namespace] {
             if value.as_deref() == Some("") {
                 *value = None;
             }
         }
-        if source.listen.ipv6_only == Some(false) {
-            source.listen.ipv6_only = None;
+        if socket.ipv6_only == Some(false) {
+            socket.ipv6_only = None;
         }
         let unix = source.listen.address.starts_with('@')
             || Path::new(&source.listen.address).is_absolute();
@@ -460,15 +462,16 @@ pub fn build(
                     .any(|account| account.network == Network::Udp);
             }
             if transport_udp || modes.iter().all(|mode| mode.wire() == Network::Udp) {
-                source.listen.tcp_fast_open = None;
-                source.listen.tcp_multi_path = None;
-                source.listen.tcp_keep_alive = None;
-                source.listen.tcp_keep_alive_idle = None;
-                source.listen.tcp_keep_alive_interval = None;
-                source.listen.tcp_congestion = None;
-                source.listen.tcp_window = None;
-                source.listen.tcp_max_segment = None;
-                source.listen.tcp_user_timeout = None;
+                let socket = &mut source.listen.socket;
+                socket.tcp_fast_open = None;
+                socket.tcp_multi_path = None;
+                socket.tcp_keep_alive = None;
+                socket.tcp_keep_alive_idle = None;
+                socket.tcp_keep_alive_interval = None;
+                socket.tcp_congestion = None;
+                socket.tcp_window = None;
+                socket.tcp_max_segment = None;
+                socket.tcp_user_timeout = None;
             }
             let binding = Binding::new(
                 &source,
@@ -480,10 +483,10 @@ pub fn build(
                 },
             )?;
             if binding.current_namespace()? {
-                source.listen.namespace = None;
+                source.listen.socket.namespace = None;
             }
             if matches!(binding.address, Address::Ip(std::net::IpAddr::V6(_))) {
-                source.listen.ipv6_only = None;
+                source.listen.socket.ipv6_only = None;
             }
             let source = Rc::new(source);
             for port in &ports {

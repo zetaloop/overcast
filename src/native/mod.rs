@@ -302,7 +302,7 @@ pub fn prepare(
                 uuid,
                 (
                     *listeners[index].binding.ports.first().unwrap(),
-                    listeners[index].source.listen.proxy_protocol,
+                    listeners[index].source.listen.socket.proxy_protocol,
                 ),
             )
         })

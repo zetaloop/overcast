@@ -21,7 +21,7 @@ pub fn name(source: &Inbound) -> Result<String> {
         .tls()
         .and_then(|tls| tls.server_name.as_deref())
         .filter(|value| !value.is_empty())
-        .unwrap_or(&source.address)
+        .unwrap_or(&source.listen.host)
         .trim()
         .trim_end_matches('.');
     let address = value.trim_start_matches('[').trim_end_matches(']');

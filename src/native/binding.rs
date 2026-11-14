@@ -59,12 +59,13 @@ impl Binding {
     }
 
     pub fn new(source: &Inbound, port: Option<u16>, networks: BTreeSet<Network>) -> Result<Self> {
-        let namespace = Namespace::new(source.listen.namespace.as_deref())?;
+        let socket = &source.listen.socket;
+        let namespace = Namespace::new(socket.namespace.as_deref())?;
         let text = &source.listen.address;
-        let Value::Object(mut settings) = serde_json::to_value(&source.listen)? else {
+        let Value::Object(mut settings) = serde_json::to_value(socket)? else {
             unreachable!()
         };
-        for name in ["enabled", "address", "namespace", "ipv6_only"] {
+        for name in ["namespace", "ipv6_only"] {
             settings.remove(name);
         }
         if cfg!(any(target_os = "linux", target_os = "android")) {
@@ -126,16 +127,12 @@ impl Binding {
         };
         if !matches!(address, Address::Unix(_) | Address::Abstract(_))
             && cfg!(any(target_os = "linux", target_os = "android"))
-            && let Some(name) = source
-                .listen
-                .interface
-                .as_deref()
-                .filter(|name| !name.is_empty())
+            && let Some(name) = socket.interface.as_deref().filter(|name| !name.is_empty())
         {
             let index = namespace.index(name)?;
             interface = Some(index);
         }
-        let mut ipv6_only = source.listen.ipv6_only == Some(true);
+        let mut ipv6_only = socket.ipv6_only == Some(true);
         if source.core == Core::Xray
             && cfg!(any(
                 target_os = "linux",
@@ -164,7 +161,7 @@ impl Binding {
                 .map(|network| format!("{}{family}", network.name()))
                 .collect();
             let mut options = Vec::new();
-            for option in &source.listen.socket_options {
+            for option in &socket.socket_options {
                 if !option.system.is_empty() && option.system != system
                     || !wires.iter().any(|wire| wire.starts_with(&option.network))
                 {
@@ -210,7 +207,7 @@ impl Binding {
                 options.push(json!([level, key, option.kind, value]));
             }
             if cfg!(any(target_os = "linux", target_os = "android"))
-                && source.listen.ipv6_only == Some(true)
+                && socket.ipv6_only == Some(true)
             {
                 ipv6_only = true;
             }

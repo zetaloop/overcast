@@ -28,8 +28,6 @@ use crate::{
 pub struct Inbound {
     pub uuid: Uuid,
     pub name: String,
-    pub address: String,
-    pub ports: String,
     pub core: Core,
     pub users: bool,
     pub credentials: Option<Credentials>,
@@ -45,8 +43,6 @@ impl Inbound {
         Self {
             uuid: Uuid::new_v4(),
             name: String::new(),
-            address: String::new(),
-            ports: kind.port().to_string(),
             core: kind.core(),
             users: !matches!(kind, Kind::Forward),
             credentials: None,
@@ -57,7 +53,10 @@ impl Inbound {
             } else {
                 Security::Tls(Tls::default())
             },
-            listen: Listen::default(),
+            listen: Listen {
+                ports: kind.port().to_string(),
+                ..Listen::default()
+            },
         }
     }
 
@@ -65,11 +64,11 @@ impl Inbound {
         if self.name.trim().is_empty() {
             return Err("入站名称不能为空".into());
         }
-        if self.listen.enabled && self.address.trim().is_empty() {
+        if self.listen.enabled && self.listen.host.trim().is_empty() {
             return Err("连接地址不能为空".into());
         }
-        if !self.address.is_empty() && !is_ip(&self.address) {
-            url::Host::parse(&self.address)
+        if !self.listen.host.is_empty() && !is_ip(&self.listen.host) {
+            url::Host::parse(&self.listen.host)
                 .map_err(|error| format!("连接地址格式不正确：{error}"))?;
         }
         let address = &self.listen.address;
@@ -168,25 +167,18 @@ impl Inbound {
     }
 
     pub fn ports(&self) -> Result<BTreeSet<u16>> {
-        if !self.listen.enabled && self.ports.trim().is_empty() {
+        if !self.listen.enabled && self.listen.ports.trim().is_empty() {
             return Ok(BTreeSet::from([self.protocol.kind().port()]));
         }
-        crate::connection::ports(&self.ports)
+        crate::connection::ports(&self.listen.ports)
     }
 
     pub(crate) fn summary(&self) -> String {
-        if self.address.is_empty() {
-            return self.protocol.kind().text();
+        let kind = self.protocol.kind().text();
+        match self.listen.text() {
+            text if text.is_empty() => kind,
+            text => format!("{kind} {text}"),
         }
-        let address = if self.address.contains(':') && !self.address.starts_with('[') {
-            format!("[{}]", self.address)
-        } else {
-            self.address.clone()
-        };
-        if self.ports.trim().is_empty() {
-            return format!("{} {address}", self.protocol.kind().text());
-        }
-        format!("{} {address}:{}", self.protocol.kind().text(), self.ports)
     }
 }
 
@@ -572,7 +564,15 @@ pub struct Ech {
 #[serde(default, deny_unknown_fields)]
 pub struct Listen {
     pub enabled: bool,
+    pub host: String,
+    pub ports: String,
     pub address: String,
+    pub socket: Socket,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Socket {
     pub interface: Option<String>,
     pub routing_mark: Option<u32>,
     pub namespace: Option<String>,
@@ -594,30 +594,31 @@ pub struct Listen {
     pub socket_options: Vec<SocketOption>,
 }
 
+impl Listen {
+    fn text(&self) -> String {
+        if !self.enabled || self.host.is_empty() {
+            return String::new();
+        }
+        let host = if self.host.contains(':') && !self.host.starts_with('[') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        if self.ports.trim().is_empty() {
+            return host;
+        }
+        format!("{host}:{}", self.ports)
+    }
+}
+
 impl Default for Listen {
     fn default() -> Self {
         Self {
             enabled: true,
+            host: String::new(),
+            ports: String::new(),
             address: "::".to_owned(),
-            interface: None,
-            routing_mark: None,
-            namespace: None,
-            reuse_address: None,
-            ipv6_only: None,
-            tcp_fast_open: None,
-            tcp_multi_path: None,
-            tcp_keep_alive: None,
-            tcp_keep_alive_idle: None,
-            tcp_keep_alive_interval: None,
-            tcp_congestion: None,
-            tcp_window: None,
-            tcp_max_segment: None,
-            tcp_user_timeout: None,
-            udp_fragment: None,
-            udp_timeout: None,
-            proxy_protocol: false,
-            forwarded_sources: Vec::new(),
-            socket_options: Vec::new(),
+            socket: Socket::default(),
         }
     }
 }
@@ -630,7 +631,8 @@ fn edit(
 ) -> Result<Option<Uuid>> {
     let mut protocols = BTreeMap::new();
     let mut previous = None;
-    let mut selected = if existing { 0 } else { 3 };
+    let mut selected = 0;
+    let mut opening = !existing;
     let mut notice = String::new();
     loop {
         let changing = previous.is_some();
@@ -661,8 +663,6 @@ fn edit(
             ("name", "名称", inbound.name.clone()),
             ("protocol", "协议", inbound.protocol.kind().text()),
             ("core", "核心", inbound.core.text()),
-            ("address", "连接地址", inbound.address.clone()),
-            ("ports", "端口", inbound.ports.clone()),
         ]
         .into_iter()
         .map(|(key, label, value)| {
@@ -697,13 +697,19 @@ fn edit(
         let mut transport = Item::new("transport", "传输".stylized());
         transport.value = inbound.transport.text();
         let mut listen = Item::new("listen", "监听".stylized());
-        listen.value = inbound.listen.enabled.text();
+        listen.value = match inbound.listen.text() {
+            text if text.is_empty() => inbound.listen.enabled.text(),
+            text => text,
+        };
         items.push(Item::new("options", "协议参数".stylized()));
         if inbound.transports() {
             items.push(transport);
         }
         if inbound.securities() != [0] {
             items.push(security);
+        }
+        if std::mem::take(&mut opening) {
+            selected = items.len();
         }
         items.push(listen);
         if existing && !changing && inbound.listen.enabled {
@@ -773,8 +779,6 @@ fn edit(
             Action::Select => match items[selected].key.as_str() {
                 "export" => crate::profile::copy(screen, store, Some(inbound.uuid), None),
                 "name" => edit!(name),
-                "address" => edit!(address),
-                "ports" => edit!(ports),
                 "core" => {
                     let kind = inbound.protocol.kind();
                     let choices: Vec<_> = Core::choices()
@@ -1204,8 +1208,14 @@ fields!(Ech {
 });
 
 fields!(Listen {
+    host: "连接地址",
+    ports: "端口",
+    address: "绑定地址",
     enabled: "启用",
-    address: "地址",
+    socket: ..,
+});
+
+fields!(Socket {
     interface: "接口",
     routing_mark: "路由标记",
     namespace: "网络命名空间",
