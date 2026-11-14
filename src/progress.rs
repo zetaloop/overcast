@@ -75,6 +75,7 @@ pub struct Progress {
     group: Option<String>,
     steps: Arc<Mutex<Vec<Step>>>,
     records: Arc<Mutex<Vec<Arc<Record>>>>,
+    warnings: Arc<Mutex<Vec<String>>>,
     cancelled: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
 }
@@ -124,6 +125,21 @@ impl Progress {
                 detail: item.to_owned(),
             }));
         }
+    }
+
+    pub fn warn(&self, name: &str, detail: &str) {
+        self.record(name, detail);
+        self.warnings
+            .lock()
+            .expect("progress lock poisoned")
+            .push(format!("{name}：{detail}"));
+    }
+
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings
+            .lock()
+            .expect("progress lock poisoned")
+            .clone()
     }
 
     pub fn records(&self) -> Vec<Arc<Record>> {

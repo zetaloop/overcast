@@ -274,7 +274,7 @@ impl Store {
             if let Err(error) = fs::remove_dir_all(directory)
                 && error.kind() != ErrorKind::NotFound
             {
-                progress.record(
+                progress.warn(
                     "清理旧配置失败",
                     &format!("{}：{error}", directory.display()),
                 );
@@ -286,7 +286,7 @@ impl Store {
                     ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
                 )
             {
-                progress.record("清理旧配置失败", &format!("{}：{error}", parent.display()));
+                progress.warn("清理旧配置失败", &format!("{}：{error}", parent.display()));
             }
         }
         Ok(result)

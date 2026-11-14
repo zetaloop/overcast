@@ -74,6 +74,7 @@ pub struct Screen {
     pub(crate) arguments: VecDeque<String>,
     events: VecDeque<Event>,
     copied: bool,
+    warnings: Vec<String>,
     pub exiting: bool,
 }
 
@@ -89,6 +90,7 @@ impl Screen {
             arguments: arguments.into_iter().collect(),
             events: VecDeque::new(),
             copied: false,
+            warnings: Vec::new(),
             exiting: false,
         };
         screen.output.enter_raw_mode()?;
@@ -249,6 +251,14 @@ impl Screen {
                 wrap(notice, width as usize)
                     .into_iter()
                     .map(|line| line.foreground(AnsiColor::BrightRed)),
+            );
+        }
+        for warning in std::mem::take(&mut self.warnings) {
+            footer.push(String::new().stylized());
+            footer.extend(
+                wrap(&warning, width as usize)
+                    .into_iter()
+                    .map(|line| line.foreground(AnsiColor::Yellow)),
             );
         }
         if std::mem::take(&mut self.copied) && notice.is_empty() {
@@ -785,6 +795,10 @@ impl Screen {
             })();
             if result.is_err() {
                 progress.cancel();
+            }
+            self.warnings.extend(progress.warnings());
+            if !self.warnings.is_empty() {
+                self.arguments.clear();
             }
             result
         })
