@@ -4,7 +4,14 @@ use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Result, config::Config, geodata::Catalog, graph::Payload, inbound::Inbound, pattern};
+use crate::{
+    Result,
+    config::{Config, Reference},
+    geodata::Catalog,
+    graph::Payload,
+    inbound::Inbound,
+    pattern,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "kebab-case")]
@@ -205,6 +212,19 @@ impl Condition {
             }
             _ => {}
         }
+    }
+    pub fn prune(&mut self, keep: &impl Fn(Reference) -> Result<bool>) -> Result<()> {
+        match self {
+            Self::User(uuid) if !keep(Reference::User(*uuid))? => *self = Self::Never,
+            Self::Inbound(uuid) if !keep(Reference::Inbound(*uuid))? => *self = Self::Never,
+            Self::And(children) | Self::Or(children) => {
+                for child in children {
+                    child.prune(keep)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 

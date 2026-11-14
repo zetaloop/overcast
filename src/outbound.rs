@@ -434,27 +434,6 @@ fn edit(
                                 config
                                     .outbounds
                                     .retain(|current| current.uuid != outbound.uuid);
-                                for rule in &mut config.rules {
-                                    rule.remove_destination(crate::route::Destination::Outbound(
-                                        outbound.uuid,
-                                    ));
-                                }
-                                for inbound in &mut config.inbounds {
-                                    if let crate::inbound::Protocol::Forward(value) =
-                                        &mut inbound.protocol
-                                        && value.outbound
-                                            == crate::route::Destination::Outbound(outbound.uuid)
-                                    {
-                                        value.outbound = crate::route::Destination::Block;
-                                    }
-                                    if let Some(crate::route::Destination::Outbound(uuid)) =
-                                        inbound.tls.reality.outbound
-                                        && uuid == outbound.uuid
-                                    {
-                                        inbound.tls.reality.outbound =
-                                            Some(crate::route::Destination::Block);
-                                    }
-                                }
                                 Ok(())
                             })
                         },

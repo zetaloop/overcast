@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::{
     Result,
     component::{Component, Settings},
-    inbound::Inbound,
+    endpoint::Endpoint,
+    inbound::{Inbound, Protocol},
     native,
     outbound::Outbound,
     progress::Progress,
@@ -52,7 +53,78 @@ impl Default for Config {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Reference {
+    User(Uuid),
+    Inbound(Uuid),
+    Outbound(Uuid),
+}
+
 impl Config {
+    fn objects(&self) -> HashSet<Reference> {
+        self.users
+            .iter()
+            .map(|value| Reference::User(value.uuid))
+            .chain(
+                self.inbounds
+                    .iter()
+                    .map(|value| Reference::Inbound(value.uuid)),
+            )
+            .chain(
+                self.outbounds
+                    .iter()
+                    .map(|value| Reference::Outbound(value.uuid)),
+            )
+            .collect()
+    }
+
+    fn prune(&mut self, previous: &HashSet<Reference>) -> Result<()> {
+        let current = self.objects();
+        let keep = |object: Reference| -> Result<bool> {
+            if current.contains(&object) {
+                return Ok(true);
+            }
+            if previous.contains(&object) {
+                return Ok(false);
+            }
+            let (kind, uuid) = match object {
+                Reference::User(uuid) => ("用户", uuid),
+                Reference::Inbound(uuid) => ("入站", uuid),
+                Reference::Outbound(uuid) => ("出站", uuid),
+            };
+            Err(format!("找不到{kind}：{uuid}").into())
+        };
+        for (index, rule) in self.rules.iter_mut().enumerate() {
+            rule.prune(&keep)
+                .map_err(|e| format!("分流规则 {}：{e}", index + 1))?;
+        }
+        for inbound in &mut self.inbounds {
+            let keep =
+                |object| keep(object).map_err(|e| format!("入站 {}：{e}", inbound.name).into());
+            if let Some(fallbacks) = inbound.protocol.fallbacks_mut() {
+                for fallback in fallbacks {
+                    if let Endpoint::Inbound(uuid) = fallback.target
+                        && !keep(Reference::Inbound(uuid))?
+                    {
+                        fallback.target = Endpoint::Block;
+                    }
+                }
+            }
+            if let Protocol::Forward(value) = &mut inbound.protocol {
+                value.outbound.prune(&keep)?;
+            }
+            if let Some(destination) = &mut inbound.tls.reality.outbound {
+                destination.prune(&keep)?;
+            }
+        }
+        for uuid in self.keys.keys() {
+            keep(Reference::Inbound(*uuid)).map_err(|e| format!("握手资料：{e}"))?;
+        }
+        self.keys
+            .retain(|uuid, _| current.contains(&Reference::Inbound(*uuid)));
+        Ok(())
+    }
+
     pub(crate) fn runtime(&self) -> Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
         let fields = value.as_object_mut().unwrap();
@@ -206,12 +278,11 @@ impl Store {
         let mut config = self.load()?;
         let mut resources = Resources::load(self)?;
         let planned = (|| -> Result<_> {
+            let objects = config.objects();
             let result = change(&mut config, &mut resources)?;
+            config.prune(&objects)?;
             config.validate()?;
             config.maintenance.next()?;
-            config
-                .keys
-                .retain(|uuid, _| config.inbounds.iter().any(|inbound| inbound.uuid == *uuid));
             if let Some(target) = previous.reuse(self, &config, &resources)? {
                 return Ok((result, None, target));
             }

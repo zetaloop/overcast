@@ -847,20 +847,6 @@ fn edit(
                         |progress| {
                             store.update(progress, |config, _| {
                                 config.inbounds.retain(|value| value.uuid != inbound.uuid);
-                                for rule in &mut config.rules {
-                                    rule.remove_destination(crate::route::Destination::Inbound(
-                                        inbound.uuid,
-                                    ));
-                                }
-                                for source in &mut config.inbounds {
-                                    if let Some(fallbacks) = source.protocol.fallbacks_mut() {
-                                        for fallback in fallbacks {
-                                            if fallback.target == Endpoint::Inbound(inbound.uuid) {
-                                                fallback.target = Endpoint::Block;
-                                            }
-                                        }
-                                    }
-                                }
                                 Ok(())
                             })
                         },

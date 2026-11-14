@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     Result,
     condition::Condition,
-    config::{Config, Store},
+    config::{Config, Reference, Store},
     form::{self, Value},
     geodata::Catalog,
     inbound,
@@ -45,13 +45,15 @@ impl Rule {
         }
     }
 
-    pub fn remove_destination(&mut self, destination: Destination) {
-        if self.destination == destination {
-            self.destination = Destination::Block;
+    pub fn prune(&mut self, keep: &impl Fn(Reference) -> Result<bool>) -> Result<()> {
+        self.condition.prune(keep)?;
+        self.destination.prune(keep)?;
+        for (index, child) in self.children.iter_mut().enumerate() {
+            child
+                .prune(keep)
+                .map_err(|e| format!("子规则 {}：{e}", index + 1))?;
         }
-        for child in &mut self.children {
-            child.remove_destination(destination);
-        }
+        Ok(())
     }
 }
 
@@ -65,6 +67,18 @@ pub enum Destination {
 }
 
 impl Destination {
+    pub fn prune(&mut self, keep: &impl Fn(Reference) -> Result<bool>) -> Result<()> {
+        let object = match *self {
+            Self::Block => return Ok(()),
+            Self::Outbound(uuid) => Reference::Outbound(uuid),
+            Self::Inbound(uuid) => Reference::Inbound(uuid),
+        };
+        if !keep(object)? {
+            *self = Self::Block;
+        }
+        Ok(())
+    }
+
     fn name(self, config: &Config) -> String {
         match self {
             Self::Block => "黑洞".to_owned(),
