@@ -5,11 +5,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use crate::{
     Result,
     config::Store,
-    inbound::{Core, Inbound},
+    inbound::{Core, Ech, Inbound},
 };
 
-pub fn public(source: &Inbound, store: &Store) -> Result<String> {
-    let ech = &source.tls.ech;
+pub fn public(source: &Inbound, ech: &Ech, store: &Store) -> Result<String> {
     let text = if let Some(file) = &ech.key_file
         && (ech.keys.is_empty() || source.core == Core::Xray)
     {

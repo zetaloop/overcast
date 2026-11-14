@@ -6,7 +6,7 @@ use crate::{Result, connection::Network, form::fields, route::Destination};
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Client {
-    pub enabled: bool,
+    pub tls: crate::connection::Tls,
     pub public_key: String,
     pub short_id: String,
     pub signature_key: Option<String>,
@@ -18,7 +18,7 @@ pub struct Client {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Server {
-    pub enabled: bool,
+    pub tls: crate::inbound::Tls,
     pub target: String,
     pub target_network: Option<String>,
     pub network: Network,
@@ -234,7 +234,7 @@ fn random<const N: usize>() -> Result<[u8; N]> {
 }
 
 fields!(Client {
-    enabled: "启用",
+    tls: "TLS",
     public_key: "公钥",
     short_id: "短标识",
     signature_key: "ML-DSA-65 公钥",
@@ -244,7 +244,7 @@ fields!(Client {
 });
 
 fields!(Server {
-    enabled: "启用",
+    tls: "TLS",
     target: "握手目标",
     target_network: "目标网络类型",
     network: "目标连接参数",
@@ -268,3 +268,23 @@ fields!(Limit {
     bytes_per_second: "每秒字节数",
     burst_bytes_per_second: "突发每秒字节数",
 });
+
+impl crate::security::Handshake<crate::connection::Tls> for Client {
+    fn tls(&self) -> &crate::connection::Tls {
+        &self.tls
+    }
+
+    fn tls_mut(&mut self) -> &mut crate::connection::Tls {
+        &mut self.tls
+    }
+}
+
+impl crate::security::Handshake<crate::inbound::Tls> for Server {
+    fn tls(&self) -> &crate::inbound::Tls {
+        &self.tls
+    }
+
+    fn tls_mut(&mut self) -> &mut crate::inbound::Tls {
+        &mut self.tls
+    }
+}

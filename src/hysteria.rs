@@ -31,10 +31,7 @@ impl Default for Client {
             password: String::new(),
             core: Core::default(),
             hysteria: ClientOptions::default(),
-            tls: Tls {
-                enabled: true,
-                ..Tls::default()
-            },
+            tls: Tls::default(),
             network: Network::default(),
         }
     }

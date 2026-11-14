@@ -98,19 +98,21 @@ impl Connection {
             return;
         }
         let (address, tls) = match self {
-            Self::Http(value) => (&mut value.proxy.server, &mut value.tls),
-            Self::Socks(value) => (&mut value.proxy.server, &mut value.tls),
-            Self::Vless(value) => (&mut value.server, &mut value.tls),
-            Self::Vmess(value) => (&mut value.server, &mut value.tls),
-            Self::Trojan(value) => (&mut value.server, &mut value.tls),
-            Self::Shadowsocks(value) => (&mut value.server, &mut value.tls),
-            Self::Hysteria2(value) => (&mut value.server, &mut value.tls),
-            Self::AnyTls(value) => (&mut value.server, &mut value.tls),
-            Self::Forward(value) => (&mut value.server, &mut value.tls),
+            Self::Http(value) => (&mut value.proxy.server, value.security.tls_mut()),
+            Self::Socks(value) => (&mut value.proxy.server, value.security.tls_mut()),
+            Self::Vless(value) => (&mut value.server, value.security.tls_mut()),
+            Self::Vmess(value) => (&mut value.server, value.security.tls_mut()),
+            Self::Trojan(value) => (&mut value.server, value.security.tls_mut()),
+            Self::Shadowsocks(value) => (&mut value.server, value.security.tls_mut()),
+            Self::Hysteria2(value) => (&mut value.server, Some(&mut value.tls)),
+            Self::AnyTls(value) => (&mut value.server, value.security.tls_mut()),
+            Self::Forward(value) => (&mut value.server, value.security.tls_mut()),
             Self::Direct(_) => return,
             Self::Warp(_) => unreachable!(),
         };
-        if tls.enabled && tls.server_name.is_none() {
+        if let Some(tls) = tls
+            && tls.server_name.is_none()
+        {
             tls.server_name = Some(address.clone());
         }
         *address = server.to_owned();
@@ -202,9 +204,10 @@ impl Connection {
         let connection = match url.scheme() {
             "http" | "https" => Self::Http(Http {
                 proxy,
-                tls: Tls {
-                    enabled: url.scheme() == "https",
-                    ..Tls::default()
+                security: if url.scheme() == "https" {
+                    Security::Tls(Tls::default())
+                } else {
+                    Security::None
                 },
                 http: HttpOptions {
                     path: (!url.path().is_empty() && url.path() != "/")
@@ -229,7 +232,7 @@ impl Connection {
                         },
                         ..SocksOptions::default()
                     },
-                    tls: Tls::default(),
+                    security: Security::None,
                     network: Network::default(),
                     transport: Transport::default(),
                     multiplex: None,
@@ -572,7 +575,7 @@ pub(crate) fn ports(text: &str) -> Result<BTreeSet<u16>> {
 #[serde(default, deny_unknown_fields)]
 pub struct Http {
     pub proxy: Proxy,
-    pub tls: Tls,
+    pub security: Security,
     pub http: HttpOptions,
     pub network: Network,
     pub transport: Transport,
@@ -586,7 +589,7 @@ impl Default for Http {
                 port: 80,
                 ..Proxy::default()
             },
-            tls: Tls::default(),
+            security: Security::None,
             http: HttpOptions::default(),
             network: Network::default(),
             transport: Transport::default(),
@@ -599,7 +602,7 @@ impl Default for Http {
 #[serde(default, deny_unknown_fields)]
 pub struct Socks {
     pub proxy: Proxy,
-    pub tls: Tls,
+    pub security: Security,
     pub socks: SocksOptions,
     pub network: Network,
     pub transport: Transport,
@@ -613,7 +616,7 @@ impl Default for Socks {
                 port: 1080,
                 ..Proxy::default()
             },
-            tls: Tls::default(),
+            security: Security::None,
             socks: SocksOptions::default(),
             network: Network::default(),
             transport: Transport::default(),
@@ -700,7 +703,6 @@ pub struct HttpOptions {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tls {
-    pub enabled: bool,
     pub server_name: Option<String>,
     pub send_sni: Option<bool>,
     pub verify_certificate: Option<bool>,
@@ -731,14 +733,12 @@ pub struct Tls {
     pub spoof: Option<String>,
     pub spoof_method: Option<String>,
     pub key_log: Option<String>,
-    pub ech: Ech,
-    pub reality: crate::reality::Client,
+    pub ech: Option<Ech>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ech {
-    pub enabled: bool,
     pub config: Option<String>,
     pub config_file: Option<String>,
     pub query_name: Option<String>,
@@ -940,7 +940,7 @@ fields!(Proxy {
 
 fields!(Http {
     proxy: ..,
-    tls: "TLS",
+    security: "加密",
     http: "HTTP",
     transport: "传输",
     multiplex: "多路复用",
@@ -949,7 +949,7 @@ fields!(Http {
 
 fields!(Socks {
     proxy: ..,
-    tls: "TLS",
+    security: "加密",
     socks: "SOCKS",
     transport: "传输",
     multiplex: "多路复用",
@@ -988,7 +988,6 @@ fields!(HttpOptions {
 });
 
 fields!(Tls {
-    enabled: "启用",
     server_name: "服务名",
     send_sni: "发送 SNI",
     verify_certificate: "验证证书",
@@ -1020,7 +1019,6 @@ fields!(Tls {
     spoof_method: "伪装方式",
     key_log: "密钥日志文件",
     ech: "ECH",
-    reality: "REALITY",
 } groups {
     certificates: "证书" => [verify_names, system_roots, certificates, certificate_files, certificate_sha256, public_key_sha256, client_certificate, client_certificate_file, client_key, client_key_file],
     protocol: "版本与密码" => [min_version, max_version, cipher_suites, curves, fingerprint, engine],
@@ -1028,7 +1026,6 @@ fields!(Tls {
 });
 
 fields!(Ech {
-    enabled: "启用",
     config: "配置",
     config_file: "配置文件",
     query_name: "查询名称",
@@ -1084,3 +1081,5 @@ fields!(SocketOption {
     value: "值",
     kind: "类型",
 });
+
+pub type Security = crate::security::Security<Tls, crate::reality::Client>;

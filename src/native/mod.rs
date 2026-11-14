@@ -188,7 +188,7 @@ pub fn prepare(
     http.address = binding::Address::Any;
     if members.iter().any(|member| {
         let source = graph.entries[member.entry].inbound;
-        source.tls.enabled && !source.tls.reality.enabled
+        matches!(source.security, crate::inbound::Security::Tls(_))
     }) {
         builder.reserved.push(http.clone());
     }
@@ -369,7 +369,7 @@ pub fn prepare(
                 value.contains_key("fallback") || value.contains_key("fallback_for_alpn")
             });
         let service = builder.service(core, globals, BTreeMap::new());
-        if inbound.tls.enabled && !inbound.tls.reality.enabled {
+        if matches!(inbound.security, crate::inbound::Security::Tls(_)) {
             for member in &listener.members {
                 builder.services[service]
                     .certificates
@@ -379,9 +379,8 @@ pub fn prepare(
         let mut tags = Vec::new();
         for (part, mut value) in values.into_iter().enumerate() {
             progress.check()?;
-            if inbound.tls.enabled
-                && inbound.tls.reality.enabled
-                && let Some(Destination::Outbound(uuid)) = inbound.tls.reality.outbound
+            if let Some(reality) = inbound.security.reality()
+                && let Some(Destination::Outbound(uuid)) = reality.outbound
             {
                 let endpoint = builder.outbound(uuid, core, graph::Network::Tcp, Payload::Proxy)?;
                 let parent = builder.bridge(service, &endpoint)?;
@@ -405,7 +404,7 @@ pub fn prepare(
                     } else {
                         value.insert("port".to_owned(), json!(listener.binding.port_text()));
                     }
-                    if inbound.tls.enabled && !inbound.tls.reality.enabled {
+                    if matches!(inbound.security, crate::inbound::Security::Tls(_)) {
                         let paths: BTreeSet<_> = listener
                             .members
                             .iter()
@@ -486,7 +485,7 @@ pub fn prepare(
                 let (target_service, target_tags, _) = &receivers[target];
                 if service == *target_service
                     && target_tags.len() == 1
-                    && !source.tls.enabled
+                    && matches!(source.security, crate::inbound::Security::None)
                     && source.transport.is_default()
                     && matches!(
                         source.protocol,
@@ -1340,7 +1339,10 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
     let multiplex = source.multiplex().is_some_and(|mux| !mux.tcp_only);
     Ok(match source {
         Connection::Direct(_) => parent,
-        Connection::Forward(value) => [value.transport.supported(&value.tls, parent), parent[1]],
+        Connection::Forward(value) => [
+            value.transport.supported(&value.security, parent),
+            parent[1],
+        ],
         Connection::Hysteria2(value) => [
             parent[1] && value.hysteria.tcp.unwrap_or(true),
             parent[1] && value.hysteria.udp.unwrap_or(true),
@@ -1359,13 +1361,13 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
         Connection::Http(value) => {
             let transport =
                 if core == Core::SingBox && value.http.version == connection::HttpVersion::Http3 {
-                    if value.tls.enabled && value.tls.reality.enabled {
+                    if value.security.reality().is_some() {
                         !value.http.fixed_version && parent[0]
                     } else {
                         parent[1] || !value.http.fixed_version && parent[0]
                     }
                 } else if core == Core::Xray {
-                    value.transport.supported(&value.tls, parent)
+                    value.transport.supported(&value.security, parent)
                 } else {
                     parent[0]
                 };
@@ -1373,7 +1375,7 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
         }
         Connection::Socks(value) => {
             let transport = if core == Core::Xray {
-                value.transport.supported(&value.tls, parent)
+                value.transport.supported(&value.security, parent)
             } else {
                 parent[0]
             };
@@ -1386,21 +1388,21 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
             ]
         }
         Connection::Vless(value) => {
-            let transport = value.transport.supported(&value.tls, parent);
+            let transport = value.transport.supported(&value.security, parent);
             [
                 transport && value.vless.tcp.unwrap_or(true),
                 transport && value.vless.udp.unwrap_or(true),
             ]
         }
         Connection::Vmess(value) => {
-            let transport = value.transport.supported(&value.tls, parent);
+            let transport = value.transport.supported(&value.security, parent);
             [
                 transport && value.vmess.tcp.unwrap_or(true),
                 transport && value.vmess.udp.unwrap_or(true),
             ]
         }
         Connection::Trojan(value) => {
-            let transport = value.transport.supported(&value.tls, parent);
+            let transport = value.transport.supported(&value.security, parent);
             [
                 transport && value.trojan.tcp.unwrap_or(true),
                 transport && value.trojan.udp.unwrap_or(true),
@@ -1415,7 +1417,7 @@ fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool;
                             .is_some_and(|mode| mode == "quic");
                 parent[usize::from(udp)]
             } else {
-                value.transport.supported(&value.tls, parent)
+                value.transport.supported(&value.security, parent)
             };
             let uot = value.shadowsocks.udp_over_tcp.is_some()
                 || value

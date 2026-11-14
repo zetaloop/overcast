@@ -36,7 +36,7 @@ pub struct Inbound {
     pub protocol: Protocol,
     #[serde(default)]
     pub transport: Transport,
-    pub tls: Tls,
+    pub security: Security,
     pub listen: Listen,
 }
 
@@ -52,9 +52,10 @@ impl Inbound {
             credentials: None,
             protocol: kind.protocol(),
             transport: Transport::default(),
-            tls: Tls {
-                enabled: !matches!(kind, Kind::Mixed | Kind::Shadowsocks | Kind::Forward),
-                ..Tls::default()
+            security: if matches!(kind, Kind::Mixed | Kind::Shadowsocks | Kind::Forward) {
+                Security::None
+            } else {
+                Security::Tls(Tls::default())
             },
             listen: Listen::default(),
         }
@@ -85,6 +86,13 @@ impl Inbound {
             user::password(&credentials.password)?;
         }
         Ok(())
+    }
+
+    pub fn quic(&self) -> bool {
+        match &self.security {
+            Security::Tls(tls) => self.transport.udp(true, &tls.alpn),
+            _ => self.transport.udp(false, &[]),
+        }
     }
 
     pub fn ports(&self) -> Result<BTreeSet<u16>> {
@@ -443,7 +451,6 @@ impl Default for Socks {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tls {
-    pub enabled: bool,
     pub server_name: Option<String>,
     pub alpn: Vec<String>,
     pub min_version: Option<String>,
@@ -461,8 +468,7 @@ pub struct Tls {
     pub kernel_tx: Option<bool>,
     pub kernel_rx: Option<bool>,
     pub key_log: Option<String>,
-    pub ech: Ech,
-    pub reality: crate::reality::Server,
+    pub ech: Option<Ech>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
@@ -479,7 +485,6 @@ pub enum ClientAuth {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ech {
-    pub enabled: bool,
     pub keys: Vec<String>,
     pub key_file: Option<String>,
 }
@@ -608,8 +613,8 @@ fn edit(
                 items.push(credentials);
             }
         }
-        let mut tls = Item::new("tls", "TLS".stylized());
-        tls.value = inbound.tls.enabled.text();
+        let mut security = Item::new("security", "加密".stylized());
+        security.value = inbound.security.text();
         let mut transport = Item::new("transport", "传输".stylized());
         transport.value = inbound.transport.text();
         let mut listen = Item::new("listen", "监听".stylized());
@@ -617,7 +622,7 @@ fn edit(
         items.extend([
             Item::new("options", "协议参数".stylized()),
             transport,
-            tls,
+            security,
             listen,
         ]);
         if existing && !changing && inbound.listen.enabled {
@@ -776,7 +781,7 @@ fn edit(
                         inbound.protocol = value
                     }),
                 ),
-                "tls" => edit!(tls),
+                "security" => edit!(security),
                 "transport" => edit!(transport),
                 "listen" => edit!(listen),
                 "handshake" => store.load().and_then(|config| {
@@ -1031,7 +1036,6 @@ fields!(Socks {
 });
 
 fields!(Tls {
-    enabled: "启用",
     server_name: "服务名",
     alpn: "ALPN",
     min_version: "最低版本",
@@ -1050,7 +1054,6 @@ fields!(Tls {
     kernel_rx: "内核接收",
     key_log: "密钥日志文件",
     ech: "ECH",
-    reality: "REALITY",
 } groups {
     certificates: "客户端认证" => [client_auth, client_certificates, client_certificate_files, client_certificate_sha256, client_public_key_sha256],
     protocol: "版本与密码" => [min_version, max_version, cipher_suites, curves],
@@ -1058,7 +1061,6 @@ fields!(Tls {
 });
 
 fields!(Ech {
-    enabled: "启用",
     keys: "密钥",
     key_file: "密钥文件",
 });
@@ -1091,3 +1093,5 @@ fields!(Listen {
     binding: "绑定与路由" => [routing_mark, namespace, reuse_address, ipv6_only, socket_options],
     forwarding: "来源信息" => [proxy_protocol, forwarded_sources],
 });
+
+pub type Security = crate::security::Security<Tls, crate::reality::Server>;

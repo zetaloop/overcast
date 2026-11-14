@@ -3,7 +3,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     Result,
     config::Store,
-    connection::{self, AddressStrategy, Connection, FastOpen, SocksVersion},
+    connection::{self, AddressStrategy, Connection, FastOpen, Security, SocksVersion},
     inbound::{self, Inbound, Protocol},
 };
 
@@ -73,10 +73,13 @@ pub fn outbound(
             output.insert("server".to_owned(), json!(value.server));
             output.insert("server_port".to_owned(), json!(value.port()?));
             output.insert("password".to_owned(), json!(value.password));
-            output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+            output.insert(
+                "tls".to_owned(),
+                client_tls(&Security::Tls(value.tls.clone()), store, globals)?,
+            );
         }
         Connection::AnyTls(value) => {
-            if !value.tls.enabled {
+            if matches!(value.security, Security::None) {
                 return unsupported("sing-box AnyTLS 出站使用 TLS");
             }
             if matches!(value.network.tcp_fast_open, Some(FastOpen::Enabled(true))) {
@@ -101,7 +104,10 @@ pub fn outbound(
             output.insert("server".to_owned(), json!(value.server));
             output.insert("server_port".to_owned(), json!(value.port));
             output.insert("password".to_owned(), json!(value.password));
-            output.insert("tls".to_owned(), client_tls(&value.tls, store, globals)?);
+            output.insert(
+                "tls".to_owned(),
+                client_tls(&value.security, store, globals)?,
+            );
         }
         Connection::Forward(_) => unreachable!(),
         Connection::Http(value) => {
@@ -123,15 +129,15 @@ pub fn outbound(
             options.copy(&mut output, &["path", "headers"]);
             http(&mut options, &mut output)?;
             options.finish("sing-box HTTP")?;
-            if value.tls.enabled {
+            if !matches!(value.security, Security::None) {
                 output.insert(
                     "tls".to_owned(),
-                    client_tls(&value.transport.client_tls(&value.tls), store, globals)?,
+                    client_tls(&value.transport.client_tls(&value.security), store, globals)?,
                 );
             }
         }
         Connection::Socks(value) => {
-            if value.tls.enabled {
+            if !matches!(value.security, Security::None) {
                 return unsupported("sing-box SOCKS 出站没有 TLS 配置");
             }
             let mut options = Options::new(&value.socks)?;
@@ -212,17 +218,17 @@ pub fn outbound(
                 );
             }
             options.finish("sing-box VLESS")?;
-            if value.tls.enabled {
+            if !matches!(value.security, Security::None) {
                 output.insert(
                     "tls".to_owned(),
-                    client_tls(&value.transport.client_tls(&value.tls), store, globals)?,
+                    client_tls(&value.transport.client_tls(&value.security), store, globals)?,
                 );
             }
             if let Some(transport) = super::transport::singbox(
                 &value.transport,
                 false,
-                value.tls.enabled,
-                value.tls.reality.enabled,
+                !matches!(value.security, Security::None),
+                value.security.reality().is_some(),
             )? {
                 output.insert("transport".to_owned(), transport);
             }
@@ -274,17 +280,17 @@ pub fn outbound(
                     super::multiplex::client(multiplex, inbound::Core::SingBox)?,
                 );
             }
-            if value.tls.enabled {
+            if !matches!(value.security, Security::None) {
                 output.insert(
                     "tls".to_owned(),
-                    client_tls(&value.transport.client_tls(&value.tls), store, globals)?,
+                    client_tls(&value.transport.client_tls(&value.security), store, globals)?,
                 );
             }
             if let Some(transport) = super::transport::singbox(
                 &value.transport,
                 false,
-                value.tls.enabled,
-                value.tls.reality.enabled,
+                !matches!(value.security, Security::None),
+                value.security.reality().is_some(),
             )? {
                 output.insert("transport".to_owned(), transport);
             }
@@ -311,23 +317,23 @@ pub fn outbound(
                     super::multiplex::client(multiplex, inbound::Core::SingBox)?,
                 );
             }
-            if value.tls.enabled {
+            if !matches!(value.security, Security::None) {
                 output.insert(
                     "tls".to_owned(),
-                    client_tls(&value.transport.client_tls(&value.tls), store, globals)?,
+                    client_tls(&value.transport.client_tls(&value.security), store, globals)?,
                 );
             }
             if let Some(transport) = super::transport::singbox(
                 &value.transport,
                 false,
-                value.tls.enabled,
-                value.tls.reality.enabled,
+                !matches!(value.security, Security::None),
+                value.security.reality().is_some(),
             )? {
                 output.insert("transport".to_owned(), transport);
             }
         }
         Connection::Shadowsocks(value) => {
-            if value.tls.enabled || !value.transport.is_default() {
+            if !matches!(value.security, Security::None) || !value.transport.is_default() {
                 return unsupported("sing-box Shadowsocks 通过 SIP003 插件配置传输封装");
             }
             let mut options = Options::new(&value.shadowsocks)?;
@@ -484,8 +490,8 @@ pub fn listeners(
         options.copy(&mut output, &["padding_scheme"]);
         options.finish("sing-box AnyTLS 入站")?;
         output.insert("type".to_owned(), json!("anytls"));
-        if source.tls.enabled {
-            output.insert("tls".to_owned(), server_tls(source, store)?);
+        if let Some(tls) = server_tls(source, store)? {
+            output.insert("tls".to_owned(), tls);
         }
         return Ok(vec![output]);
     }
@@ -496,7 +502,9 @@ pub fn listeners(
             inbound::Core::SingBox,
             store,
         )?);
-        output.insert("tls".to_owned(), server_tls(source, store)?);
+        if let Some(tls) = server_tls(source, store)? {
+            output.insert("tls".to_owned(), tls);
+        }
         return Ok(vec![output]);
     }
     if let Protocol::Vless(value) = &source.protocol {
@@ -514,14 +522,14 @@ pub fn listeners(
         }
         options.finish("sing-box VLESS 入站")?;
         output.insert("type".to_owned(), json!("vless"));
-        if source.tls.enabled {
-            output.insert("tls".to_owned(), server_tls(source, store)?);
+        if let Some(tls) = server_tls(source, store)? {
+            output.insert("tls".to_owned(), tls);
         }
         if let Some(transport) = super::transport::singbox(
             &source.transport,
             true,
-            source.tls.enabled,
-            source.tls.reality.enabled,
+            !matches!(source.security, inbound::Security::None),
+            source.security.reality().is_some(),
         )? {
             output.insert("transport".to_owned(), transport);
         }
@@ -542,14 +550,14 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::SingBox)?,
             );
         }
-        if source.tls.enabled {
-            output.insert("tls".to_owned(), server_tls(source, store)?);
+        if let Some(tls) = server_tls(source, store)? {
+            output.insert("tls".to_owned(), tls);
         }
         if let Some(transport) = super::transport::singbox(
             &source.transport,
             true,
-            source.tls.enabled,
-            source.tls.reality.enabled,
+            !matches!(source.security, inbound::Security::None),
+            source.security.reality().is_some(),
         )? {
             output.insert("transport".to_owned(), transport);
         }
@@ -570,14 +578,14 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::SingBox)?,
             );
         }
-        if source.tls.enabled {
-            output.insert("tls".to_owned(), server_tls(source, store)?);
+        if let Some(tls) = server_tls(source, store)? {
+            output.insert("tls".to_owned(), tls);
         }
         if let Some(transport) = super::transport::singbox(
             &source.transport,
             true,
-            source.tls.enabled,
-            source.tls.reality.enabled,
+            !matches!(source.security, inbound::Security::None),
+            source.security.reality().is_some(),
         )? {
             output.insert("transport".to_owned(), transport);
         }
@@ -585,7 +593,7 @@ pub fn listeners(
         return Ok(vec![output]);
     }
     if let Protocol::Shadowsocks(value) = &source.protocol {
-        if source.tls.enabled || !source.transport.is_default() {
+        if !matches!(source.security, inbound::Security::None) || !source.transport.is_default() {
             return unsupported("sing-box Shadowsocks 入站使用原生 TCP/UDP 监听");
         }
         let multi = super::shadowsocks::multi(source, users.len());
@@ -643,7 +651,7 @@ pub fn listeners(
         if value.user_level.is_some() {
             return unsupported("sing-box 固定转发入口没有用户等级配置");
         }
-        if source.tls.enabled || !source.transport.is_default() {
+        if !matches!(source.security, inbound::Security::None) || !source.transport.is_default() {
             return unsupported("sing-box 固定转发入口使用原生 TCP/UDP 监听");
         }
         let (server, port) = target.ok_or("转发入口缺少后继连接")?;
@@ -673,11 +681,11 @@ pub fn listeners(
         options.take("enabled");
         options.finish("sing-box SOCKS 入站")?;
     }
-    if source.tls.enabled {
+    if let Some(tls) = server_tls(source, store)? {
         if !value.http.enabled {
             return unsupported("sing-box 的 SOCKS TLS 使用 Mixed 入口，需要同时启用 HTTP");
         }
-        output.insert("tls".to_owned(), server_tls(source, store)?);
+        output.insert("tls".to_owned(), tls);
     }
     if !value.http.enabled {
         output.insert("type".to_owned(), json!("socks"));
@@ -860,11 +868,14 @@ fn fallbacks(
         }
         let target = json!({"server": host, "server_port": port});
         if let Some(alpn) = rule.alpn.as_ref().filter(|value| !value.is_empty()) {
-            if source.tls.enabled {
-                if source.tls.reality.enabled {
+            match &source.security {
+                inbound::Security::None => {}
+                inbound::Security::Tls(_) => {
+                    protocols.insert(alpn.clone(), target);
+                }
+                inbound::Security::Reality(_) => {
                     return unsupported("sing-box REALITY 不提供 ALPN 协商结果");
                 }
-                protocols.insert(alpn.clone(), target);
             }
         } else {
             default = Some(target);
@@ -873,7 +884,11 @@ fn fallbacks(
     if let Some(default) = &default
         && !protocols.is_empty()
     {
-        let mut alpn = source.tls.alpn.clone();
+        let mut alpn = source
+            .security
+            .tls()
+            .map(|tls| tls.alpn.clone())
+            .unwrap_or_default();
         match &source.transport {
             crate::transport::Transport::Http(_) => {
                 if alpn.is_empty() {
@@ -902,20 +917,20 @@ fn fallbacks(
 }
 
 fn client_tls(
-    source: &connection::Tls,
+    security: &Security,
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Value> {
-    if source.reality.enabled {
-        return super::reality::singbox(source, store);
-    }
+    let source = match security {
+        Security::None => return Ok(json!({})),
+        Security::Tls(tls) => tls,
+        Security::Reality(reality) => return super::reality::singbox(reality, store),
+    };
     let mut options = Options::new(source)?;
-    options.take("reality");
-    let mut output = Map::new();
+    let mut output = Map::from_iter([("enabled".to_owned(), json!(true))]);
     options.copy(
         &mut output,
         &[
-            "enabled",
             "server_name",
             "engine",
             "alpn",
@@ -990,15 +1005,15 @@ fn client_tls(
         }));
     }
     options.take("ech");
-    if source.ech.enabled {
+    if let Some(value) = &source.ech {
         let mut ech = Map::from_iter([("enabled".to_owned(), json!(true))]);
-        if let Some(value) = &source.ech.config {
+        if let Some(value) = &value.config {
             ech.insert("config".to_owned(), json!(crate::ech::pem(value)?));
         }
-        if let Some(value) = &source.ech.config_file {
-            ech.insert("config_path".to_owned(), json!(path(store, value)));
+        if let Some(file) = &value.config_file {
+            ech.insert("config_path".to_owned(), json!(path(store, file)));
         }
-        if let Some(value) = &source.ech.query_name {
+        if let Some(value) = &value.query_name {
             ech.insert("query_server_name".to_owned(), json!(value));
         }
         output.insert("ech".to_owned(), json!(ech));
@@ -1007,29 +1022,32 @@ fn client_tls(
     Ok(json!(output))
 }
 
-fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
-    if source.tls.reality.enabled {
-        if let Protocol::Mixed(protocol) = &source.protocol
-            && protocol
-                .http
-                .versions
-                .contains(&inbound::HttpVersion::Http3)
-        {
-            return unsupported("REALITY 握手使用 TCP，无法提供 HTTP/3 监听");
+fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
+    let tls = match &source.security {
+        inbound::Security::None => return Ok(None),
+        inbound::Security::Tls(tls) => tls,
+        inbound::Security::Reality(reality) => {
+            if let Protocol::Mixed(protocol) = &source.protocol
+                && protocol
+                    .http
+                    .versions
+                    .contains(&inbound::HttpVersion::Http3)
+            {
+                return unsupported("REALITY 握手使用 TCP，无法提供 HTTP/3 监听");
+            }
+            return super::reality::server(source, reality).map(Some);
         }
-        return super::reality::server(source);
-    }
-    let mut options = Options::new(&source.tls)?;
-    options.take("reality");
+    };
+    let mut options = Options::new(tls)?;
     let (certificate, key) = certificate_paths(store, source)?;
     let mut output = Map::from_iter([
+        ("enabled".to_owned(), json!(true)),
         ("certificate_path".to_owned(), json!(certificate)),
         ("key_path".to_owned(), json!(key)),
     ]);
     options.copy(
         &mut output,
         &[
-            "enabled",
             "server_name",
             "alpn",
             "min_version",
@@ -1056,9 +1074,7 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
         output.insert(
             "client_certificate_path".to_owned(),
             json!(
-                source
-                    .tls
-                    .client_certificate_files
+                tls.client_certificate_files
                     .iter()
                     .map(|value| path(store, value))
                     .collect::<Vec<_>>()
@@ -1069,12 +1085,12 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
         (
             "client_certificate_sha256",
             "client_certificate_sha256",
-            &source.tls.client_certificate_sha256,
+            &tls.client_certificate_sha256,
         ),
         (
             "client_public_key_sha256",
             "client_certificate_public_key_sha256",
-            &source.tls.client_public_key_sha256,
+            &tls.client_public_key_sha256,
         ),
     ] {
         if options.take(name).is_some() {
@@ -1082,16 +1098,16 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
         }
     }
     options.take("ech");
-    if source.tls.ech.enabled {
+    if let Some(value) = &tls.ech {
         let mut ech = Map::from_iter([("enabled".to_owned(), json!(true))]);
-        if !source.tls.ech.keys.is_empty() {
-            ech.insert("key".to_owned(), json!(source.tls.ech.keys));
+        if !value.keys.is_empty() {
+            ech.insert("key".to_owned(), json!(value.keys));
         }
-        if let Some(value) = &source.tls.ech.key_file {
+        if let Some(value) = &value.key_file {
             ech.insert("key_path".to_owned(), json!(path(store, value)));
         }
         output.insert("ech".to_owned(), json!(ech));
     }
     options.finish("sing-box 服务端 TLS")?;
-    Ok(json!(output))
+    Ok(Some(json!(output)))
 }

@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Result,
-    connection::{Core, Network, Tls},
+    connection::{Core, Network, Security},
     form::{choices, fields},
     transport::Transport,
 };
@@ -18,7 +18,7 @@ pub struct Client {
     pub password: String,
     pub core: Core,
     pub shadowsocks: ClientOptions,
-    pub tls: Tls,
+    pub security: Security,
     pub transport: Transport,
     pub multiplex: Option<crate::multiplex::Client>,
     pub network: Network,
@@ -33,7 +33,7 @@ impl Default for Client {
             password: String::new(),
             core: Core::default(),
             shadowsocks: ClientOptions::default(),
-            tls: Tls::default(),
+            security: Security::None,
             transport: Transport::default(),
             multiplex: None,
             network: Network::default(),
@@ -260,7 +260,7 @@ fields!(Client {
     password: "密码",
     core: "核心",
     shadowsocks: "Shadowsocks",
-    tls: "TLS",
+    security: "加密",
     transport: "传输",
     multiplex: "多路复用",
     network: "网络",

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    connection::{Core, Network, Tls},
+    connection::{Core, Network, Security, Tls},
     form::fields,
     inbound::Fallback,
     transport::Transport,
@@ -16,7 +16,7 @@ pub struct Client {
     pub password: String,
     pub core: Core,
     pub trojan: ClientOptions,
-    pub tls: Tls,
+    pub security: Security,
     pub transport: Transport,
     pub multiplex: Option<crate::multiplex::Client>,
     pub network: Network,
@@ -31,10 +31,7 @@ impl Default for Client {
             password: String::new(),
             core: Core::default(),
             trojan: ClientOptions::default(),
-            tls: Tls {
-                enabled: true,
-                ..Tls::default()
-            },
+            security: Security::Tls(Tls::default()),
             transport: Transport::default(),
             multiplex: None,
             network: Network::default(),
@@ -66,7 +63,7 @@ fields!(Client {
     password: "密码",
     core: "核心",
     trojan: "Trojan",
-    tls: "TLS",
+    security: "加密",
     transport: "传输",
     multiplex: "多路复用",
     network: "网络",

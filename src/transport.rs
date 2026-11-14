@@ -5,7 +5,7 @@ use termina::style::StyleExt;
 
 use crate::{
     Result,
-    connection::{HttpVersion, Network, Tls},
+    connection::{HttpVersion, Network, Security, Tls},
     form::{self, Value, choices, fields},
     tui::{Action, Item, Menu, Screen},
 };
@@ -238,7 +238,7 @@ pub struct Download {
     pub server: String,
     pub port: u16,
     pub http: XHttpOptions,
-    pub tls: Tls,
+    pub security: Security,
     pub network: Network,
     pub quic: Quic,
 }
@@ -249,10 +249,7 @@ impl Default for Download {
             server: String::new(),
             port: 443,
             http: XHttpOptions::default(),
-            tls: Tls {
-                enabled: true,
-                ..Tls::default()
-            },
+            security: Security::Tls(Tls::default()),
             network: Network::default(),
             quic: Quic::default(),
         }
@@ -307,11 +304,10 @@ pub enum BbrProfile {
 }
 
 impl Transport {
-    pub fn client_tls<'a>(&self, tls: &'a Tls) -> Cow<'a, Tls> {
-        let mut tls = Cow::Borrowed(tls);
+    pub fn client_tls<'a>(&self, security: &'a Security) -> Cow<'a, Security> {
+        let mut security = Cow::Borrowed(security);
         if let Self::Http(http) = self
-            && tls.enabled
-            && !tls.reality.enabled
+            && let Security::Tls(tls) = security.as_ref()
             && tls.alpn.is_empty()
         {
             let alpn = match http.version(true) {
@@ -319,11 +315,13 @@ impl Transport {
                 HttpVersion::Http2 => Some("h2"),
                 _ => None,
             };
-            if let Some(alpn) = alpn {
-                tls.to_mut().alpn.push(alpn.to_owned());
+            if let Some(alpn) = alpn
+                && let Security::Tls(tls) = security.to_mut()
+            {
+                tls.alpn.push(alpn.to_owned());
             }
         }
-        tls
+        security
     }
 
     pub fn is_default(&self) -> bool {
@@ -335,14 +333,19 @@ impl Transport {
             || matches!(self, Self::XHttp(_)) && tls && alpn == ["h3"]
     }
 
-    pub fn supported(&self, tls: &Tls, networks: [bool; 2]) -> bool {
-        networks[usize::from(self.udp(tls.enabled && !tls.reality.enabled, &tls.alpn))]
+    pub fn quic(&self, security: &Security) -> bool {
+        match security {
+            Security::Tls(tls) => self.udp(true, &tls.alpn),
+            _ => self.udp(false, &[]),
+        }
+    }
+
+    pub fn supported(&self, security: &Security, networks: [bool; 2]) -> bool {
+        networks[usize::from(self.quic(security))]
             && match self {
                 Self::XHttp(value) => value.download.as_ref().is_none_or(|download| {
                     networks[usize::from(
-                        download.tls.enabled
-                            && !download.tls.reality.enabled
-                            && download.tls.alpn == ["h3"],
+                        matches!(&download.security, Security::Tls(tls) if tls.alpn == ["h3"]),
                     )]
                 }),
                 _ => true,
@@ -704,7 +707,7 @@ fields!(Download {
     server: "地址",
     port: "端口",
     http: "XHTTP",
-    tls: "TLS",
+    security: "加密",
     network: "网络",
     quic: "QUIC",
 });

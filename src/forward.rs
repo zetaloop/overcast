@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    connection::{Core, Network, Tls},
+    connection::{Core, Network, Security},
     form::fields,
     route::Destination,
     transport::Transport,
@@ -14,7 +14,7 @@ pub struct Client {
     pub server: String,
     pub port: u16,
     pub core: Core,
-    pub tls: Tls,
+    pub security: Security,
     pub transport: Transport,
     pub network: Network,
 }
@@ -26,7 +26,7 @@ impl Default for Client {
             server: String::new(),
             port: 443,
             core: Core::default(),
-            tls: Tls::default(),
+            security: Security::None,
             transport: Transport::default(),
             network: Network::default(),
         }
@@ -58,7 +58,7 @@ fields!(Client {
     server: "地址",
     port: "端口",
     core: "核心",
-    tls: "TLS",
+    security: "加密",
     transport: "传输",
     network: "网络",
 });

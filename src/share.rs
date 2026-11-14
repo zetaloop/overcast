@@ -12,7 +12,7 @@ use url::{Host, Url};
 use crate::{
     Result,
     config::Store,
-    connection::{self, Connection, HttpVersion, SocksVersion, Tls},
+    connection::{self, Connection, HttpVersion, Security, SocksVersion},
     native::options::Options,
     transport::{Header, Transport},
     tui::{Action, Item, Menu, Screen},
@@ -69,87 +69,79 @@ pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<Str
     let mut inner = values.pop().ok_or("直连没有远端分享链接")?;
     while let Some(outer) = values.pop() {
         Options::new(outer.network())?.finish("分享链接")?;
-        match outer {
-            Connection::Forward(value) => {
-                let (server, port, tls, transport) = match &mut inner {
-                    Connection::Http(value) => (
-                        &mut value.proxy.server,
-                        &mut value.proxy.port,
-                        &mut value.tls,
-                        Some(&mut value.transport),
-                    ),
-                    Connection::Socks(value) => (
-                        &mut value.proxy.server,
-                        &mut value.proxy.port,
-                        &mut value.tls,
-                        Some(&mut value.transport),
-                    ),
-                    Connection::Vless(value) => (
-                        &mut value.server,
-                        &mut value.port,
-                        &mut value.tls,
-                        Some(&mut value.transport),
-                    ),
-                    Connection::Vmess(value) => (
-                        &mut value.server,
-                        &mut value.port,
-                        &mut value.tls,
-                        Some(&mut value.transport),
-                    ),
-                    Connection::Trojan(value) => (
-                        &mut value.server,
-                        &mut value.port,
-                        &mut value.tls,
-                        Some(&mut value.transport),
-                    ),
-                    Connection::Shadowsocks(value) => (
-                        &mut value.server,
-                        &mut value.port,
-                        &mut value.tls,
-                        Some(&mut value.transport),
-                    ),
-                    Connection::Forward(value) => (
-                        &mut value.server,
-                        &mut value.port,
-                        &mut value.tls,
-                        Some(&mut value.transport),
-                    ),
-                    Connection::Direct(_) => unreachable!(),
-                    Connection::Warp(_) => return Err("WARP 连接使用连接路径 JSON 分享".into()),
-                    Connection::Hysteria2(value) => {
-                        if !value.hysteria.ports.is_empty() {
-                            return Err("多段跳跃端口连接使用连接路径 JSON 分享".into());
-                        }
-                        (&mut value.server, &mut value.port, &mut value.tls, None)
-                    }
-                    Connection::AnyTls(value) => {
-                        (&mut value.server, &mut value.port, &mut value.tls, None)
-                    }
-                };
-                if value.tls.enabled && tls.enabled {
-                    return Err("嵌套 TLS 连接使用连接路径 JSON 分享".into());
-                }
-                if !value.transport.is_default() && tls.enabled {
-                    return Err("传输内部的 TLS 连接使用连接路径 JSON 分享".into());
-                }
-                if tls.enabled && tls.server_name.is_none() {
-                    tls.server_name = Some(server.clone());
-                }
-                if value.tls.enabled {
-                    *tls = value.tls;
-                }
-                if !value.transport.is_default() {
-                    let Some(transport) = transport.filter(|transport| transport.is_default())
-                    else {
-                        return Err("嵌套传输连接使用连接路径 JSON 分享".into());
-                    };
-                    *transport = value.transport;
-                }
-                *server = value.server;
-                *port = value.port;
+        let Connection::Forward(value) = outer else {
+            return Err("多段代理连接使用连接路径 JSON 分享".into());
+        };
+        inner.set_server(&value.server);
+        let (port, security, transport) = match &mut inner {
+            Connection::Http(value) => (
+                &mut value.proxy.port,
+                Some(&mut value.security),
+                Some(&mut value.transport),
+            ),
+            Connection::Socks(value) => (
+                &mut value.proxy.port,
+                Some(&mut value.security),
+                Some(&mut value.transport),
+            ),
+            Connection::Vless(value) => (
+                &mut value.port,
+                Some(&mut value.security),
+                Some(&mut value.transport),
+            ),
+            Connection::Vmess(value) => (
+                &mut value.port,
+                Some(&mut value.security),
+                Some(&mut value.transport),
+            ),
+            Connection::Trojan(value) => (
+                &mut value.port,
+                Some(&mut value.security),
+                Some(&mut value.transport),
+            ),
+            Connection::Shadowsocks(value) => (
+                &mut value.port,
+                Some(&mut value.security),
+                Some(&mut value.transport),
+            ),
+            Connection::Forward(value) => (
+                &mut value.port,
+                Some(&mut value.security),
+                Some(&mut value.transport),
+            ),
+            Connection::Direct(_) => unreachable!(),
+            Connection::Warp(_) => {
+                return Err("WARP 连接使用连接路径 JSON 分享".into());
             }
-            _ => return Err("多段代理连接使用连接路径 JSON 分享".into()),
+            Connection::Hysteria2(value) => {
+                if !value.hysteria.ports.is_empty() {
+                    return Err("多段跳跃端口连接使用连接路径 JSON 分享".into());
+                }
+                (&mut value.port, None, None)
+            }
+            Connection::AnyTls(value) => (&mut value.port, Some(&mut value.security), None),
+        };
+        let secure = security
+            .as_deref()
+            .is_none_or(|security| !matches!(security, Security::None));
+        if !matches!(value.security, Security::None) && secure {
+            return Err("嵌套 TLS 连接使用连接路径 JSON 分享".into());
         }
+        if !value.transport.is_default() && secure {
+            return Err("传输内部的 TLS 连接使用连接路径 JSON 分享".into());
+        }
+        if let Some(security) = security
+            && !matches!(value.security, Security::None)
+        {
+            *security = value.security;
+        }
+        if !value.transport.is_default() {
+            let Some(transport) = transport.filter(|transport| transport.is_default()) else {
+                return Err("嵌套传输连接使用连接路径 JSON 分享".into());
+            };
+            *transport = value.transport;
+        }
+        *port = value.port;
     }
     link(&inner, name, store)
 }
@@ -173,13 +165,18 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             {
                 return Err("HTTP 分享链接使用标准 HTTP/HTTPS 代理连接".into());
             }
-            if value.tls.enabled {
-                let mut tls = value.tls.clone();
-                tls.enabled = false;
-                if tls.server_name.as_deref() == Some(value.proxy.server.as_str()) {
-                    tls.server_name = None;
+            match &value.security {
+                Security::None => {}
+                Security::Tls(tls) => {
+                    let mut tls = tls.clone();
+                    if tls.server_name.as_deref() == Some(value.proxy.server.as_str()) {
+                        tls.server_name = None;
+                    }
+                    Options::new(&tls)?.finish("HTTP 分享链接")?;
                 }
-                Options::new(&tls)?.finish("HTTP 分享链接")?;
+                Security::Reality(_) => {
+                    return Err("HTTP 分享链接使用标准 HTTP/HTTPS 代理连接".into());
+                }
             }
             if !value.http.headers.is_empty() {
                 return Err("HTTP 代理分享链接没有自定义请求头字段".into());
@@ -188,10 +185,17 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
                 value.proxy.username.as_deref(),
                 value.proxy.password.as_deref(),
             );
-            (if value.tls.enabled { "https" } else { "http" }, user)
+            (
+                if matches!(value.security, Security::None) {
+                    "http"
+                } else {
+                    "https"
+                },
+                user,
+            )
         }
         Connection::Socks(value) => {
-            if value.tls.enabled || !value.transport.is_default() {
+            if !matches!(value.security, Security::None) || !value.transport.is_default() {
                 return Err("SOCKS 分享链接使用原生 SOCKS 连接".into());
             }
             let user = if value.socks.version == SocksVersion::V5
@@ -232,16 +236,16 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             {
                 query.insert("encryption".to_owned(), json!(value));
             }
-            tls(&value.tls, &mut query, store)?;
-            transport(&value.transport, &value.tls, &mut query, store)?;
+            tls(&value.security, &mut query, store)?;
+            transport(&value.transport, &value.security, &mut query, store)?;
             (
                 "vless",
                 format!("{}@", utf8_percent_encode(&value.uuid, COMPONENT)),
             )
         }
         Connection::Vmess(value) => {
-            tls(&value.tls, &mut query, store)?;
-            transport(&value.transport, &value.tls, &mut query, store)?;
+            tls(&value.security, &mut query, store)?;
+            transport(&value.transport, &value.security, &mut query, store)?;
             if query.keys().all(|key| {
                 matches!(
                     key.as_str(),
@@ -319,12 +323,16 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Trojan(value) => {
-            tls(&value.tls, &mut query, store)?;
-            transport(&value.transport, &value.tls, &mut query, store)?;
-            if !value.tls.enabled {
-                query.insert("security".to_owned(), json!("none"));
-            } else if !value.tls.reality.enabled {
-                query.remove("security");
+            tls(&value.security, &mut query, store)?;
+            transport(&value.transport, &value.security, &mut query, store)?;
+            match value.security {
+                Security::None => {
+                    query.insert("security".to_owned(), json!("none"));
+                }
+                Security::Tls(_) => {
+                    query.remove("security");
+                }
+                Security::Reality(_) => {}
             }
             (
                 "trojan",
@@ -343,12 +351,13 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
                 options.take("reuse");
             }
             options.finish("AnyTLS 分享链接")?;
-            if !value.tls.enabled {
-                return Err("AnyTLS 分享链接使用 TLS".into());
-            }
-            tls(&value.tls, &mut query, store)?;
-            if !value.tls.reality.enabled {
-                query.remove("security");
+            match value.security {
+                Security::None => return Err("AnyTLS 分享链接使用 TLS".into()),
+                Security::Tls(_) => {
+                    tls(&value.security, &mut query, store)?;
+                    query.remove("security");
+                }
+                Security::Reality(_) => tls(&value.security, &mut query, store)?,
             }
             if let Some(value) = query.remove("allowInsecure") {
                 query.insert("insecure".to_owned(), value);
@@ -369,10 +378,7 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
                 options.take("udp");
             }
             options.finish("Hysteria 2 分享链接")?;
-            tls(&value.tls, &mut query, store)?;
-            if !value.tls.enabled || value.tls.reality.enabled {
-                return Err("Hysteria 2 分享链接使用 TLS".into());
-            }
+            tls(&Security::Tls(value.tls.clone()), &mut query, store)?;
             query.remove("security");
             if let Some(value) = query.remove("allowInsecure") {
                 query.insert("insecure".to_owned(), value);
@@ -397,7 +403,7 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Shadowsocks(value) => {
-            if value.tls.enabled || !value.transport.is_default() {
+            if !matches!(value.security, Security::None) || !value.transport.is_default() {
                 return Err("Shadowsocks 分享链接通过 SIP003 插件描述传输封装".into());
             }
             let cipher = serde_json::to_value(value.shadowsocks.cipher)?;
@@ -486,22 +492,18 @@ fn credentials(username: Option<&str>, password: Option<&str>) -> String {
     value
 }
 
-fn tls(source: &Tls, query: &mut Map<String, Value>, store: &Store) -> Result<()> {
-    if !source.enabled {
-        return Ok(());
-    }
+fn tls(security: &Security, query: &mut Map<String, Value>, store: &Store) -> Result<()> {
+    let (source, reality) = match security {
+        Security::None => return Ok(()),
+        Security::Tls(tls) => (tls, None),
+        Security::Reality(reality) => (&reality.tls, Some(reality.as_ref())),
+    };
     query.insert(
         "security".to_owned(),
-        json!(if source.reality.enabled {
-            "reality"
-        } else {
-            "tls"
-        }),
+        json!(if reality.is_some() { "reality" } else { "tls" }),
     );
     let mut options = Options::new(source)?;
     for name in [
-        "enabled",
-        "reality",
         "ech",
         "key_log",
         "handshake_timeout",
@@ -539,9 +541,9 @@ fn tls(source: &Tls, query: &mut Map<String, Value>, store: &Store) -> Result<()
         options.take("system_roots");
     }
     options.finish("TLS 分享链接")?;
-    if source.reality.enabled {
-        let mut options = Options::new(&source.reality)?;
-        options.take("enabled");
+    if let Some(reality) = reality {
+        let mut options = Options::new(reality)?;
+        options.take("tls");
         options.take("debug");
         options.rename(
             query,
@@ -555,15 +557,15 @@ fn tls(source: &Tls, query: &mut Map<String, Value>, store: &Store) -> Result<()
         options.finish("REALITY 分享链接")?;
         query.entry("fp").or_insert(json!("chrome"));
     }
-    if source.ech.enabled {
-        let value = if let Some(value) = &source.ech.config {
+    if let Some(ech) = &source.ech {
+        let value = if let Some(value) = &ech.config {
             value.clone()
-        } else if let Some(file) = &source.ech.config_file {
+        } else if let Some(file) = &ech.config_file {
             std::fs::read_to_string(store.directory.join(file))?
                 .trim()
                 .to_owned()
         } else {
-            source.ech.query_name.clone().unwrap_or_default()
+            ech.query_name.clone().unwrap_or_default()
         };
         query.insert("ech".to_owned(), json!(value));
     }
@@ -572,10 +574,11 @@ fn tls(source: &Tls, query: &mut Map<String, Value>, store: &Store) -> Result<()
 
 fn transport(
     source: &Transport,
-    security: &Tls,
+    security: &Security,
     query: &mut Map<String, Value>,
     store: &Store,
 ) -> Result<()> {
+    let secure = !matches!(security, Security::None);
     match source {
         Transport::Default => {}
         Transport::WebSocket(value) => {
@@ -616,7 +619,7 @@ fn transport(
             }
         }
         Transport::Http(value) => {
-            match value.version(security.enabled) {
+            match value.version(secure) {
                 HttpVersion::Http1 => {
                     query.insert("type".to_owned(), json!("tcp"));
                     query.insert("headerType".to_owned(), json!("http"));
@@ -663,8 +666,7 @@ fn transport(
                 query.insert("host".to_owned(), json!(value));
             }
             if !value.checksum || value.header == Header::Dns && value.domain.is_some() {
-                let native =
-                    crate::native::transport::xray(source, false, store, security.enabled)?;
+                let native = crate::native::transport::xray(source, false, store, secure)?;
                 query.insert(
                     "fm".to_owned(),
                     native
@@ -681,29 +683,22 @@ fn transport(
             let mut value = value.clone();
             if let Some(download) = &mut value.download {
                 download.network = connection::Network::default();
-                if download.tls.enabled {
-                    for file in std::mem::take(&mut download.tls.certificate_files) {
-                        download
-                            .tls
-                            .certificates
+                if let Some(tls) = download.security.tls_mut() {
+                    for file in std::mem::take(&mut tls.certificate_files) {
+                        tls.certificates
                             .push(std::fs::read_to_string(store.directory.join(file))?);
                     }
-                    if let Some(file) = download.tls.client_certificate_file.take() {
-                        download.tls.client_certificate =
+                    if let Some(file) = tls.client_certificate_file.take() {
+                        tls.client_certificate =
                             Some(std::fs::read_to_string(store.directory.join(file))?);
                     }
-                    if let Some(file) = download.tls.client_key_file.take() {
-                        download.tls.client_key =
-                            Some(std::fs::read_to_string(store.directory.join(file))?);
+                    if let Some(file) = tls.client_key_file.take() {
+                        tls.client_key = Some(std::fs::read_to_string(store.directory.join(file))?);
                     }
                 }
             }
-            let mut native = crate::native::transport::xray(
-                &Transport::XHttp(value),
-                false,
-                store,
-                security.enabled,
-            )?;
+            let mut native =
+                crate::native::transport::xray(&Transport::XHttp(value), false, store, secure)?;
             query.insert("type".to_owned(), json!("xhttp"));
             let mut extra = native
                 .remove("xhttpSettings")

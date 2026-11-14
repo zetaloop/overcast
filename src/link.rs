@@ -10,7 +10,7 @@ use url::{Host, Url};
 
 use crate::{
     Result,
-    connection::{HttpVersion, Tls},
+    connection::{Ech, HttpVersion, Security, Tls},
     transport::{
         Download, Grpc, Header, Http, HttpUpgrade, Kcp, Pool, Quic, Transport, WebSocket, XHttp,
         XHttpOptions,
@@ -122,7 +122,7 @@ pub fn vmess(text: &str) -> Result<crate::vmess::Client> {
             query.insert("security".to_owned(), security);
         }
     }
-    client.tls = tls(&mut query, false)?;
+    client.security = security(&mut query, false)?;
     client.transport = transport(&mut query)?;
     remaining(query.keys(), "链接参数")?;
     Ok(client)
@@ -156,7 +156,7 @@ pub fn vless(url: &Url) -> Result<Client> {
         Some(value) => return Err(format!("无法识别 VLESS 流模式：{value}").into()),
     };
     client.vless.encryption = query.remove("encryption");
-    client.tls = tls(&mut query, false)?;
+    client.security = security(&mut query, false)?;
     client.transport = transport(&mut query)?;
     remaining(query.keys(), "链接参数")?;
     Ok(client)
@@ -174,7 +174,7 @@ pub fn trojan(url: &Url) -> Result<crate::trojan::Client> {
         server: host(url)?,
         port: url.port().unwrap_or(443),
         password: credentials(url)?,
-        tls: tls(&mut query, true)?,
+        security: security(&mut query, true)?,
         transport: transport(&mut query)?,
         ..crate::trojan::Client::default()
     };
@@ -194,7 +194,7 @@ pub fn anytls(url: &Url) -> Result<crate::anytls::Client> {
         server: host(url)?,
         port: url.port().unwrap_or(443),
         password: credentials(url)?,
-        tls: tls(&mut query, true)?,
+        security: security(&mut query, true)?,
         ..crate::anytls::Client::default()
     };
     remaining(query.keys(), "链接参数")?;
@@ -232,7 +232,9 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
     }
     let mut query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
     let pin = query.remove("pinSHA256");
-    let mut tls = tls(&mut query, true)?;
+    let Security::Tls(mut tls) = security(&mut query, true)? else {
+        return Err("Hysteria 2 连接使用 TLS".into());
+    };
     if let Some(pin) = pin {
         if !tls.certificate_sha256.is_empty() && tls.certificate_sha256 != [pin.clone()] {
             return Err("链接中的证书指纹参数相互冲突".into());
@@ -362,7 +364,7 @@ pub fn host(url: &Url) -> Result<String> {
     )
 }
 
-pub fn tls(query: &mut BTreeMap<String, String>, default: bool) -> Result<Tls> {
+pub fn security(query: &mut BTreeMap<String, String>, default: bool) -> Result<Security> {
     let security = query
         .remove("security")
         .unwrap_or_else(|| if default { "tls" } else { "none" }.to_owned());
@@ -370,7 +372,6 @@ pub fn tls(query: &mut BTreeMap<String, String>, default: bool) -> Result<Tls> {
         return Err(format!("无法识别握手类型：{security}").into());
     }
     let mut tls = Tls {
-        enabled: matches!(security.as_str(), "tls" | "reality"),
         server_name: query.remove("sni"),
         fingerprint: query.remove("fp"),
         ..Tls::default()
@@ -402,15 +403,23 @@ pub fn tls(query: &mut BTreeMap<String, String>, default: bool) -> Result<Tls> {
         }
     }
     if let Some(value) = query.remove("ech") {
-        tls.ech.enabled = true;
-        tls.ech.config = Some(value);
+        tls.ech = Some(Ech {
+            config: Some(value),
+            ..Ech::default()
+        });
     }
-    tls.reality.enabled = security == "reality";
-    tls.reality.public_key = query.remove("pbk").unwrap_or_default();
-    tls.reality.short_id = query.remove("sid").unwrap_or_default();
-    tls.reality.spider_path = query.remove("spx");
-    tls.reality.signature_key = query.remove("pqv");
-    Ok(tls)
+    let reality = crate::reality::Client {
+        public_key: query.remove("pbk").unwrap_or_default(),
+        short_id: query.remove("sid").unwrap_or_default(),
+        spider_path: query.remove("spx"),
+        signature_key: query.remove("pqv"),
+        ..crate::reality::Client::default()
+    };
+    Ok(match security.as_str() {
+        "tls" => Security::Tls(tls),
+        "reality" => Security::Reality(Box::new(crate::reality::Client { tls, ..reality })),
+        _ => Security::None,
+    })
 }
 
 pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
@@ -697,11 +706,14 @@ fn xhttp(mut extra: Map<String, Value>) -> Result<XHttp> {
         } else {
             "tlsSettings"
         };
-        if let Some(settings) = stream.remove(settings) {
-            download.tls =
-                security_options(serde_json::from_value(settings)?, security == "reality")?;
-        }
-        download.tls.enabled = security == "tls" || security == "reality";
+        download.security = match stream.remove(settings) {
+            Some(settings) => {
+                security_options(serde_json::from_value(settings)?, security == "reality")?
+            }
+            None if security == "tls" => Security::Tls(Tls::default()),
+            None if security == "none" => Security::None,
+            None => return Err(format!("XHTTP 下载连接缺少 {security} 参数").into()),
+        };
         if let Some(mask) = stream.remove("finalmask") {
             let mut mask: Map<String, Value> = serde_json::from_value(mask)?;
             if let Some(params) = mask.remove("quicParams") {
@@ -719,8 +731,9 @@ fn xhttp(mut extra: Map<String, Value>) -> Result<XHttp> {
     Ok(value)
 }
 
-fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Tls> {
-    let mut output = Map::from_iter([("enabled".to_owned(), json!(true))]);
+fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Security> {
+    let mut output = Map::new();
+    let mut options = Map::new();
     rename(
         &mut values,
         &mut output,
@@ -736,7 +749,6 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Tls
         ],
     );
     if reality {
-        let mut options = Map::from_iter([("enabled".to_owned(), json!(true))]);
         rename(
             &mut values,
             &mut options,
@@ -749,7 +761,6 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Tls
                 ("show", "debug"),
             ],
         );
-        output.insert("reality".to_owned(), json!(options));
     } else {
         if let Some(insecure) = values.remove("allowInsecure") {
             output.insert(
@@ -785,7 +796,7 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Tls
             output.insert("system_roots".to_owned(), value);
         }
         if let Some(value) = values.remove("echConfigList") {
-            output.insert("ech".to_owned(), json!({"enabled": true, "config": value}));
+            output.insert("ech".to_owned(), json!({"config": value}));
         }
         if let Some(certificates) = values.remove("certificates") {
             let mut trust = Vec::new();
@@ -823,7 +834,13 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Tls
         }
     }
     remaining(values.keys(), "XHTTP 下载握手")?;
-    Ok(serde_json::from_value(json!(output))?)
+    let tls = serde_json::from_value(json!(output))?;
+    Ok(if reality {
+        options.insert("tls".to_owned(), json!(tls));
+        Security::Reality(Box::new(serde_json::from_value(json!(options))?))
+    } else {
+        Security::Tls(tls)
+    })
 }
 
 fn http(mut values: Map<String, Value>) -> Result<XHttpOptions> {

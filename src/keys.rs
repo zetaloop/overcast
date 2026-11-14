@@ -20,16 +20,16 @@ pub struct Keys {
 
 impl Keys {
     pub fn needed(source: &Inbound) -> bool {
-        source.tls.enabled && source.tls.reality.enabled
+        source.security.reality().is_some()
             || matches!(&source.protocol, Protocol::Vless(value) if value.encryption.is_some())
             || crate::native::shadowsocks::shared(source, usize::from(source.credentials.is_some()))
     }
 
     pub fn resolve(source: &Inbound, previous: Option<&Self>) -> Result<Self> {
         let mut keys = previous.cloned().unwrap_or_default();
-        if source.tls.enabled && source.tls.reality.enabled {
+        if let Some(reality) = source.security.reality() {
             keys.reality = Some(crate::reality::Keys::resolve(
-                &source.tls.reality,
+                reality,
                 keys.reality.as_ref(),
             )?);
         }
@@ -54,11 +54,10 @@ impl Keys {
 
     pub fn apply(&self, source: &mut Inbound, users: usize) {
         let shared = crate::native::shadowsocks::shared(source, users);
-        if source.tls.enabled
-            && source.tls.reality.enabled
+        if let crate::inbound::Security::Reality(reality) = &mut source.security
             && let Some(keys) = &self.reality
         {
-            keys.apply(&mut source.tls.reality);
+            keys.apply(reality);
         }
         if let Protocol::Vless(value) = &mut source.protocol
             && let Some(encryption) = &mut value.encryption
@@ -82,8 +81,7 @@ impl Keys {
         {
             values.push(("password", "入口共享密钥", keys.password.clone()));
         }
-        if source.tls.enabled
-            && source.tls.reality.enabled
+        if source.security.reality().is_some()
             && let Some(keys) = &self.reality
         {
             values.extend(keys.values());

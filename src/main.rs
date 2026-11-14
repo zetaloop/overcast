@@ -26,6 +26,7 @@ pub mod progress;
 mod reality;
 mod resource;
 mod route;
+mod security;
 mod service;
 mod shadowsocks;
 mod share;

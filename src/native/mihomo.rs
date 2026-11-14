@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -5,7 +6,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     Result,
     config::Store,
-    connection::{self, AddressStrategy, Connection, FastOpen, SocksVersion},
+    connection::{self, AddressStrategy, Connection, FastOpen, Security, SocksVersion},
     inbound::{self, Inbound, Protocol},
 };
 
@@ -99,7 +100,7 @@ pub fn outbound(
             None
         }
         Connection::AnyTls(value) => {
-            if !value.tls.enabled {
+            if matches!(value.security, Security::None) {
                 return unsupported("Mihomo AnyTLS 出站使用 TLS");
             }
             let mut options = Options::new(&value.anytls)?;
@@ -126,17 +127,17 @@ pub fn outbound(
             output.insert("port".to_owned(), json!(value.port));
             output.insert("password".to_owned(), json!(value.password));
             output.insert("udp".to_owned(), json!(value.anytls.udp.unwrap_or(true)));
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Hysteria2(value) => {
             output.extend(super::hysteria::client(value, inbound::Core::Mihomo)?);
             output.insert("server".to_owned(), json!(value.server));
             output.insert("port".to_owned(), json!(value.port()?));
             output.insert("password".to_owned(), json!(value.password));
-            Some(&value.tls)
+            Some(Cow::Owned(Security::Tls(value.tls.clone())))
         }
         Connection::Shadowsocks(value) => {
-            if value.tls.enabled || !value.transport.is_default() {
+            if !matches!(value.security, Security::None) || !value.transport.is_default() {
                 return unsupported("Mihomo Shadowsocks 通过插件配置传输封装");
             }
             let mut options = Options::new(&value.shadowsocks)?;
@@ -183,7 +184,7 @@ pub fn outbound(
             None
         }
         Connection::Trojan(value) => {
-            if !value.tls.enabled {
+            if matches!(value.security, Security::None) {
                 return unsupported("Mihomo Trojan 出站使用 TLS");
             }
             if !matches!(
@@ -195,7 +196,7 @@ pub fn outbound(
             ) {
                 return unsupported("Mihomo Trojan 使用原生 TCP、WebSocket、HTTPUpgrade 或 gRPC");
             }
-            if value.tls.reality.enabled
+            if value.security.reality().is_some()
                 && matches!(
                     value.transport,
                     crate::transport::Transport::WebSocket(_)
@@ -215,11 +216,11 @@ pub fn outbound(
             output.extend(super::transport::mihomo_client(
                 &value.transport,
                 &value.network,
-                value.tls.enabled,
+                !matches!(value.security, Security::None),
                 store,
                 globals,
             )?);
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Direct(_) => None,
         Connection::Http(value) => {
@@ -238,14 +239,13 @@ pub fn outbound(
                 );
             }
             options.finish("Mihomo HTTP")?;
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Vmess(value) => {
             if matches!(value.transport, crate::transport::Transport::XHttp(_)) {
                 return unsupported("Mihomo VMess 没有 XHTTP 传输配置");
             }
-            if value.tls.enabled
-                && value.tls.reality.enabled
+            if value.security.reality().is_some()
                 && matches!(
                     value.transport,
                     crate::transport::Transport::WebSocket(_)
@@ -294,18 +294,21 @@ pub fn outbound(
             output.extend(super::transport::mihomo_client(
                 &value.transport,
                 &value.network,
-                value.tls.enabled,
+                !matches!(value.security, Security::None),
                 store,
                 globals,
             )?);
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Socks(value) => {
             if value.socks.version != SocksVersion::V5 {
                 return unsupported("Mihomo SOCKS 出站使用 SOCKS5");
             }
-            if value.tls.enabled
-                && value.tls.server_name.as_ref().is_some_and(|name| {
+            if value
+                .security
+                .tls()
+                .and_then(|tls| tls.server_name.as_ref())
+                .is_some_and(|name| {
                     !name.is_empty() && !name.eq_ignore_ascii_case(&value.proxy.server)
                 })
             {
@@ -319,21 +322,21 @@ pub fn outbound(
                 options.take("udp_over_tcp");
             }
             options.finish("Mihomo SOCKS")?;
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Vless(value) => {
             if matches!(value.transport, crate::transport::Transport::Kcp(_)) {
                 return unsupported("Mihomo VLESS 没有 KCP 传输配置");
             }
-            if value.tls.enabled
-                && value.tls.reality.enabled
-                && value.tls.alpn == ["h3"]
+            if value
+                .security
+                .reality()
+                .is_some_and(|reality| reality.tls.alpn == ["h3"])
                 && matches!(value.transport, crate::transport::Transport::XHttp(_))
             {
                 return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
             }
-            if value.tls.enabled
-                && value.tls.reality.enabled
+            if value.security.reality().is_some()
                 && matches!(
                     value.transport,
                     crate::transport::Transport::WebSocket(_)
@@ -375,18 +378,18 @@ pub fn outbound(
             output.extend(super::transport::mihomo_client(
                 &value.transport,
                 &value.network,
-                value.tls.enabled,
+                !matches!(value.security, Security::None),
                 store,
                 globals,
             )?);
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
     };
-    if let Some(tls) = tls.filter(|tls| tls.enabled) {
+    if let Some(tls) = tls.filter(|tls| !matches!(tls.as_ref(), Security::None)) {
         let tls = source
             .transport()
-            .map_or(std::borrow::Cow::Borrowed(tls), |transport| {
-                transport.client_tls(tls)
+            .map_or(Cow::Borrowed(tls.as_ref()), |transport| {
+                transport.client_tls(&tls)
             });
         client_tls(&tls, store, &mut output, globals, kind)?;
         if matches!(source, Connection::Socks(_)) {
@@ -478,7 +481,7 @@ pub fn listeners(
     keep_alive(&mut options, globals)?;
     options.finish("Mihomo 监听")?;
     if let Protocol::AnyTls(value) = &source.protocol {
-        if !source.transport.is_default() || source.tls.reality.enabled {
+        if !source.transport.is_default() || source.security.reality().is_some() {
             return unsupported("Mihomo AnyTLS 入站使用原生 TCP 与 TLS");
         }
         let mut options = Options::new(value)?;
@@ -491,7 +494,7 @@ pub fn listeners(
             );
         }
         output.insert("type".to_owned(), json!("anytls"));
-        if source.tls.enabled {
+        if !matches!(source.security, inbound::Security::None) {
             server_tls(source, store, &mut output)?;
         } else {
             output.insert("allow-insecure".to_owned(), json!(true));
@@ -540,7 +543,7 @@ pub fn listeners(
         }
         options.finish("Mihomo VLESS 入站")?;
         output.insert("type".to_owned(), json!("vless"));
-        if source.tls.enabled {
+        if !matches!(source.security, inbound::Security::None) {
             server_tls(source, store, &mut output)?;
         } else if value.encryption.is_none() {
             output.insert("allow-insecure".to_owned(), json!(true));
@@ -566,9 +569,7 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::Mihomo)?,
             );
         }
-        if source.tls.enabled {
-            server_tls(source, store, &mut output)?;
-        }
+        server_tls(source, store, &mut output)?;
         output.extend(super::transport::mihomo_server(&source.transport)?);
         return Ok(vec![output]);
     }
@@ -594,7 +595,7 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::Mihomo)?,
             );
         }
-        if source.tls.enabled {
+        if !matches!(source.security, inbound::Security::None) {
             server_tls(source, store, &mut output)?;
         } else {
             output.insert("allow-insecure".to_owned(), json!(true));
@@ -603,7 +604,7 @@ pub fn listeners(
         return Ok(vec![output]);
     }
     if let Protocol::Shadowsocks(value) = &source.protocol {
-        if source.tls.enabled || !source.transport.is_default() {
+        if !matches!(source.security, inbound::Security::None) || !source.transport.is_default() {
             return unsupported("Mihomo Shadowsocks 入站使用原生 TCP/UDP 或协议插件");
         }
         if !value.tcp {
@@ -639,7 +640,7 @@ pub fn listeners(
         if value.user_level.is_some() {
             return unsupported("Mihomo 固定转发入口没有用户等级配置");
         }
-        if source.tls.enabled || !source.transport.is_default() {
+        if !matches!(source.security, inbound::Security::None) || !source.transport.is_default() {
             return unsupported("Mihomo 固定转发入口使用原生 TCP/UDP 监听");
         }
         let (server, port) = target.ok_or("转发入口缺少后继连接")?;
@@ -695,9 +696,7 @@ pub fn listeners(
         options.take("enabled");
         options.finish("Mihomo SOCKS 入站")?;
     }
-    if source.tls.enabled {
-        server_tls(source, store, &mut output)?;
-    }
+    server_tls(source, store, &mut output)?;
     Ok(vec![output])
 }
 
@@ -714,44 +713,45 @@ fn keep_alive(options: &mut Options, globals: &mut Map<String, Value>) -> Result
 }
 
 pub fn client_tls(
-    source: &connection::Tls,
+    security: &Security,
     store: &Store,
     output: &mut Map<String, Value>,
     globals: &mut Map<String, Value>,
     kind: &str,
 ) -> Result<()> {
     let v2ray = matches!(kind, "vless" | "vmess" | "trojan");
-    if source.reality.enabled && !v2ray {
+    let (source, reality) = match security {
+        Security::None => return Ok(()),
+        Security::Tls(tls) => (tls, None),
+        Security::Reality(reality) => (&reality.tls, Some(reality.as_ref())),
+    };
+    if reality.is_some() && !v2ray {
         return unsupported(format!("Mihomo {kind} 出站没有 REALITY 配置"));
     }
     let mut options = Options::new(source)?;
-    options.take("reality");
-    if matches!(kind, "trojan" | "hysteria2" | "anytls") {
-        options.take("enabled");
+    if !matches!(kind, "trojan" | "hysteria2" | "anytls") {
+        output.insert("tls".to_owned(), json!(true));
     }
     options.rename(
         output,
-        &[
-            ("enabled", "tls"),
-            (
-                "server_name",
-                if matches!(kind, "vless" | "vmess") {
-                    "servername"
-                } else {
-                    "sni"
-                },
-            ),
-        ],
+        &[(
+            "server_name",
+            if matches!(kind, "vless" | "vmess") {
+                "servername"
+            } else {
+                "sni"
+            },
+        )],
     );
     if v2ray || matches!(kind, "hysteria2" | "anytls") {
         options.copy(output, &["alpn"]);
     }
     if v2ray || kind == "anytls" {
         options.rename(output, &[("fingerprint", "client-fingerprint")]);
-        if source.reality.enabled {
-            source.reality.validate()?;
-            let mut options = Options::new(&source.reality)?;
-            options.take("enabled");
+        if let Some(reality) = reality {
+            reality.validate()?;
+            let mut options = Options::new(reality)?;
+            options.take("tls");
             let mut reality = Map::new();
             options.rename(
                 &mut reality,
@@ -813,20 +813,20 @@ pub fn client_tls(
         globals.insert("tls".to_owned(), value);
     }
     options.take("ech");
-    if source.ech.enabled {
+    if let Some(value) = &source.ech {
         if !v2ray && !matches!(kind, "hysteria2" | "anytls") {
             return unsupported(format!("Mihomo {kind} 出站没有 ECH 配置"));
         }
         let mut ech = Map::from_iter([("enable".to_owned(), json!(true))]);
-        if let Some(file) = &source.ech.config_file {
+        if let Some(file) = &value.config_file {
             ech.insert(
                 "config".to_owned(),
                 json!(std::fs::read_to_string(path(store, file))?.trim()),
             );
-        } else if let Some(value) = &source.ech.config {
-            ech.insert("config".to_owned(), json!(value));
+        } else if let Some(config) = &value.config {
+            ech.insert("config".to_owned(), json!(config));
         }
-        if let Some(value) = &source.ech.query_name {
+        if let Some(value) = &value.query_name {
             ech.insert("query-server-name".to_owned(), json!(value));
         }
         output.insert("ech-opts".to_owned(), json!(ech));
@@ -835,13 +835,18 @@ pub fn client_tls(
 }
 
 fn server_tls(source: &Inbound, store: &Store, output: &mut Map<String, Value>) -> Result<()> {
-    if source.tls.reality.enabled {
-        output.insert("reality-config".to_owned(), super::reality::server(source)?);
-        return Ok(());
-    }
-    let mut options = Options::new(&source.tls)?;
-    options.take("reality");
-    options.take("enabled");
+    let tls = match &source.security {
+        inbound::Security::None => return Ok(()),
+        inbound::Security::Tls(tls) => tls,
+        inbound::Security::Reality(reality) => {
+            output.insert(
+                "reality-config".to_owned(),
+                super::reality::server(source, reality)?,
+            );
+            return Ok(());
+        }
+    };
+    let mut options = Options::new(tls)?;
     options.take("server_name");
     if matches!(source.protocol, Protocol::Hysteria2(_)) {
         options.copy(output, &["alpn"]);
@@ -854,17 +859,17 @@ fn server_tls(source: &Inbound, store: &Store, output: &mut Map<String, Value>) 
     options.take("client_certificate_files");
     let trust = pem(
         store,
-        &source.tls.client_certificates,
-        &source.tls.client_certificate_files,
+        &tls.client_certificates,
+        &tls.client_certificate_files,
     )?;
     if !trust.is_empty() {
         output.insert("client-auth-cert".to_owned(), json!(trust.join("\n")));
     }
     options.take("ech");
-    if source.tls.ech.enabled {
-        if let Some(file) = &source.tls.ech.key_file {
+    if let Some(ech) = &tls.ech {
+        if let Some(file) = &ech.key_file {
             output.insert("ech-key".to_owned(), json!(path(store, file)));
-        } else if let [key] = source.tls.ech.keys.as_slice() {
+        } else if let [key] = ech.keys.as_slice() {
             output.insert("ech-key".to_owned(), json!(key));
         } else {
             return unsupported("Mihomo ECH 使用一份服务端密钥");

@@ -14,9 +14,6 @@ use crate::{
 use super::{options::Options, path, single_headers, unsupported};
 
 pub fn client(source: &Client, core: Core) -> Result<Map<String, Value>> {
-    if !source.tls.enabled || source.tls.reality.enabled {
-        return unsupported("Hysteria 2 连接使用 TLS");
-    }
     let value = &source.hysteria;
     if value.ports.is_empty() && (value.hop_interval.is_some() || value.hop_interval_max.is_some())
     {

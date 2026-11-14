@@ -7,7 +7,7 @@ use url::form_urlencoded;
 use crate::{
     Result,
     config::Store,
-    connection::{HttpVersion, Network},
+    connection::{HttpVersion, Network, Security},
     transport::{Mode, PaddingPlacement, Placement, Pool, Quic, Transport, XHttp, XHttpOptions},
 };
 
@@ -495,9 +495,10 @@ pub fn mihomo_client(
             Options::new(&value.quic)?.finish("Mihomo XHTTP QUIC")?;
             let mut http = mihomo_http(&value.http, false)?;
             if let Some(download) = &value.download {
-                if download.tls.enabled
-                    && download.tls.reality.enabled
-                    && download.tls.alpn == ["h3"]
+                if download
+                    .security
+                    .reality()
+                    .is_some_and(|reality| reality.tls.alpn == ["h3"])
                 {
                     return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
                 }
@@ -515,7 +516,10 @@ pub fn mihomo_client(
                 let mut settings = Map::from_iter([
                     ("server".to_owned(), json!(download.server)),
                     ("port".to_owned(), json!(download.port)),
-                    ("tls".to_owned(), json!(download.tls.enabled)),
+                    (
+                        "tls".to_owned(),
+                        json!(!matches!(download.security, Security::None)),
+                    ),
                     ("alpn".to_owned(), json!([])),
                     ("servername".to_owned(), json!("")),
                     ("skip-cert-verify".to_owned(), json!(false)),
@@ -547,9 +551,9 @@ pub fn mihomo_client(
                     }
                 }
                 options.finish("Mihomo XHTTP 下载参数")?;
-                if download.tls.enabled {
+                if !matches!(download.security, Security::None) {
                     super::mihomo::client_tls(
-                        &download.tls,
+                        &download.security,
                         store,
                         &mut settings,
                         globals,
@@ -856,9 +860,7 @@ fn xhttp(source: &XHttp, inbound: bool, store: &Store) -> Result<Map<String, Val
         if !socket.is_empty() {
             stream.insert("sockopt".to_owned(), json!(socket));
         }
-        if download.tls.enabled {
-            stream.extend(super::xray::security(&download.tls, store)?);
-        }
+        stream.extend(super::xray::security(&download.security, store)?);
         let params = quic(&download.quic, false)?;
         if !params.is_empty() {
             stream.insert("finalmask".to_owned(), json!({"quicParams": params}));

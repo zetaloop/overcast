@@ -40,7 +40,7 @@ pub fn outbound(
 }
 
 pub fn networks(source: &Connection) -> Result<[bool; 2]> {
-    let (tls, datagrams) = match source {
+    let (security, datagrams) = match source {
         Connection::Direct(_) => return Ok([false, false]),
         Connection::Hysteria2(_) => return Ok([false, true]),
         Connection::AnyTls(_) => return Ok([true, false]),
@@ -52,22 +52,22 @@ pub fn networks(source: &Connection) -> Result<[bool; 2]> {
         }
         Connection::Http(value) => {
             if value.http.version == HttpVersion::Http3 {
-                if value.tls.enabled && value.tls.reality.enabled {
+                if value.security.reality().is_some() {
                     return Ok([!value.http.fixed_version, false]);
                 }
                 return Ok([!value.http.fixed_version, true]);
             }
-            (&value.tls, false)
+            (&value.security, false)
         }
         Connection::Socks(value) => (
-            &value.tls,
+            &value.security,
             value.socks.version == SocksVersion::V5
                 && value.socks.udp_over_tcp.is_none()
                 && value.multiplex.as_ref().is_none_or(|mux| mux.tcp_only),
         ),
-        Connection::Vless(value) => (&value.tls, false),
-        Connection::Vmess(value) => (&value.tls, false),
-        Connection::Trojan(value) => (&value.tls, false),
+        Connection::Vless(value) => (&value.security, false),
+        Connection::Vmess(value) => (&value.security, false),
+        Connection::Trojan(value) => (&value.security, false),
         Connection::Shadowsocks(value) => {
             let datagrams = value.shadowsocks.udp_over_tcp.is_none()
                 && value.multiplex.as_ref().is_none_or(|mux| mux.tcp_only);
@@ -79,13 +79,10 @@ pub fn networks(source: &Connection) -> Result<[bool; 2]> {
                             .is_some_and(|mode| mode == "quic");
                 return Ok([!udp, udp || datagrams]);
             }
-            (&value.tls, datagrams)
+            (&value.security, datagrams)
         }
-        Connection::Forward(value) => (&value.tls, true),
+        Connection::Forward(value) => (&value.security, true),
     };
-    let udp = source
-        .transport()
-        .unwrap()
-        .udp(tls.enabled && !tls.reality.enabled, &tls.alpn);
+    let udp = source.transport().unwrap().quic(security);
     Ok([!udp, udp || datagrams])
 }

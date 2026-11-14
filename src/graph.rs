@@ -797,9 +797,8 @@ impl<'a> Analysis<'a> {
         inbound: &Inbound,
         reachable: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
     ) -> Result<bool> {
-        if inbound.tls.enabled
-            && inbound.tls.reality.enabled
-            && let Some(destination) = inbound.tls.reality.outbound
+        if let Some(reality) = inbound.security.reality()
+            && let Some(destination) = reality.outbound
             && !reachable(inbound.core, destination, Network::Tcp, Payload::Proxy)?
         {
             return Ok(false);

@@ -129,7 +129,7 @@ impl Member {
             }
             member.modes.retain(|mode| mode.wire() == Network::Tcp);
             source.transport = crate::transport::Transport::default();
-            source.tls = crate::inbound::Tls::default();
+            source.security = crate::inbound::Security::None;
             networks = BTreeSet::from([Network::Tcp]);
         }
         configure(&mut source, &member.modes);
@@ -151,11 +151,7 @@ impl Member {
 }
 
 pub fn accepts(source: &Inbound, wire: Network, network: Network, layer: Layer) -> bool {
-    let udp = layer == Layer::Transport
-        && source.transport.udp(
-            source.tls.enabled && !source.tls.reality.enabled,
-            &source.tls.alpn,
-        );
+    let udp = layer == Layer::Transport && source.quic();
     modes(source, &[network]).iter().any(|mode| {
         mode.carries(source.core, network)
             && if udp {
@@ -264,10 +260,7 @@ fn validate(
 ) -> Result<()> {
     let unix =
         source.listen.address.starts_with('@') || Path::new(&source.listen.address).is_absolute();
-    let transport_udp = source.transport.udp(
-        source.tls.enabled && !source.tls.reality.enabled,
-        &source.tls.alpn,
-    );
+    let transport_udp = source.quic();
     if unix && source.core != Core::Xray {
         return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
     }
@@ -302,7 +295,9 @@ fn validate(
         return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
     }
     if matches!(source.protocol, Protocol::Hysteria2(_)) {
-        if !source.tls.enabled || source.tls.reality.enabled || !source.transport.is_default() {
+        if !matches!(source.security, crate::inbound::Security::Tls(_))
+            || !source.transport.is_default()
+        {
             return super::unsupported("Hysteria 2 使用协议自身的 QUIC 与 TLS");
         }
         for credential in users.values() {
@@ -365,39 +360,32 @@ pub fn build(
                 }
             }
         }
-        if source.tls.enabled && source.tls.reality.enabled {
+        if let crate::inbound::Security::Reality(reality) = &mut source.security {
             if let Some(keys) = keys
                 .get(&source.uuid)
                 .and_then(|keys| keys.reality.as_ref())
             {
-                if source.tls.reality.private_key.is_none() {
-                    source.tls.reality.private_key = Some(keys.private_key.clone());
+                if reality.private_key.is_none() {
+                    reality.private_key = Some(keys.private_key.clone());
                 }
-                if source.tls.reality.short_ids.is_empty() {
-                    source.tls.reality.short_ids = keys.short_ids.clone();
+                if reality.short_ids.is_empty() {
+                    reality.short_ids = keys.short_ids.clone();
                 }
-                if source.tls.reality.signature_seed.is_none() {
-                    source.tls.reality.signature_seed = keys.signature_seed.clone();
+                if reality.signature_seed.is_none() {
+                    reality.signature_seed = keys.signature_seed.clone();
                 }
             }
-            source.tls.reality.target = source.tls.reality.address()?;
-            source.tls.reality.server_names = source
-                .tls
-                .reality
-                .names(source.tls.server_name.as_deref())?;
-            source
-                .tls
-                .reality
+            reality.target = reality.address()?;
+            reality.server_names = reality.names(reality.tls.server_name.as_deref())?;
+            reality
                 .short_ids
                 .iter_mut()
                 .for_each(|value| value.make_ascii_lowercase());
-            source.tls.reality.short_ids.sort();
-            source.tls.reality.short_ids.dedup();
-            if !source.tls.reality.signature {
-                source.tls.reality.signature_seed = None;
+            reality.short_ids.sort();
+            reality.short_ids.dedup();
+            if !reality.signature {
+                reality.signature_seed = None;
             }
-        } else {
-            source.tls.reality = crate::reality::Server::default();
         }
         if let Protocol::Vless(value) = &mut source.protocol
             && let Some(encryption) = &mut value.encryption
@@ -442,10 +430,7 @@ pub fn build(
         }
         let unix = source.listen.address.starts_with('@')
             || Path::new(&source.listen.address).is_absolute();
-        let transport_udp = source.transport.udp(
-            source.tls.enabled && !source.tls.reality.enabled,
-            &source.tls.alpn,
-        );
+        let transport_udp = source.quic();
         let modes = modes(
             &source,
             &entry
@@ -582,19 +567,16 @@ fn merge(
         .ok_or_else(|| conflict(&members, "监听地址与接口的组合无法合并"))?;
     let mut binding = members[index].binding.clone();
     let mut source = (*members[index].source).clone();
-    if source.tls.enabled && source.tls.reality.enabled {
-        source.tls.reality.private_key = members
-            .iter()
-            .find_map(|member| member.source.tls.reality.private_key.clone());
-        source.tls.reality.signature_seed = members
-            .iter()
-            .find_map(|member| member.source.tls.reality.signature_seed.clone());
-        source.tls.reality.short_ids = members
-            .iter()
-            .find_map(|member| {
-                (!member.source.tls.reality.short_ids.is_empty())
-                    .then(|| member.source.tls.reality.short_ids.clone())
-            })
+    if let crate::inbound::Security::Reality(reality) = &mut source.security {
+        let others = || {
+            members
+                .iter()
+                .filter_map(|member| member.source.security.reality())
+        };
+        reality.private_key = others().find_map(|other| other.private_key.clone());
+        reality.signature_seed = others().find_map(|other| other.signature_seed.clone());
+        reality.short_ids = others()
+            .find_map(|other| (!other.short_ids.is_empty()).then(|| other.short_ids.clone()))
             .unwrap_or_default();
     }
     let modes: BTreeSet<_> = members
@@ -632,17 +614,24 @@ fn merge(
             "监听",
             &members,
         )?;
-        if source.tls.enabled != member.source.tls.enabled {
+        if matches!(source.security, crate::inbound::Security::None)
+            != matches!(member.source.security, crate::inbound::Security::None)
+        {
             return Err(conflict(&members, "TLS 与明文连接使用了同一监听资源").into());
         }
         if source.core == Core::Xray {
             same(
-                &super::transport::xray(&source.transport, true, store, source.tls.enabled)?,
+                &super::transport::xray(
+                    &source.transport,
+                    true,
+                    store,
+                    !matches!(source.security, crate::inbound::Security::None),
+                )?,
                 &super::transport::xray(
                     &member.source.transport,
                     true,
                     store,
-                    member.source.tls.enabled,
+                    !matches!(member.source.security, crate::inbound::Security::None),
                 )?,
                 &[],
                 "传输",
@@ -653,15 +642,15 @@ fn merge(
                 &super::transport::singbox(
                     &source.transport,
                     true,
-                    source.tls.enabled,
-                    source.tls.reality.enabled,
+                    !matches!(source.security, crate::inbound::Security::None),
+                    source.security.reality().is_some(),
                 )?
                 .unwrap_or(serde_json::json!({})),
                 &super::transport::singbox(
                     &member.source.transport,
                     true,
-                    member.source.tls.enabled,
-                    member.source.tls.reality.enabled,
+                    !matches!(member.source.security, crate::inbound::Security::None),
+                    member.source.security.reality().is_some(),
                 )?
                 .unwrap_or(serde_json::json!({})),
                 &[],
@@ -677,33 +666,35 @@ fn merge(
                 &members,
             )?;
         }
-        if source.tls.enabled {
-            let mut tls = member.source.tls.clone();
-            if tls.reality.enabled {
-                if tls.reality.private_key.is_none() {
-                    tls.reality.private_key = source.tls.reality.private_key.clone();
-                }
-                if tls.reality.signature_seed.is_none() {
-                    tls.reality.signature_seed = source.tls.reality.signature_seed.clone();
-                }
-                if tls.reality.short_ids.is_empty() {
-                    tls.reality.short_ids = source.tls.reality.short_ids.clone();
+        match (&source.security, &member.source.security) {
+            (crate::inbound::Security::Tls(current), crate::inbound::Security::Tls(other)) => {
+                same(current, other, &["server_name"], "TLS", &members)?;
+                if source.core != Core::Xray
+                    && crate::certificate::name(&source)?
+                        != crate::certificate::name(&member.source)?
+                {
+                    return Err(conflict(&members, "这个核心的监听使用一组证书与私钥").into());
                 }
             }
-            same(&source.tls.reality, &tls.reality, &[], "REALITY", &members)?;
-            same(
-                &source.tls,
-                &tls,
-                &["server_name", "reality"],
-                "TLS",
-                &members,
-            )?;
-            if source.core != Core::Xray
-                && !source.tls.reality.enabled
-                && crate::certificate::name(&source)? != crate::certificate::name(&member.source)?
-            {
-                return Err(conflict(&members, "这个核心的监听使用一组证书与私钥").into());
+            (
+                crate::inbound::Security::Reality(current),
+                crate::inbound::Security::Reality(other),
+            ) => {
+                let mut other = other.as_ref().clone();
+                if other.private_key.is_none() {
+                    other.private_key = current.private_key.clone();
+                }
+                if other.signature_seed.is_none() {
+                    other.signature_seed = current.signature_seed.clone();
+                }
+                if other.short_ids.is_empty() {
+                    other.short_ids = current.short_ids.clone();
+                }
+                same(current.as_ref(), &other, &["tls"], "REALITY", &members)?;
+                same(&current.tls, &other.tls, &["server_name"], "TLS", &members)?;
             }
+            (crate::inbound::Security::None, crate::inbound::Security::None) => {}
+            _ => return Err(conflict(&members, "TLS 与 REALITY 使用了同一监听资源").into()),
         }
         match (&mut source.protocol, &member.source.protocol) {
             (Protocol::Mixed(current), Protocol::Mixed(other)) => {

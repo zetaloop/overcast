@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -78,7 +79,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             settings.insert("address".to_owned(), json!(value.server));
             settings.insert("port".to_owned(), json!(value.port()?));
             stream.extend(super::hysteria::client(value, inbound::Core::Xray)?);
-            Some(&value.tls)
+            Some(Cow::Owned(connection::Security::Tls(value.tls.clone())))
         }
         Connection::Direct(_) => {
             settings.insert("finalRules".to_owned(), json!([{"action": "allow"}]));
@@ -90,7 +91,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
                 json!(connection::address(&value.server, value.port)),
             );
             settings.insert("finalRules".to_owned(), json!([{"action": "allow"}]));
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Http(value) => {
             let mut options = Options::new(&value.http)?;
@@ -112,7 +113,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
                 );
             }
             options.finish("Xray HTTP")?;
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Socks(value) => {
             let mut options = Options::new(&value.socks)?;
@@ -129,7 +130,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
                 options.take("udp_over_tcp");
             }
             options.finish("Xray SOCKS")?;
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Vless(value) => {
             if value.multiplex.is_some() && value.vless.flow == crate::vless::Flow::Vision {
@@ -174,7 +175,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
                 )?;
             }
             options.finish("Xray VLESS")?;
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Vmess(value) => {
             let mut options = Options::new(&value.vmess)?;
@@ -228,7 +229,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
                 )?;
             }
             options.finish("Xray VMess")?;
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Trojan(value) => {
             let mut options = Options::new(&value.trojan)?;
@@ -242,7 +243,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             options.take("tcp");
             options.take("udp");
             options.finish("Xray Trojan")?;
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
         Connection::Shadowsocks(value) => {
             let mut options = Options::new(&value.shadowsocks)?;
@@ -266,16 +267,16 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
                 );
             }
             options.finish("Xray Shadowsocks")?;
-            Some(&value.tls)
+            Some(Cow::Borrowed(&value.security))
         }
     };
-    if let Some(tls) = tls.filter(|tls| tls.enabled) {
+    if let Some(tls) = &tls {
         let tls = source
             .transport()
-            .map_or(std::borrow::Cow::Borrowed(tls), |transport| {
+            .map_or(Cow::Borrowed(tls.as_ref()), |transport| {
                 transport.client_tls(tls)
             });
-        if tls.reality.enabled {
+        if tls.reality().is_some() {
             reality_transport(source.transport().unwrap())?;
         }
         stream.extend(security(&tls, store)?);
@@ -285,7 +286,8 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             transport,
             false,
             store,
-            tls.is_some_and(|tls| tls.enabled),
+            tls.as_deref()
+                .is_some_and(|tls| !matches!(tls, connection::Security::None)),
         )?);
     }
     output.insert("settings".to_owned(), json!(settings));
@@ -332,11 +334,7 @@ pub fn listeners(
     store: &Store,
     target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
-    if source.transport.udp(
-        source.tls.enabled && !source.tls.reality.enabled,
-        &source.tls.alpn,
-    ) && source.listen.proxy_protocol
-    {
+    if source.quic() && source.listen.proxy_protocol {
         return unsupported("UDP 传输监听没有 PROXY protocol 支持");
     }
     let mut output = Map::from_iter([
@@ -727,17 +725,19 @@ pub fn listeners(
     if !sockopt.is_empty() {
         stream.insert("sockopt".to_owned(), json!(sockopt));
     }
-    if source.tls.enabled {
-        if source.tls.reality.enabled {
+    match &source.security {
+        inbound::Security::None => {}
+        inbound::Security::Tls(tls) => {
+            stream.insert("security".to_owned(), json!("tls"));
+            stream.insert("tlsSettings".to_owned(), server_tls(source, tls, store)?);
+        }
+        inbound::Security::Reality(reality) => {
             reality_transport(&source.transport)?;
             stream.insert("security".to_owned(), json!("reality"));
             stream.insert(
                 "realitySettings".to_owned(),
-                super::reality::server(source)?,
+                super::reality::server(source, reality)?,
             );
-        } else {
-            stream.insert("security".to_owned(), json!("tls"));
-            stream.insert("tlsSettings".to_owned(), server_tls(source, store)?);
         }
     }
     if !matches!(source.protocol, Protocol::Hysteria2(_)) {
@@ -745,7 +745,7 @@ pub fn listeners(
             &source.transport,
             true,
             store,
-            source.tls.enabled,
+            !matches!(source.security, inbound::Security::None),
         )?);
     }
     output.insert("settings".to_owned(), json!(settings));
@@ -856,11 +856,13 @@ fn socket(options: &mut Options) -> Result<Map<String, Value>> {
     Ok(output)
 }
 
-pub fn security(source: &connection::Tls, store: &Store) -> Result<Map<String, Value>> {
-    let (kind, name, value) = if source.reality.enabled {
-        ("reality", "realitySettings", super::reality::xray(source)?)
-    } else {
-        ("tls", "tlsSettings", client_tls(source, store)?)
+pub fn security(source: &connection::Security, store: &Store) -> Result<Map<String, Value>> {
+    let (kind, name, value) = match source {
+        connection::Security::None => return Ok(Map::new()),
+        connection::Security::Tls(tls) => ("tls", "tlsSettings", client_tls(tls, store)?),
+        connection::Security::Reality(reality) => {
+            ("reality", "realitySettings", super::reality::xray(reality)?)
+        }
     };
     Ok(Map::from_iter([
         ("security".to_owned(), json!(kind)),
@@ -904,8 +906,6 @@ fn reality_transport(source: &crate::transport::Transport) -> Result<()> {
 
 fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
     let mut options = Options::new(source)?;
-    options.take("enabled");
-    options.take("reality");
     let mut output = Map::new();
     options.copy(&mut output, &["alpn", "fingerprint"]);
     options.rename(
@@ -988,18 +988,18 @@ fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
         output.insert("certificates".to_owned(), json!(certificates));
     }
     options.take("ech");
-    if source.ech.enabled {
-        if let Some(config) = &source.ech.config {
+    if let Some(ech) = &source.ech {
+        if let Some(config) = &ech.config {
             output.insert(
                 "echConfigList".to_owned(),
                 json!(crate::ech::base64(config)?),
             );
-        } else if let Some(file) = &source.ech.config_file {
+        } else if let Some(file) = &ech.config_file {
             output.insert(
                 "echConfigList".to_owned(),
                 json!(std::fs::read_to_string(path(store, file))?.trim()),
             );
-        } else if let Some(name) = &source.ech.query_name {
+        } else if let Some(name) = &ech.query_name {
             output.insert("echConfigList".to_owned(), json!(name));
         }
     }
@@ -1007,10 +1007,8 @@ fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
     Ok(json!(output))
 }
 
-fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
-    let mut options = Options::new(&source.tls)?;
-    options.take("reality");
-    options.take("enabled");
+fn server_tls(source: &Inbound, tls: &inbound::Tls, store: &Store) -> Result<Value> {
+    let mut options = Options::new(tls)?;
     let (certificate, key) = certificate_paths(store, source)?;
     let mut output = Map::from_iter([(
         "certificates".to_owned(),
@@ -1035,17 +1033,17 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Value> {
     if options.take("cipher_suites").is_some() {
         output.insert(
             "cipherSuites".to_owned(),
-            json!(source.tls.cipher_suites.join(":")),
+            json!(tls.cipher_suites.join(":")),
         );
     }
     options.take("ech");
-    if source.tls.ech.enabled {
-        if let Some(file) = &source.tls.ech.key_file {
+    if let Some(ech) = &tls.ech {
+        if let Some(file) = &ech.key_file {
             output.insert(
                 "echServerKeys".to_owned(),
                 json!(std::fs::read_to_string(path(store, file))?.trim()),
             );
-        } else if let [key] = source.tls.ech.keys.as_slice() {
+        } else if let [key] = ech.keys.as_slice() {
             output.insert("echServerKeys".to_owned(), json!(key));
         } else {
             return unsupported("Xray ECH 使用一份服务端密钥");

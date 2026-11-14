@@ -14,7 +14,7 @@ use crate::{
     Result,
     component::{Component, Settings},
     endpoint::Endpoint,
-    inbound::{Inbound, Protocol},
+    inbound::{Inbound, Protocol, Security},
     native,
     outbound::Outbound,
     progress::Progress,
@@ -113,7 +113,9 @@ impl Config {
             if let Protocol::Forward(value) = &mut inbound.protocol {
                 value.outbound.prune(&keep)?;
             }
-            if let Some(destination) = &mut inbound.tls.reality.outbound {
+            if let Security::Reality(reality) = &mut inbound.security
+                && let Some(destination) = &mut reality.outbound
+            {
                 destination.prune(&keep)?;
             }
         }

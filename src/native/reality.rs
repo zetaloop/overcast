@@ -9,11 +9,10 @@ use uuid::Uuid;
 use crate::{
     Result,
     config::Store,
-    connection,
     graph::Graph,
     inbound::{Core, Inbound},
     progress::Progress,
-    reality::{Keys, Limit},
+    reality::{Client, Keys, Limit, Server},
 };
 
 use super::{
@@ -30,13 +29,13 @@ pub fn prepare(
 ) -> Result<()> {
     let active = listeners
         .iter()
-        .filter(|listener| listener.source.tls.enabled && listener.source.tls.reality.enabled);
+        .filter(|listener| listener.source.security.reality().is_some());
     for group in listener::related(active, progress)? {
         progress.check()?;
         let sources: Vec<_> = group
             .listeners
             .iter()
-            .map(|listener| &listener.source.tls.reality)
+            .filter_map(|listener| listener.source.security.reality())
             .collect();
         let private: BTreeSet<_> = sources
             .iter()
@@ -91,14 +90,9 @@ pub fn prepare(
     Ok(())
 }
 
-pub fn xray(source: &connection::Tls) -> Result<Value> {
-    source.reality.validate()?;
-    let mut tls = Options::new(source)?;
-    tls.take("enabled");
-    tls.take("reality");
-    if !source.ech.enabled {
-        tls.take("ech");
-    }
+pub fn xray(source: &Client) -> Result<Value> {
+    source.validate()?;
+    let mut tls = Options::new(&source.tls)?;
     let mut output = Map::new();
     tls.rename(
         &mut output,
@@ -106,8 +100,8 @@ pub fn xray(source: &connection::Tls) -> Result<Value> {
     );
     tls.copy(&mut output, &["fingerprint"]);
     tls.finish("Xray REALITY")?;
-    let mut options = Options::new(&source.reality)?;
-    options.take("enabled");
+    let mut options = Options::new(source)?;
+    options.take("tls");
     options.rename(
         &mut output,
         &[
@@ -122,13 +116,10 @@ pub fn xray(source: &connection::Tls) -> Result<Value> {
     Ok(json!(output))
 }
 
-pub fn singbox(source: &connection::Tls, store: &Store) -> Result<Value> {
-    source.reality.validate()?;
+pub fn singbox(reality: &Client, store: &Store) -> Result<Value> {
+    reality.validate()?;
+    let source = &reality.tls;
     let mut options = Options::new(source)?;
-    options.take("reality");
-    if !source.ech.enabled {
-        options.take("ech");
-    }
     if source.verify_certificate == Some(true) {
         options.take("verify_certificate");
     }
@@ -141,11 +132,10 @@ pub fn singbox(source: &connection::Tls, store: &Store) -> Result<Value> {
     if source.engine.as_deref() == Some("go") {
         options.take("engine");
     }
-    let mut output = Map::new();
+    let mut output = Map::from_iter([("enabled".to_owned(), json!(true))]);
     options.copy(
         &mut output,
         &[
-            "enabled",
             "server_name",
             "alpn",
             "min_version",
@@ -177,9 +167,9 @@ pub fn singbox(source: &connection::Tls, store: &Store) -> Result<Value> {
         }
     }
     options.finish("sing-box REALITY")?;
-    let mut options = Options::new(&source.reality)?;
-    options.take("enabled");
-    if source.reality.hybrid_key_exchange == Some(false) {
+    let mut options = Options::new(reality)?;
+    options.take("tls");
+    if reality.hybrid_key_exchange == Some(false) {
         options.take("hybrid_key_exchange");
     }
     let mut reality = Map::from_iter([("enabled".to_owned(), json!(true))]);
@@ -189,14 +179,9 @@ pub fn singbox(source: &connection::Tls, store: &Store) -> Result<Value> {
     Ok(json!(output))
 }
 
-pub fn server(source: &Inbound) -> Result<Value> {
-    let mut tls = Options::new(&source.tls)?;
-    tls.take("enabled");
+pub fn server(source: &Inbound, value: &Server) -> Result<Value> {
+    let mut tls = Options::new(&value.tls)?;
     tls.take("server_name");
-    tls.take("reality");
-    if !source.tls.ech.enabled {
-        tls.take("ech");
-    }
     let mut output = Map::new();
     match source.core {
         Core::Xray => tls.rename(&mut output, &[("key_log", "masterKeyLog")]),
@@ -217,18 +202,17 @@ pub fn server(source: &Inbound) -> Result<Value> {
                 &[("handshake_timeout", "handshake_timeout")],
                 None,
             )?;
-            if source.tls.session_resumption == Some(false) {
+            if value.tls.session_resumption == Some(false) {
                 tls.take("session_resumption");
             }
         }
         Core::Mihomo => {}
     }
     tls.finish("REALITY 握手")?;
-    let value = &source.tls.reality;
-    let names = value.names(source.tls.server_name.as_deref())?;
+    let names = value.names(value.tls.server_name.as_deref())?;
     let mut options = Options::new(value)?;
     for name in [
-        "enabled",
+        "tls",
         "target",
         "server_names",
         "private_key",

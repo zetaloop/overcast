@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    connection::{Core, Network, PacketEncoding, Tls},
+    connection::{Core, Network, PacketEncoding, Security, Tls},
     form::{choices, fields},
     transport::Transport,
 };
@@ -15,7 +15,7 @@ pub struct Client {
     pub uuid: String,
     pub core: Core,
     pub vmess: ClientOptions,
-    pub tls: Tls,
+    pub security: Security,
     pub transport: Transport,
     pub multiplex: Option<crate::multiplex::Client>,
     pub network: Network,
@@ -30,10 +30,7 @@ impl Default for Client {
             uuid: String::new(),
             core: Core::default(),
             vmess: ClientOptions::default(),
-            tls: Tls {
-                enabled: true,
-                ..Tls::default()
-            },
+            security: Security::Tls(Tls::default()),
             transport: Transport::default(),
             multiplex: None,
             network: Network::default(),
@@ -118,7 +115,7 @@ fields!(Client {
     uuid: "UUID",
     core: "核心",
     vmess: "VMess",
-    tls: "TLS",
+    security: "加密",
     transport: "传输",
     multiplex: "多路复用",
     network: "网络",

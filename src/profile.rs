@@ -235,7 +235,7 @@ impl Builder<'_> {
         let mut clients = Vec::new();
         for port in source.ports()? {
             self.progress.check()?;
-            for tls in self.tls(&source)? {
+            for security in self.security(&source)? {
                 let server = source.address.clone();
                 let transport = source.transport.clone();
                 match &source.protocol {
@@ -271,7 +271,7 @@ impl Builder<'_> {
                             for version in versions {
                                 clients.push(Connection::Http(connection::Http {
                                     proxy: proxy.clone(),
-                                    tls: tls.clone(),
+                                    security: security.clone(),
                                     transport: transport.clone(),
                                     http: connection::HttpOptions {
                                         version,
@@ -284,7 +284,7 @@ impl Builder<'_> {
                         if value.socks.enabled {
                             clients.push(Connection::Socks(connection::Socks {
                                 proxy,
-                                tls,
+                                security,
                                 transport,
                                 ..connection::Socks::default()
                             }));
@@ -308,7 +308,7 @@ impl Builder<'_> {
                             server,
                             port,
                             uuid: uuid.clone(),
-                            tls,
+                            security,
                             transport,
                             vless: crate::vless::ClientOptions {
                                 flow: value.flow,
@@ -324,7 +324,7 @@ impl Builder<'_> {
                             server,
                             port,
                             uuid: uuid.clone(),
-                            tls,
+                            security,
                             transport,
                             vmess: crate::vmess::ClientOptions {
                                 alter_id: value.alter_id,
@@ -339,7 +339,7 @@ impl Builder<'_> {
                             server,
                             port,
                             password: password.to_owned(),
-                            tls,
+                            security,
                             transport,
                             multiplex: multiplex(value.multiplex.as_ref()),
                             ..crate::trojan::Client::default()
@@ -365,7 +365,7 @@ impl Builder<'_> {
                             server,
                             port,
                             password,
-                            tls,
+                            security,
                             transport,
                             shadowsocks: crate::shadowsocks::ClientOptions {
                                 cipher: value.cipher,
@@ -407,7 +407,7 @@ impl Builder<'_> {
                             server,
                             port,
                             password: password.to_owned(),
-                            tls,
+                            tls: security.tls().cloned().ok_or("Hysteria 2 入口使用 TLS")?,
                             hysteria: crate::hysteria::ClientOptions {
                                 obfs: value.obfs.clone(),
                                 quic: value.client.clone(),
@@ -424,7 +424,7 @@ impl Builder<'_> {
                             server,
                             port,
                             password: password.to_owned(),
-                            tls,
+                            security,
                             ..crate::anytls::Client::default()
                         }));
                     }
@@ -432,7 +432,7 @@ impl Builder<'_> {
                         clients.push(Connection::Forward(crate::forward::Client {
                             server,
                             port,
-                            tls,
+                            security,
                             transport,
                             ..crate::forward::Client::default()
                         }))
@@ -443,24 +443,25 @@ impl Builder<'_> {
         Ok(clients)
     }
 
-    fn tls(&self, source: &Inbound) -> Result<Vec<connection::Tls>> {
-        if !source.tls.enabled {
-            return Ok(vec![connection::Tls::default()]);
-        }
+    fn security(&self, source: &Inbound) -> Result<Vec<connection::Security>> {
+        let Some(server) = source.security.tls() else {
+            return Ok(vec![connection::Security::None]);
+        };
         let mut tls = connection::Tls {
-            enabled: true,
-            alpn: source.tls.alpn.clone(),
-            min_version: source.tls.min_version.clone(),
-            max_version: source.tls.max_version.clone(),
-            cipher_suites: source.tls.cipher_suites.clone(),
-            curves: source.tls.curves.clone(),
+            alpn: server.alpn.clone(),
+            min_version: server.min_version.clone(),
+            max_version: server.max_version.clone(),
+            cipher_suites: server.cipher_suites.clone(),
+            curves: server.curves.clone(),
             ..connection::Tls::default()
         };
-        if source.tls.ech.enabled {
-            tls.ech.enabled = true;
-            tls.ech.config = Some(crate::ech::public(source, self.store)?);
+        if let Some(ech) = &server.ech {
+            tls.ech = Some(connection::Ech {
+                config: Some(crate::ech::public(source, ech, self.store)?),
+                ..connection::Ech::default()
+            });
         }
-        if !source.tls.reality.enabled {
+        let Some(reality) = source.security.reality() else {
             tls.server_name = Some(crate::certificate::name(source)?);
             if !crate::certificate::public(tls.server_name.as_ref().unwrap()) {
                 tls.certificates
@@ -468,36 +469,30 @@ impl Builder<'_> {
                         self.store,
                     ))?);
             }
-            return Ok(vec![tls]);
-        }
+            return Ok(vec![connection::Security::Tls(tls)]);
+        };
         let keys = self
             .config
             .keys
             .get(&source.uuid)
             .and_then(|keys| keys.reality.as_ref())
             .ok_or("缺少已保存的 REALITY 握手材料")?;
-        tls.reality = crate::reality::Client {
-            enabled: true,
+        let client = crate::reality::Client {
+            tls,
             public_key: keys.public_key.clone(),
-            signature_key: source
-                .tls
-                .reality
+            signature_key: reality
                 .signature
                 .then(|| keys.signature_key.clone())
                 .flatten(),
             ..crate::reality::Client::default()
         };
         let mut values = Vec::new();
-        for name in source
-            .tls
-            .reality
-            .names(source.tls.server_name.as_deref())?
-        {
+        for name in reality.names(server.server_name.as_deref())? {
             for short_id in &keys.short_ids {
-                let mut tls = tls.clone();
-                tls.server_name = Some(name.clone());
-                tls.reality.short_id = short_id.clone();
-                values.push(tls);
+                let mut client = client.clone();
+                client.tls.server_name = Some(name.clone());
+                client.short_id = short_id.clone();
+                values.push(connection::Security::Reality(Box::new(client)));
             }
         }
         Ok(values)
@@ -509,30 +504,46 @@ impl Builder<'_> {
             Connection::Http(value) => (
                 &mut value.proxy.core,
                 &mut value.network,
-                Some(&mut value.tls),
+                value.security.tls_mut(),
             ),
             Connection::Socks(value) => (
                 &mut value.proxy.core,
                 &mut value.network,
-                Some(&mut value.tls),
+                value.security.tls_mut(),
             ),
-            Connection::Vless(value) => (&mut value.core, &mut value.network, Some(&mut value.tls)),
-            Connection::Vmess(value) => (&mut value.core, &mut value.network, Some(&mut value.tls)),
-            Connection::Trojan(value) => {
-                (&mut value.core, &mut value.network, Some(&mut value.tls))
-            }
-            Connection::Shadowsocks(value) => {
-                (&mut value.core, &mut value.network, Some(&mut value.tls))
-            }
+            Connection::Vless(value) => (
+                &mut value.core,
+                &mut value.network,
+                value.security.tls_mut(),
+            ),
+            Connection::Vmess(value) => (
+                &mut value.core,
+                &mut value.network,
+                value.security.tls_mut(),
+            ),
+            Connection::Trojan(value) => (
+                &mut value.core,
+                &mut value.network,
+                value.security.tls_mut(),
+            ),
+            Connection::Shadowsocks(value) => (
+                &mut value.core,
+                &mut value.network,
+                value.security.tls_mut(),
+            ),
             Connection::Hysteria2(value) => {
                 (&mut value.core, &mut value.network, Some(&mut value.tls))
             }
-            Connection::AnyTls(value) => {
-                (&mut value.core, &mut value.network, Some(&mut value.tls))
-            }
-            Connection::Forward(value) => {
-                (&mut value.core, &mut value.network, Some(&mut value.tls))
-            }
+            Connection::AnyTls(value) => (
+                &mut value.core,
+                &mut value.network,
+                value.security.tls_mut(),
+            ),
+            Connection::Forward(value) => (
+                &mut value.core,
+                &mut value.network,
+                value.security.tls_mut(),
+            ),
             Connection::Warp(value) => {
                 value.server = Some(value.server().to_owned());
                 (&mut value.core, &mut value.network, None)
@@ -554,13 +565,18 @@ impl Builder<'_> {
                 &mut tls.client_certificate_file,
             ),
             (&mut tls.client_key, &mut tls.client_key_file),
-            (&mut tls.ech.config, &mut tls.ech.config_file),
         ] {
             if let Some(file) = file.take()
                 && inline.is_none()
             {
                 *inline = Some(std::fs::read_to_string(self.store.directory.join(file))?);
             }
+        }
+        if let Some(ech) = &mut tls.ech
+            && let Some(file) = ech.config_file.take()
+            && ech.config.is_none()
+        {
+            ech.config = Some(std::fs::read_to_string(self.store.directory.join(file))?);
         }
         Ok(target)
     }

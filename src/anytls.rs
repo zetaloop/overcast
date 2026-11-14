@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    connection::{Core, Network, Tls},
+    connection::{Core, Network, Security, Tls},
     form::fields,
 };
 
@@ -14,7 +14,7 @@ pub struct Client {
     pub password: String,
     pub core: Core,
     pub anytls: ClientOptions,
-    pub tls: Tls,
+    pub security: Security,
     pub network: Network,
 }
 
@@ -27,10 +27,7 @@ impl Default for Client {
             password: String::new(),
             core: Core::default(),
             anytls: ClientOptions::default(),
-            tls: Tls {
-                enabled: true,
-                ..Tls::default()
-            },
+            security: Security::Tls(Tls::default()),
             network: Network::default(),
         }
     }
@@ -61,7 +58,7 @@ fields!(Client {
     password: "密码",
     core: "核心",
     anytls: "AnyTLS",
-    tls: "TLS",
+    security: "加密",
     network: "网络",
 });
 

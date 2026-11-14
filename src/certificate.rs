@@ -17,9 +17,9 @@ use crate::{Result, config::Store, inbound::Inbound, progress::Progress};
 
 pub fn name(source: &Inbound) -> Result<String> {
     let value = source
-        .tls
-        .server_name
-        .as_deref()
+        .security
+        .tls()
+        .and_then(|tls| tls.server_name.as_deref())
         .filter(|value| !value.is_empty())
         .unwrap_or(&source.address)
         .trim()
