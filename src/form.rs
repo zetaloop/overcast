@@ -397,7 +397,8 @@ impl<T: Value> Value for Vec<T> {
                 .iter()
                 .enumerate()
                 .map(|(index, value)| {
-                    let mut item = Item::new(index.to_string(), (index + 1).to_string().stylized());
+                    let mut item =
+                        Item::new((index + 1).to_string(), (index + 1).to_string().stylized());
                     item.value = value.text();
                     item.marker = value.marker();
                     item
