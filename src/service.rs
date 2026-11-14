@@ -686,7 +686,9 @@ impl Orchestrator<'_> {
                 )),
                 None,
             )?;
-            certificate::wait(self.store, &certificates, self.progress)?;
+            certificate::wait(self.store, &certificates, self.progress, || {
+                Ok(Deployment::load(self.store)?.id == target.id)
+            })?;
         } else if target.caddy().is_none()
             && let Some(name) = &caddy
         {

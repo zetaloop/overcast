@@ -83,7 +83,12 @@ pub fn root(store: &Store) -> PathBuf {
     store.directory.join("caddy/pki/authorities/local/root.crt")
 }
 
-pub fn wait(store: &Store, names: &BTreeSet<String>, progress: &Progress) -> Result<()> {
+pub fn wait(
+    store: &Store,
+    names: &BTreeSet<String>,
+    progress: &Progress,
+    current: impl Fn() -> Result<bool>,
+) -> Result<()> {
     if names.is_empty() {
         return Ok(());
     }
@@ -101,8 +106,12 @@ pub fn wait(store: &Store, names: &BTreeSet<String>, progress: &Progress) -> Res
     let directory = store.directory.join("caddy");
     store.create_dir(&directory)?;
     watcher.watch(&directory, RecursiveMode::Recursive)?;
+    watcher.watch(&store.directory, RecursiveMode::NonRecursive)?;
     let step = progress.activity("准备证书");
     progress.until(|| {
+        if !current()? {
+            return Err(std::io::Error::new(ErrorKind::Interrupted, "部署已被替换").into());
+        }
         if let Some(error) = failure.lock().expect("certificate lock poisoned").take() {
             return Err(error.into());
         }
