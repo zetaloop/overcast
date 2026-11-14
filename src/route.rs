@@ -14,6 +14,7 @@ use crate::{
     config::{Config, Reference, Store},
     form::{self, Value},
     geodata::Catalog,
+    graph::Coverage,
     inbound,
     input::Editor,
     outbound,
@@ -158,10 +159,15 @@ fn children<'a>(rules: &'a mut Vec<Rule>, path: &[usize]) -> Result<&'a mut Vec<
     }
 }
 
-fn rows(rules: &[Rule], config: &Config) -> (Vec<Vec<usize>>, Vec<Item>) {
+fn rows(
+    rules: &[Rule],
+    config: &Config,
+    coverage: Option<&Coverage>,
+) -> (Vec<Vec<usize>>, Vec<Item>) {
     fn append(
         rules: &[Rule],
         config: &Config,
+        coverage: Option<&Coverage>,
         path: &mut Vec<usize>,
         prefix: &str,
         rows: &mut Vec<(Vec<usize>, Item)>,
@@ -178,22 +184,39 @@ fn rows(rules: &[Rule], config: &Config) -> (Vec<Vec<usize>>, Vec<Item>) {
                 condition => condition.text(config),
             };
             let last = index + 1 == rules.len();
-            let mut item = Item::new(key, label.stylized());
-            item.branch = Some(format!("{prefix}{}", if last { "└─ " } else { "├─ " }));
+            let root = path.len() == 1;
+            let reached = coverage.is_none_or(|coverage| {
+                coverage
+                    .reached
+                    .iter()
+                    .any(|reached| reached.starts_with(path))
+            });
+            let mut item = Item::new(
+                key,
+                if reached {
+                    label.stylized()
+                } else {
+                    label.foreground(AnsiColor::BrightBlack)
+                },
+            );
+            item.branch = Some(match (root, last) {
+                (true, _) => String::new(),
+                (false, true) => format!("{prefix}└─ "),
+                (false, false) => format!("{prefix}├─ "),
+            });
             item.value = rule.destination.name(config);
             rows.push((path.clone(), item));
-            append(
-                &rule.children,
-                config,
-                path,
-                &format!("{prefix}{}", if last { "   " } else { "│  " }),
-                rows,
-            );
+            let prefix = match (root, last) {
+                (true, _) => String::new(),
+                (false, true) => format!("{prefix}   "),
+                (false, false) => format!("{prefix}│  "),
+            };
+            append(&rule.children, config, coverage, path, &prefix, rows);
             path.pop();
         }
     }
     let mut rows = Vec::new();
-    append(rules, config, &mut Vec::new(), "", &mut rows);
+    append(rules, config, coverage, &mut Vec::new(), "", &mut rows);
     rows.into_iter().unzip()
 }
 
@@ -545,7 +568,7 @@ fn move_rule(
     let mut rules = config.rules.clone();
     let mut notice = String::new();
     while !screen.exiting {
-        let (paths, items) = rows(&rules, &config);
+        let (paths, items) = rows(&rules, &config, None);
         let selected = paths
             .iter()
             .position(|current| *current == path)
@@ -695,17 +718,23 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
     let mut notice = String::new();
     loop {
         let config = store.load()?;
-        let (paths, mut items) = rows(&config.rules, &config);
+        let coverage = crate::service::Deployment::load(store)?.coverage;
+        let (paths, mut items) = rows(&config.rules, &config, Some(&coverage));
+        if coverage.remainder {
+            let mut item = Item::new("", "其余流量".stylized());
+            item.branch = Some(String::new());
+            item.value = Destination::Block.name(&config);
+            item.inert = true;
+            items.push(item);
+        }
+        let mut create = Item::new("new", "创建规则".stylized());
+        create.gap = true;
         if let Some(path) = focus.take()
             && let Some(index) = paths.iter().position(|current| *current == path)
         {
             selected = index;
         }
-        items.extend([
-            Item::new("new", "创建规则".stylized()),
-            Item::new("update", "更新规则数据".stylized()),
-            Item::new("back", "返回".stylized()),
-        ]);
+        items.extend([create, Item::new("back", "返回".stylized())]);
         let menu = Menu {
             title: "分流",
             heading: "",
@@ -736,11 +765,6 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                         Err(error) => Err(error),
                     }
                 }
-                "update" => screen
-                    .work("更新规则数据", "", |progress| {
-                        crate::maintenance::rules(store, progress)
-                    })
-                    .map(|_| ()),
                 _ => return Ok(()),
             },
             _ => continue,

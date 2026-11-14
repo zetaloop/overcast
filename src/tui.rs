@@ -38,6 +38,8 @@ pub struct Item {
     pub label: Line,
     pub value: String,
     pub detail: String,
+    pub gap: bool,
+    pub inert: bool,
 }
 
 impl Item {
@@ -49,6 +51,8 @@ impl Item {
             label,
             value: String::new(),
             detail: String::new(),
+            gap: false,
+            inert: false,
         }
     }
 }
@@ -281,45 +285,64 @@ impl Screen {
         let count = (height as usize)
             .saturating_sub(footer.len() + offset + 2)
             .max(1);
-        let start = selected.saturating_sub(count - 1);
+        let height = |start: usize, end: usize| {
+            end - start
+                + 1
+                + items[start + 1..=end]
+                    .iter()
+                    .filter(|item| item.gap)
+                    .count()
+        };
+        let mut start = selected.saturating_sub(count - 1);
+        while start < selected && height(start, selected) > count {
+            start += 1;
+        }
+        let mut row = offset;
         lines.extend(
             items
                 .iter()
                 .enumerate()
                 .skip(start)
-                .take(count)
-                .map(|(index, item)| {
-                    let label = visible(&item.label.content);
-                    let mut line = item.label.clone();
-                    if let Some(branch) = &item.branch {
-                        let available =
-                            (width as usize).saturating_sub(branch.width() + destination_width + 5);
-                        let label = clip(&label, available);
-                        line.content = Cow::Owned(format!(
-                            "  {branch}{label}{} → {}",
-                            " ".repeat(available.saturating_sub(label.width())),
-                            clip(&item.value, destination_width),
-                        ));
-                        return line;
+                .take_while(|(index, _)| height(start, *index) <= count)
+                .flat_map(|(index, item)| {
+                    let gap = (item.gap && index > start).then(|| String::new().stylized());
+                    if index <= selected && index > start {
+                        row += 1 + usize::from(gap.is_some());
                     }
-                    line.content = Cow::Owned(format!(
-                        "  {} {}{}    {}",
-                        item.marker,
-                        label,
-                        " ".repeat(label_width - label.width()),
-                        if index == selected {
-                            value
-                                .as_ref()
-                                .map_or(item.value.as_str(), |(text, _, _)| text)
-                        } else {
-                            ""
-                        },
-                    ));
-                    line
-                }),
+                    gap.into_iter()
+                        .chain([(index, item)].into_iter().map(|(index, item)| {
+                            let label = visible(&item.label.content);
+                            let mut line = item.label.clone();
+                            if let Some(branch) = &item.branch {
+                                let available = (width as usize)
+                                    .saturating_sub(branch.width() + destination_width + 5);
+                                let label = clip(&label, available);
+                                line.content = Cow::Owned(format!(
+                                    "  {branch}{label}{} → {}",
+                                    " ".repeat(available.saturating_sub(label.width())),
+                                    clip(&item.value, destination_width),
+                                ));
+                                return line;
+                            }
+                            line.content = Cow::Owned(format!(
+                                "  {} {}{}    {}",
+                                item.marker,
+                                label,
+                                " ".repeat(label_width - label.width()),
+                                if index == selected {
+                                    value
+                                        .as_ref()
+                                        .map_or(item.value.as_str(), |(text, _, _)| text)
+                                } else {
+                                    ""
+                                },
+                            ));
+                            line
+                        }))
+                })
+                .collect::<Vec<_>>(),
         );
         lines.extend(footer);
-        let row = offset + selected - start;
         let label = visible(&item.label.content);
         let end = label.len() + label_width.saturating_sub(label.width()) + item.marker.len() + 6;
         let (highlight, cursor) = match value {
@@ -560,6 +583,9 @@ impl Screen {
             return Err("菜单中没有可选择的项目".into());
         }
         *selected = (*selected).min(items.len() - 1);
+        if items[*selected].inert {
+            *selected = step(items, *selected, 1);
+        }
         let mut notice = notice.to_owned();
         if !notice.is_empty() {
             self.arguments.clear();
@@ -590,10 +616,10 @@ impl Screen {
                 return Ok(Action::Key(key));
             }
             match key.code {
-                KeyCode::Up => *selected = (*selected + items.len() - 1) % items.len(),
-                KeyCode::Down => *selected = (*selected + 1) % items.len(),
-                KeyCode::Home | KeyCode::PageUp => *selected = 0,
-                KeyCode::End | KeyCode::PageDown => *selected = items.len() - 1,
+                KeyCode::Up => *selected = step(items, *selected, items.len() - 1),
+                KeyCode::Down => *selected = step(items, *selected, 1),
+                KeyCode::Home | KeyCode::PageUp => *selected = step(items, items.len() - 1, 1),
+                KeyCode::End | KeyCode::PageDown => *selected = step(items, 0, items.len() - 1),
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => return Ok(Action::Select),
                 KeyCode::Escape | KeyCode::Left => return Ok(Action::Back),
                 _ => return Ok(Action::Key(key)),
@@ -930,10 +956,9 @@ pub(crate) fn choice(
             .map(|_| selected)
             .ok_or_else(|| "没有可选择的项目".to_owned());
     }
-    let mut matches = items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| item.key == argument || item.label.content == argument);
+    let mut matches = items.iter().enumerate().filter(|(_, item)| {
+        !item.inert && (item.key == argument || item.label.content == argument)
+    });
     let Some((index, _)) = matches.next() else {
         return Err(format!("找不到菜单项：{argument}"));
     };
@@ -963,4 +988,14 @@ fn bar(step: &Step, width: usize, elapsed: Duration) -> String {
     }
     result.push_str(&" ".repeat(cells.saturating_sub(whole + usize::from(partial != 0))));
     format!("{result} {:5.1}%", fraction * 100.0)
+}
+
+fn step(items: &[Item], selected: usize, offset: usize) -> usize {
+    let mut index = selected;
+    loop {
+        index = (index + offset) % items.len();
+        if !items[index].inert || index == selected {
+            return index;
+        }
+    }
 }

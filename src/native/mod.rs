@@ -165,10 +165,26 @@ pub fn prepare(
     geodata: &mut Option<u64>,
     ports: &BTreeMap<String, u16>,
     progress: &Progress,
-) -> Result<Option<Prepared>> {
+) -> Result<(Option<Prepared>, graph::Coverage)> {
     let mut builder = Builder::new(store, config, progress);
-    let Some(mut graph) = builder.graph(geodata)? else {
-        return Ok(None);
+    let mut scopes = HashMap::new();
+    let graph = builder.graph(geodata, Some(&mut scopes))?;
+    let mut coverage = graph::Coverage::default();
+    let mut include = |uuid: Uuid| {
+        if let Some(scope) = scopes.remove(&uuid) {
+            coverage.reached.extend(scope.reached);
+            coverage.remainder |= scope.remainder;
+        }
+    };
+    for inbound in config
+        .inbounds
+        .iter()
+        .filter(|inbound| inbound.listen.enabled)
+    {
+        include(inbound.uuid);
+    }
+    let Some(mut graph) = graph else {
+        return Ok((None, coverage));
     };
     builder.previous = ports.clone();
     let mut listeners = listener::build(store, &mut graph, &config.keys, progress)?;
@@ -178,7 +194,7 @@ pub fn prepare(
         .collect();
     listeners.retain(|listener| listener.source.listen.enabled);
     if listeners.is_empty() {
-        return Ok(None);
+        return Ok((None, coverage));
     }
     builder.reserved = listeners
         .iter()
@@ -283,6 +299,7 @@ pub fn prepare(
             };
             let port = builder.port(&tag, networks)?;
             let listener = member.internal(port, layer)?;
+            include(uuid);
             for &network in &listener.binding.networks {
                 internal.insert((uuid, network, layer), listeners.len());
             }
@@ -772,11 +789,14 @@ pub fn prepare(
     }
     progress.check()?;
     step.finish(format!("{} 个服务实例", state.instances.len()));
-    Ok(Some(Prepared {
-        directory,
-        keys,
-        state,
-    }))
+    Ok((
+        Some(Prepared {
+            directory,
+            keys,
+            state,
+        }),
+        coverage,
+    ))
 }
 
 pub fn analyze<'a>(
@@ -785,16 +805,21 @@ pub fn analyze<'a>(
     geodata: &mut Option<u64>,
     progress: &'a Progress,
 ) -> Result<Option<graph::Graph<'a>>> {
-    Builder::new(store, config, progress).graph(geodata)
+    Builder::new(store, config, progress).graph(geodata, None)
 }
 
 impl<'a> Builder<'a> {
-    fn graph(&mut self, geodata: &mut Option<u64>) -> Result<Option<graph::Graph<'a>>> {
+    fn graph(
+        &mut self,
+        geodata: &mut Option<u64>,
+        coverage: Option<&mut HashMap<Uuid, graph::Coverage>>,
+    ) -> Result<Option<graph::Graph<'a>>> {
         graph::build(
             self.store,
             self.config,
             geodata,
             self.progress,
+            coverage,
             |core, destination, network, payload| {
                 self.available(core, destination, network, payload)
             },

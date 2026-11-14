@@ -47,6 +47,7 @@ pub struct Deployment {
     pub config: Config,
     pub geodata: Option<u64>,
     pub ports: BTreeMap<String, u16>,
+    pub coverage: crate::graph::Coverage,
     units: Vec<Unit>,
 }
 
@@ -113,6 +114,7 @@ impl Deployment {
         config: &Config,
         resources: &mut Resources,
         prepared: Option<&Prepared>,
+        coverage: crate::graph::Coverage,
         previous: &Self,
         progress: &Progress,
     ) -> Result<Self> {
@@ -120,6 +122,7 @@ impl Deployment {
             id: Uuid::new_v4(),
             config: config.clone(),
             geodata: resources.geodata,
+            coverage,
             ..Self::default()
         };
         let Some(prepared) = prepared else {

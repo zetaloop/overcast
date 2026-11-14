@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use varisat::{ExtendFormula, Lit, Solver};
 
@@ -14,6 +15,13 @@ use crate::{
     target::Targets,
     user::User,
 };
+
+#[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Coverage {
+    pub reached: BTreeSet<Vec<usize>>,
+    pub remainder: bool,
+}
 
 pub struct Graph<'a> {
     pub targets: Targets,
@@ -257,6 +265,7 @@ pub fn build<'a>(
     config: &'a Config,
     geodata: &mut Option<u64>,
     progress: &'a Progress,
+    mut coverage: Option<&mut HashMap<Uuid, Coverage>>,
     mut reachable: impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
 ) -> Result<Option<Graph<'a>>> {
     if config.inbounds.is_empty()
@@ -298,6 +307,10 @@ pub fn build<'a>(
         if !graph.enabled(inbound, &mut reachable)? {
             continue;
         }
+        let mut scope = coverage
+            .as_deref_mut()
+            .filter(|_| inbound.protocol.routing())
+            .map(|coverage| coverage.entry(inbound.uuid).or_default());
         let mut accounts = Vec::new();
         let mut users = HashSet::new();
         for network in [Network::Tcp, Network::Udp] {
@@ -306,7 +319,13 @@ pub fn build<'a>(
             }
             if inbound.users && inbound.protocol.users() {
                 for user in &config.users {
-                    let routes = graph.routes(inbound, Some(user.uuid), network, &mut reachable)?;
+                    let routes = graph.routes(
+                        inbound,
+                        Some(user.uuid),
+                        network,
+                        &mut reachable,
+                        scope.as_deref_mut(),
+                    )?;
                     if let Some(route) = routes
                         .iter()
                         .find(|route| route.destination != Destination::Block)
@@ -330,7 +349,8 @@ pub fn build<'a>(
                     }
                 }
             } else {
-                let anonymous = graph.routes(inbound, None, network, &mut reachable)?;
+                let anonymous =
+                    graph.routes(inbound, None, network, &mut reachable, scope.as_deref_mut())?;
                 if inbound.credentials.is_some()
                     && inbound.protocol.users()
                     && !network.identity(inbound)
@@ -351,7 +371,7 @@ pub fn build<'a>(
                     .filter(|_| inbound.protocol.destination().is_none())
                 {
                     let authenticated =
-                        graph.routes(inbound, Some(user.uuid), network, &mut reachable)?;
+                        graph.routes(inbound, Some(user.uuid), network, &mut reachable, None)?;
                     let destinations: HashSet<_> = anonymous
                         .iter()
                         .chain(&authenticated)
@@ -603,8 +623,9 @@ impl<'a> Analysis<'a> {
         user: Option<Uuid>,
         network: Network,
         reachable_destination: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
+        coverage: Option<&mut Coverage>,
     ) -> Result<Vec<Route>> {
-        let mut routes = self.resolve(inbound, user, network, reachable_destination)?;
+        let mut routes = self.resolve(inbound, user, network, reachable_destination, coverage)?;
         for route in &mut routes {
             if let Destination::Inbound(uuid) = route.destination
                 && !self.reaches(uuid, network, Layer::Transport, reachable_destination)?
@@ -621,6 +642,7 @@ impl<'a> Analysis<'a> {
         user: Option<Uuid>,
         network: Network,
         reachable_destination: &mut impl FnMut(Core, Destination, Network, Payload) -> Result<bool>,
+        mut coverage: Option<&mut Coverage>,
     ) -> Result<Vec<Route>> {
         if let Some(destination) = inbound.protocol.destination() {
             return Ok(
@@ -685,8 +707,16 @@ impl<'a> Analysis<'a> {
                     route.destination = Destination::Block;
                 }
                 route.condition = condition;
+                if let Some(scope) = &mut coverage {
+                    scope.reached.insert(route.path.clone());
+                }
                 reachable.push(route);
             }
+        }
+        if let Some(scope) = coverage
+            && !scope.remainder
+        {
+            scope.remainder = self.possible(remaining, inbound.core)?;
         }
         Ok(reachable)
     }
@@ -754,7 +784,7 @@ impl<'a> Analysis<'a> {
                     continue;
                 }
                 for &user in &users {
-                    for route in self.resolve(inbound, user, network, reachable)? {
+                    for route in self.resolve(inbound, user, network, reachable, None)? {
                         match route.destination {
                             Destination::Block => {}
                             Destination::Inbound(uuid) => {

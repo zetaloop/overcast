@@ -288,7 +288,7 @@ impl Store {
             if let Some(target) = previous.reuse(self, &config, &resources)? {
                 return Ok((result, None, target));
             }
-            let prepared = native::prepare(
+            let (prepared, coverage) = native::prepare(
                 self,
                 &config,
                 &mut resources.geodata,
@@ -303,6 +303,7 @@ impl Store {
                 &config,
                 &mut resources,
                 prepared.as_ref(),
+                coverage,
                 &previous,
                 progress,
             )?;
