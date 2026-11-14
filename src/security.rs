@@ -47,7 +47,7 @@ impl<T, R: Handshake<T>> Security<T, R> {
         }
     }
 
-    fn index(&self) -> usize {
+    pub fn index(&self) -> usize {
         match self {
             Self::None => 0,
             Self::Tls(_) => 1,
@@ -84,8 +84,14 @@ impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
             .position(|&mode| mode == self.index())
             .unwrap_or_default();
         let mut notice = String::new();
+        let mut direct = modes == [self.index()];
         loop {
-            match screen.select(&menu, &mut selected, &notice)? {
+            let action = if std::mem::take(&mut direct) {
+                Action::Select
+            } else {
+                screen.select(&menu, &mut selected, &notice)?
+            };
+            match action {
                 Action::Back => return Ok(false),
                 Action::Select if selected == modes.len() => return Ok(false),
                 Action::Select => {

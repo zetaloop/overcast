@@ -82,10 +82,82 @@ impl Inbound {
             return Err("监听地址需要填写 IP、localhost 或套接字路径".into());
         }
         self.ports()?;
+        let kind = self.protocol.kind();
+        if !kind.cores().contains(&self.core) {
+            return Err(format!("{} 入站没有 {} 实现", kind.text(), self.core.text()).into());
+        }
+        if !self.securities().contains(&self.security.index()) {
+            return Err(format!("{} 入站不支持 {} 加密", kind.text(), self.security.text()).into());
+        }
+        if !self.supports_transport(&self.transport) {
+            return Err(format!(
+                "{} 的 {} 入站不能使用 {} 传输",
+                self.core.text(),
+                kind.text(),
+                self.transport.text()
+            )
+            .into());
+        }
         if let Some(credentials) = &self.credentials {
             user::password(&credentials.password)?;
         }
         Ok(())
+    }
+
+    fn securities(&self) -> &'static [usize] {
+        match (self.protocol.kind(), self.core) {
+            (Kind::Hysteria2, _) => &[1],
+            (Kind::AnyTls, Core::Mihomo) => &[0, 1],
+            (Kind::Shadowsocks | Kind::Forward, Core::SingBox | Core::Mihomo) => &[0],
+            _ => &[0, 1, 2],
+        }
+    }
+
+    fn transports(&self) -> bool {
+        match self.protocol.kind() {
+            Kind::Hysteria2 | Kind::AnyTls => false,
+            Kind::Mixed | Kind::Shadowsocks | Kind::Forward => self.core == Core::Xray,
+            Kind::Vless | Kind::Vmess | Kind::Trojan => true,
+        }
+    }
+
+    fn supports_transport(&self, transport: &Transport) -> bool {
+        if transport.is_default() {
+            return true;
+        }
+        self.transports()
+            && match self.core {
+                Core::Xray => {
+                    !matches!(transport, Transport::Quic)
+                        && (self.security.reality().is_none() || transport.xray_reality())
+                }
+                Core::SingBox => match transport {
+                    Transport::Kcp(_) | Transport::XHttp(_) => false,
+                    Transport::Quic => matches!(self.security, Security::Tls(_)),
+                    _ => true,
+                },
+                Core::Mihomo => {
+                    matches!(transport, Transport::WebSocket(_) | Transport::Grpc(_))
+                        || matches!(
+                            (&self.protocol, transport),
+                            (Protocol::Vless(_), Transport::XHttp(_))
+                                | (Protocol::Vmess(_), Transport::Kcp(_))
+                        )
+                }
+            }
+    }
+
+    fn fit(&mut self) {
+        let modes = self.securities();
+        if !modes.contains(&self.security.index()) {
+            self.security = match modes[0] {
+                1 => Security::Tls(Tls::default()),
+                _ => Security::None,
+            };
+        }
+        if !self.transports() {
+            self.transport = Transport::default();
+        }
     }
 
     pub fn quic(&self) -> bool {
@@ -166,6 +238,13 @@ impl Kind {
             | Self::AnyTls
             | Self::Forward => Core::SingBox,
             Self::Vless => Core::Xray,
+        }
+    }
+
+    fn cores(self) -> &'static [Core] {
+        match self {
+            Self::AnyTls => &[Core::SingBox, Core::Mihomo],
+            _ => &[Core::Xray, Core::SingBox, Core::Mihomo],
         }
     }
 
@@ -619,12 +698,14 @@ fn edit(
         transport.value = inbound.transport.text();
         let mut listen = Item::new("listen", "监听".stylized());
         listen.value = inbound.listen.enabled.text();
-        items.extend([
-            Item::new("options", "协议参数".stylized()),
-            transport,
-            security,
-            listen,
-        ]);
+        items.push(Item::new("options", "协议参数".stylized()));
+        if inbound.transports() {
+            items.push(transport);
+        }
+        if inbound.securities() != [0] {
+            items.push(security);
+        }
+        items.push(listen);
         if existing && !changing && inbound.listen.enabled {
             items.push(Item::new("export", "连接资料".stylized()));
         }
@@ -694,7 +775,39 @@ fn edit(
                 "name" => edit!(name),
                 "address" => edit!(address),
                 "ports" => edit!(ports),
-                "core" => edit!(core),
+                "core" => {
+                    let kind = inbound.protocol.kind();
+                    let choices: Vec<_> = Core::choices()
+                        .into_iter()
+                        .filter(|(_, _, core)| kind.cores().contains(core))
+                        .collect();
+                    let current = choices
+                        .iter()
+                        .position(|(_, _, core)| *core == inbound.core)
+                        .unwrap_or_default();
+                    let fitted = |core: Core| {
+                        let mut edited = (*original).clone();
+                        edited.core = core;
+                        edited.fit();
+                        edited
+                    };
+                    let mut core = inbound.core;
+                    let title = format!("{} / 核心", menu.title);
+                    let changed = form::choose(
+                        &mut core,
+                        screen,
+                        &title,
+                        &choices,
+                        current,
+                        Rc::new(|core, screen| apply(&fitted(*core), screen)),
+                        false,
+                    );
+                    changed.map(|changed| {
+                        if changed {
+                            inbound = fitted(core);
+                        }
+                    })
+                }
                 "users" => edit!(users),
                 "outbound" => {
                     let current = inbound.protocol.destination().unwrap();
@@ -739,6 +852,7 @@ fn edit(
                             .get(&kind)
                             .cloned()
                             .unwrap_or_else(|| kind.protocol());
+                        edited.fit();
                         edited
                     };
                     match kind.edit(screen, &menu, selected, Rc::new(|_, _| Ok(()))) {
@@ -781,8 +895,32 @@ fn edit(
                         inbound.protocol = value
                     }),
                 ),
-                "security" => edit!(security),
-                "transport" => edit!(transport),
+                "security" => {
+                    let title = format!("{} / 加密", menu.title);
+                    inbound
+                        .security
+                        .choose(
+                            screen,
+                            &title,
+                            inbound.securities(),
+                            form::map(original, apply.clone(), |inbound, value| {
+                                inbound.security = value
+                            }),
+                        )
+                        .map(|_| ())
+                }
+                "transport" => inbound
+                    .transport
+                    .choose(
+                        screen,
+                        &menu,
+                        selected,
+                        form::map(original.clone(), apply.clone(), |inbound, value| {
+                            inbound.transport = value
+                        }),
+                        |value| original.supports_transport(value),
+                    )
+                    .map(|_| ()),
                 "listen" => edit!(listen),
                 "handshake" => store.load().and_then(|config| {
                     let source = config

@@ -352,17 +352,11 @@ impl Transport {
             }
     }
 
-    fn index(&self) -> usize {
-        match self {
-            Self::Default => 0,
-            Self::WebSocket(_) => 1,
-            Self::HttpUpgrade(_) => 2,
-            Self::Grpc(_) => 3,
-            Self::XHttp(_) => 4,
-            Self::Http(_) => 5,
-            Self::Kcp(_) => 6,
-            Self::Quic => 7,
-        }
+    pub fn xray_reality(&self) -> bool {
+        matches!(
+            self,
+            Self::Default | Self::Http(_) | Self::Grpc(_) | Self::XHttp(_)
+        )
     }
 }
 
@@ -389,27 +383,48 @@ impl Value for Transport {
         apply: form::Apply<'_, Self>,
         _: bool,
     ) -> Result<bool> {
+        self.choose(screen, parent, field, apply, |_| true)
+    }
+}
+
+impl Transport {
+    pub fn choose(
+        &mut self,
+        screen: &mut Screen,
+        parent: &Menu<'_>,
+        field: usize,
+        apply: form::Apply<'_, Self>,
+        allowed: impl Fn(&Self) -> bool,
+    ) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
-        let mut saved = BTreeMap::new();
-        let mut selected = self.index();
+        let mut choices: Vec<_> = [
+            ("default", Self::Default),
+            ("websocket", Self::WebSocket(Default::default())),
+            ("httpupgrade", Self::HttpUpgrade(Default::default())),
+            ("grpc", Self::Grpc(Default::default())),
+            ("xhttp", Self::XHttp(Box::default())),
+            ("http", Self::Http(Default::default())),
+            ("kcp", Self::Kcp(Default::default())),
+            ("quic", Self::Quic),
+        ]
+        .into_iter()
+        .filter(|(_, value)| allowed(value))
+        .collect();
+        let mut current = choices
+            .iter()
+            .position(|(_, value)| std::mem::discriminant(value) == std::mem::discriminant(self));
+        let mut selected = current.unwrap_or(0);
+        let mut items: Vec<_> = choices
+            .iter()
+            .map(|(key, value)| Item::new(*key, value.text().stylized()))
+            .collect();
+        items.push(Item::new("back", "返回".stylized()));
         let mut changed = false;
         let mut notice = String::new();
         loop {
-            let mut items: Vec<_> = [
-                ("default", "默认"),
-                ("websocket", "WebSocket"),
-                ("httpupgrade", "HTTPUpgrade"),
-                ("grpc", "gRPC"),
-                ("xhttp", "XHTTP"),
-                ("http", "HTTP"),
-                ("kcp", "KCP"),
-                ("quic", "QUIC"),
-                ("back", "返回"),
-            ]
-            .into_iter()
-            .map(|(key, label)| Item::new(key, label.stylized()))
-            .collect();
-            items[self.index()].marker = "■";
+            if let Some(index) = current {
+                items[index].marker = "■";
+            }
             let menu = Menu {
                 title: &title,
                 heading: "",
@@ -420,22 +435,11 @@ impl Value for Transport {
                 Action::Back => return Ok(changed),
                 Action::Select if selected == items.len() - 1 => return Ok(changed),
                 Action::Select => {
-                    saved.insert(self.index(), self.clone());
-                    let mut candidate =
-                        saved
-                            .get(&selected)
-                            .cloned()
-                            .unwrap_or_else(|| match selected {
-                                1 => Self::WebSocket(WebSocket::default()),
-                                2 => Self::HttpUpgrade(HttpUpgrade::default()),
-                                3 => Self::Grpc(Grpc::default()),
-                                4 => Self::XHttp(Box::default()),
-                                5 => Self::Http(Http::default()),
-                                6 => Self::Kcp(Kcp::default()),
-                                7 => Self::Quic,
-                                _ => Self::Default,
-                            });
-                    let creating = selected != self.index();
+                    if let Some(index) = current {
+                        choices[index].1 = self.clone();
+                    }
+                    let mut candidate = choices[selected].1.clone();
+                    let creating = current != Some(selected);
                     let result = match &mut candidate {
                         Self::Default => form::set(screen, self, Self::Default, &apply),
                         Self::Quic => form::set(screen, self, Self::Quic, &apply),
@@ -515,6 +519,9 @@ impl Value for Transport {
                     match result {
                         Ok(accepted) => {
                             if accepted {
+                                if let Some(index) = current.replace(selected) {
+                                    items[index].marker = ">";
+                                }
                                 *self = candidate;
                                 changed = true;
                             }

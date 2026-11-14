@@ -295,11 +295,6 @@ fn validate(
         return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
     }
     if matches!(source.protocol, Protocol::Hysteria2(_)) {
-        if !matches!(source.security, crate::inbound::Security::Tls(_))
-            || !source.transport.is_default()
-        {
-            return super::unsupported("Hysteria 2 使用协议自身的 QUIC 与 TLS");
-        }
         for credential in users.values() {
             crate::hysteria::password(&credential.password)?;
         }

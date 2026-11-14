@@ -412,9 +412,6 @@ pub fn listeners(
     globals: &mut Map<String, Value>,
     target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
-    if matches!(source.protocol, Protocol::Mixed(_)) && !source.transport.is_default() {
-        return unsupported("Mihomo 的 HTTP/SOCKS 入站没有传输封装配置");
-    }
     let mut output = Map::from_iter([
         ("listen".to_owned(), json!(source.listen.address)),
         ("port".to_owned(), json!(source.ports)),
@@ -481,9 +478,6 @@ pub fn listeners(
     keep_alive(&mut options, globals)?;
     options.finish("Mihomo 监听")?;
     if let Protocol::AnyTls(value) = &source.protocol {
-        if !source.transport.is_default() || source.security.reality().is_some() {
-            return unsupported("Mihomo AnyTLS 入站使用原生 TCP 与 TLS");
-        }
         let mut options = Options::new(value)?;
         options.take("padding_scheme");
         options.finish("Mihomo AnyTLS 入站")?;
@@ -519,9 +513,6 @@ pub fn listeners(
         return Ok(vec![output]);
     }
     if let Protocol::Vless(value) = &source.protocol {
-        if matches!(source.transport, crate::transport::Transport::Kcp(_)) {
-            return unsupported("Mihomo VLESS 没有 KCP 传输配置");
-        }
         if users.is_empty() {
             return unsupported("VLESS 入口需要认证用户");
         }
@@ -555,9 +546,6 @@ pub fn listeners(
         if users.is_empty() {
             return unsupported("VMess 入口需要认证用户");
         }
-        if matches!(source.transport, crate::transport::Transport::XHttp(_)) {
-            return unsupported("Mihomo VMess 没有 XHTTP 传输配置");
-        }
         let mut options = Options::new(value)?;
         options.take("alter_id");
         options.take("multiplex");
@@ -576,14 +564,6 @@ pub fn listeners(
     if let Protocol::Trojan(value) = &source.protocol {
         if users.is_empty() {
             return unsupported("Trojan 入口需要认证用户");
-        }
-        if !matches!(
-            source.transport,
-            crate::transport::Transport::Default
-                | crate::transport::Transport::WebSocket(_)
-                | crate::transport::Transport::Grpc(_)
-        ) {
-            return unsupported("Mihomo Trojan 入站使用原生 TCP、WebSocket 或 gRPC");
         }
         let mut options = Options::new(value)?;
         options.take("multiplex");
@@ -604,9 +584,6 @@ pub fn listeners(
         return Ok(vec![output]);
     }
     if let Protocol::Shadowsocks(value) = &source.protocol {
-        if !matches!(source.security, inbound::Security::None) || !source.transport.is_default() {
-            return unsupported("Mihomo Shadowsocks 入站使用原生 TCP/UDP 或协议插件");
-        }
         if !value.tcp {
             return unsupported("Mihomo Shadowsocks 入站启用 TCP 监听");
         }
@@ -639,9 +616,6 @@ pub fn listeners(
     if let Protocol::Forward(value) = &source.protocol {
         if value.user_level.is_some() {
             return unsupported("Mihomo 固定转发入口没有用户等级配置");
-        }
-        if !matches!(source.security, inbound::Security::None) || !source.transport.is_default() {
-            return unsupported("Mihomo 固定转发入口使用原生 TCP/UDP 监听");
         }
         let (server, port) = target.ok_or("转发入口缺少后继连接")?;
         output.insert("type".to_owned(), json!("tunnel"));

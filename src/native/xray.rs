@@ -599,7 +599,7 @@ pub fn listeners(
             }
             options.finish("Xray Shadowsocks 入站")?;
         }
-        Protocol::AnyTls(_) => return unsupported("Xray 没有 AnyTLS 入站"),
+        Protocol::AnyTls(_) => unreachable!("validated inbound core"),
         Protocol::Hysteria2(value) => {
             output.insert("protocol".to_owned(), json!("hysteria"));
             settings.insert("version".to_owned(), json!(2));
@@ -895,12 +895,10 @@ fn fallbacks(source: &[inbound::Fallback]) -> Result<Value> {
 }
 
 fn reality_transport(source: &crate::transport::Transport) -> Result<()> {
-    match source {
-        crate::transport::Transport::Default
-        | crate::transport::Transport::Http(_)
-        | crate::transport::Transport::Grpc(_)
-        | crate::transport::Transport::XHttp(_) => Ok(()),
-        _ => unsupported("Xray REALITY 可用于原生 TCP、XHTTP 和 gRPC 传输"),
+    if source.xray_reality() {
+        Ok(())
+    } else {
+        unsupported("Xray REALITY 可用于原生 TCP、XHTTP 和 gRPC 传输")
     }
 }
 

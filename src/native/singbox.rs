@@ -401,9 +401,6 @@ pub fn listeners(
     store: &Store,
     target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
-    if matches!(source.protocol, Protocol::Mixed(_)) && !source.transport.is_default() {
-        return unsupported("sing-box 的 HTTP/SOCKS 入站没有传输封装配置");
-    }
     let mut output = Map::from_iter([
         ("listen".to_owned(), json!(source.listen.address)),
         (
@@ -483,9 +480,6 @@ pub fn listeners(
     }
     options.finish("sing-box 监听")?;
     if let Protocol::AnyTls(value) = &source.protocol {
-        if !source.transport.is_default() {
-            return unsupported("sing-box AnyTLS 使用原生 TCP 连接");
-        }
         let mut options = Options::new(value)?;
         options.copy(&mut output, &["padding_scheme"]);
         options.finish("sing-box AnyTLS 入站")?;
@@ -593,9 +587,6 @@ pub fn listeners(
         return Ok(vec![output]);
     }
     if let Protocol::Shadowsocks(value) = &source.protocol {
-        if !matches!(source.security, inbound::Security::None) || !source.transport.is_default() {
-            return unsupported("sing-box Shadowsocks 入站使用原生 TCP/UDP 监听");
-        }
         let multi = super::shadowsocks::multi(source, users.len());
         if value.cipher != crate::shadowsocks::Cipher::None
             && (users.is_empty() || !multi && users.len() > 1)
@@ -650,9 +641,6 @@ pub fn listeners(
     if let Protocol::Forward(value) = &source.protocol {
         if value.user_level.is_some() {
             return unsupported("sing-box 固定转发入口没有用户等级配置");
-        }
-        if !matches!(source.security, inbound::Security::None) || !source.transport.is_default() {
-            return unsupported("sing-box 固定转发入口使用原生 TCP/UDP 监听");
         }
         let (server, port) = target.ok_or("转发入口缺少后继连接")?;
         output.insert("type".to_owned(), json!("direct"));
