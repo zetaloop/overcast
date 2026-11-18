@@ -57,6 +57,17 @@ pub fn copy(
     }
 }
 
+pub fn has_link(connections: &[Connection]) -> bool {
+    let mut chain = connections
+        .iter()
+        .rev()
+        .filter(|c| !matches!(c, Connection::Direct(_)));
+    chain
+        .next()
+        .is_some_and(|c| !matches!(c, Connection::Forward(_) | Connection::Warp(_)))
+        && chain.all(|c| matches!(c, Connection::Forward(_)))
+}
+
 pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<String> {
     let mut values = Vec::new();
     for connection in connections {

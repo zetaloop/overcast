@@ -256,6 +256,7 @@ fn edit(
     loop {
         let active = outbound.effective();
         let changed = !existing || serde_json::to_vec(&active)? != initial;
+        let share_link = !changed && crate::share::has_link(&active.connections);
         let title = if existing {
             format!("出站 / {}", outbound.name)
         } else {
@@ -288,7 +289,15 @@ fn edit(
                 Item::new("create", "创建".stylized())
             });
         } else {
-            items.push(Item::new("export", "连接资料".stylized()));
+            items.push(Item::new(
+                "export",
+                if share_link {
+                    "连接资料"
+                } else {
+                    "复制出站配置"
+                }
+                .stylized(),
+            ));
             if outbound.connections.len() > 1 {
                 items.push(Item::new("select", "复制部分连接".stylized()));
             }
@@ -348,11 +357,8 @@ fn edit(
             }
             (Action::Key(key), Some(index)) if matches!(key.code, KeyCode::Char('l' | 'L')) => {
                 let connection = &active.connections[index];
-                screen.copy(&crate::share::link(
-                    connection,
-                    &connection.summary(),
-                    store,
-                )?)
+                crate::share::link(connection, &connection.summary(), store)
+                    .and_then(|text| screen.copy(&text))
             }
             (Action::Key(key), Some(index)) if key.code == KeyCode::Delete => {
                 outbound.connections.remove(index);
@@ -381,14 +387,15 @@ fn edit(
                     }
                     Ok(())
                 }
+                "export" if !share_link => active.selection().copy(screen),
                 "export" => crate::share::copy(screen, "连接资料", |_, links| {
                     if links {
-                        crate::share::path(&outbound.connections, &outbound.name, store)
+                        crate::share::path(&active.connections, &active.name, store)
                     } else {
-                        Ok(serde_json::to_string(&outbound.selection())?)
+                        Ok(serde_json::to_string(&active.selection())?)
                     }
                 }),
-                "select" => copy_connections(screen, &outbound),
+                "select" => copy_connections(screen, &active),
                 "create" | "apply" => {
                     let result = screen.work(
                         "保存出站",
