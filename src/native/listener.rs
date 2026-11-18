@@ -289,13 +289,7 @@ fn validate(
             return Err(format!("入站 {} 的{name}数据报需要独立 UDP 套接字", source.name).into());
         }
     }
-    if users.is_empty()
-        && !matches!(source.protocol, Protocol::Mixed(_))
-        && !matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
-        && source.protocol.users()
-        && source.protocol.fallbacks().is_empty()
-        && !source.protocol.responds()
-    {
+    if users.is_empty() && source.protocol.needs_credentials() {
         return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
     }
     if matches!(source.protocol, Protocol::Hysteria2(_)) {

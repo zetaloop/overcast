@@ -56,6 +56,10 @@ pub trait Value: Clone + Default {
 
 pub type Apply<'a, T> = Rc<dyn Fn(&T, &mut Screen) -> Result<()> + 'a>;
 
+pub fn local<T>() -> Apply<'static, T> {
+    Rc::new(|_, _| Ok(()))
+}
+
 pub fn map<'a, T: Clone + 'a, U: Clone + 'a>(
     value: Rc<T>,
     apply: Apply<'a, T>,

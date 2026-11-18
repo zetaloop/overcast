@@ -146,17 +146,26 @@ impl Inbound {
             }
     }
 
-    fn fit(&mut self) {
-        let modes = self.securities();
-        if !modes.contains(&self.security.index()) {
-            self.security = match modes[0] {
+    fn effective(&self) -> Self {
+        let mut value = self.clone();
+        let modes = value.securities();
+        if !modes.contains(&value.security.index()) {
+            value.security = match modes[0] {
                 1 => Security::Tls(Tls::default()),
                 _ => Security::None,
             };
         }
-        if !self.transports() {
-            self.transport = Transport::default();
+        if !value.supports_transport(&value.transport) {
+            value.transport = Transport::default();
         }
+        value.users &= value.protocol.users();
+        if value.users
+            || !value.protocol.users()
+            || matches!(&value.protocol, Protocol::Shadowsocks(ss) if ss.cipher == crate::shadowsocks::Cipher::None)
+        {
+            value.credentials = None;
+        }
+        value
     }
 
     pub fn quic(&self) -> bool {
@@ -295,6 +304,14 @@ impl Protocol {
 
     pub fn users(&self) -> bool {
         !matches!(self, Self::Forward(_))
+    }
+
+    pub fn needs_credentials(&self) -> bool {
+        self.users()
+            && !matches!(self, Self::Mixed(_))
+            && !matches!(self, Self::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
+            && self.fallbacks().is_empty()
+            && !self.responds()
     }
 
     pub fn destination(&self) -> Option<crate::route::Destination> {
@@ -630,31 +647,15 @@ fn edit(
     mut inbound: Inbound,
 ) -> Result<Option<Uuid>> {
     let mut protocols = BTreeMap::new();
-    let mut previous = None;
+    let saved = serde_json::to_vec(&inbound)?;
+    let initial = serde_json::to_vec(&inbound.effective())?;
     let mut selected = 0;
     let mut opening = !existing;
     let mut notice = String::new();
     loop {
-        let changing = previous.is_some();
-        let apply: form::Apply<'_, Inbound> = Rc::new(|edited, screen| {
-            if existing && !changing {
-                screen.work("保存入站", &edited.name, |progress| {
-                    store.update(progress, |config, _| {
-                        let current = config
-                            .inbounds
-                            .iter_mut()
-                            .find(|current| current.uuid == edited.uuid)
-                            .ok_or("入站已被删除")?;
-                        *current = edited.clone();
-                        Ok(())
-                    })
-                })?;
-            }
-            Ok(())
-        });
-        let title = if changing {
-            format!("更换协议 / {}", inbound.name)
-        } else if existing {
+        let mut active = inbound.effective();
+        let changed = !existing || serde_json::to_vec(&active)? != initial;
+        let title = if existing {
             format!("入站 / {}", inbound.name)
         } else {
             "创建入站".to_owned()
@@ -680,27 +681,44 @@ fn edit(
             let mut users = Item::new("users", "用户支持".stylized());
             users.marker = inbound.users.marker();
             items.push(users);
-            if inbound.users {
-                items.push(Item::new("new-user", "新增用户".stylized()));
-            } else {
-                let mut credentials = Item::new("credentials", "入口凭据".stylized());
-                credentials.value = inbound.credentials.as_ref().map_or_else(
-                    || "无".to_owned(),
-                    |credentials| credentials.uuid.to_string(),
-                );
-                credentials.detail = "Del 清除凭据".to_owned();
+            if !inbound.users
+                && !matches!(&inbound.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
+            {
+                let (label, value) = match &inbound.protocol {
+                    Protocol::Mixed(_) => (
+                        "入口凭据",
+                        inbound.credentials.as_ref().map(|c| c.uuid.to_string()),
+                    ),
+                    Protocol::Vless(_) | Protocol::Vmess(_) => (
+                        "入口 UUID",
+                        inbound.credentials.as_ref().map(|c| c.uuid.to_string()),
+                    ),
+                    _ => (
+                        "入口密码",
+                        inbound.credentials.as_ref().map(|c| c.password.clone()),
+                    ),
+                };
+                let mut credentials = Item::new("credentials", label.stylized());
+                credentials.value = value.unwrap_or_else(|| "无".to_owned());
+                if inbound.credentials.is_some() && !inbound.protocol.needs_credentials() {
+                    credentials.detail = "Del 清除凭据".to_owned();
+                }
                 items.push(credentials);
             }
         }
         let mut security = Item::new("security", "加密".stylized());
-        security.value = inbound.security.text();
+        security.value = active.security.text();
         let mut transport = Item::new("transport", "传输".stylized());
-        transport.value = inbound.transport.text();
+        transport.value = active.transport.text();
         let mut listen = Item::new("listen", "监听".stylized());
         listen.value = match inbound.listen.text() {
             text if text.is_empty() => inbound.listen.enabled.text(),
             text => text,
         };
+        if std::mem::take(&mut opening) {
+            selected = items.len();
+        }
+        items.push(listen);
         items.push(Item::new("options", "协议参数".stylized()));
         if inbound.transports() {
             items.push(transport);
@@ -708,18 +726,15 @@ fn edit(
         if inbound.securities() != [0] {
             items.push(security);
         }
-        if std::mem::take(&mut opening) {
-            selected = items.len();
-        }
-        items.push(listen);
-        if existing && !changing && inbound.listen.enabled {
+        let actions = items.len();
+        if !changed && inbound.listen.enabled {
             items.push(Item::new("export", "连接资料".stylized()));
         }
-        if existing && !changing && crate::keys::Keys::needed(&inbound) {
+        if !changed && crate::keys::Keys::needed(&inbound) {
             items.push(Item::new("handshake", "握手资料".stylized()));
         }
-        items.push(if changing {
-            Item::new("apply", "应用".stylized())
+        items.push(if existing && changed {
+            Item::new("apply", "确定".stylized())
         } else if existing {
             Item::new("delete", "删除入站".foreground(AnsiColor::BrightRed))
         } else {
@@ -727,13 +742,14 @@ fn edit(
         });
         items.push(Item::new(
             "back",
-            if changing { "取消" } else { "返回" }.stylized(),
+            if changed { "取消" } else { "返回" }.stylized(),
         ));
+        items[actions].gap = true;
         let menu = Menu {
             title: &title,
             heading: "",
             items: &items,
-            help: if changing {
+            help: if changed {
                 "方向键 选择\n回车键 编辑\nEsc 取消"
             } else {
                 "方向键 选择\n回车键 编辑\nEsc 返回"
@@ -743,38 +759,25 @@ fn edit(
         if matches!(action, Action::Back)
             || matches!(action, Action::Select) && items[selected].key == "back"
         {
-            if let Some(original) = previous.take() {
-                inbound = original;
-                selected = 1;
-                notice.clear();
-                continue;
-            }
             return Ok(existing.then_some(inbound.uuid));
         }
-        let original = Rc::new(inbound.clone());
         macro_rules! edit {
             ($field:ident) => {
                 inbound
                     .$field
-                    .edit(
-                        screen,
-                        &menu,
-                        selected,
-                        form::map(original, apply.clone(), |inbound, value| {
-                            inbound.$field = value
-                        }),
-                    )
+                    .edit(screen, &menu, selected, form::local())
                     .map(|_| ())
             };
         }
         let result = match action {
             Action::Back => return Ok(existing.then_some(inbound.uuid)),
             Action::Key(key)
-                if key.code == KeyCode::Delete && items[selected].key == "credentials" =>
+                if key.code == KeyCode::Delete
+                    && items[selected].key == "credentials"
+                    && !inbound.protocol.needs_credentials() =>
             {
-                let mut edited = inbound.clone();
-                edited.credentials = None;
-                form::set(screen, &mut inbound, edited, &apply).map(|_| ())
+                inbound.credentials = None;
+                Ok(())
             }
             Action::Select => match items[selected].key.as_str() {
                 "export" => crate::profile::copy(screen, store, Some(inbound.uuid), None),
@@ -789,30 +792,28 @@ fn edit(
                         .iter()
                         .position(|(_, _, core)| *core == inbound.core)
                         .unwrap_or_default();
-                    let fitted = |core: Core| {
-                        let mut edited = (*original).clone();
-                        edited.core = core;
-                        edited.fit();
-                        edited
-                    };
-                    let mut core = inbound.core;
                     let title = format!("{} / 核心", menu.title);
-                    let changed = form::choose(
-                        &mut core,
+                    form::choose(
+                        &mut inbound.core,
                         screen,
                         &title,
                         &choices,
                         current,
-                        Rc::new(|core, screen| apply(&fitted(*core), screen)),
+                        form::local(),
                         false,
-                    );
-                    changed.map(|changed| {
-                        if changed {
-                            inbound = fitted(core);
-                        }
-                    })
+                    )
+                    .map(|_| ())
                 }
-                "users" => edit!(users),
+                "users" => {
+                    if inbound.users
+                        && inbound.credentials.is_none()
+                        && inbound.protocol.needs_credentials()
+                    {
+                        inbound.credentials = Some(Credentials::new()?);
+                    }
+                    inbound.users = !inbound.users;
+                    Ok(())
+                }
                 "outbound" => {
                     let current = inbound.protocol.destination().unwrap();
                     let progress = crate::progress::Progress::default();
@@ -822,109 +823,89 @@ fn edit(
                         current,
                         false,
                         |config, destination| {
-                            crate::native::available(
-                                store,
-                                config,
-                                &inbound,
-                                destination,
-                                &progress,
-                            )
+                            crate::native::available(store, config, &active, destination, &progress)
                         },
                     )
-                    .and_then(|selection| {
-                        if let Some(destination) = selection {
-                            let mut edited = inbound.clone();
-                            if let Protocol::Forward(value) = &mut edited.protocol {
-                                value.outbound = destination;
-                            }
-                            form::set(screen, &mut inbound, edited, &apply).map(|_| ())
-                        } else {
-                            Ok(())
+                    .map(|selection| {
+                        if let Some(destination) = selection
+                            && let Protocol::Forward(value) = &mut inbound.protocol
+                        {
+                            value.outbound = destination;
                         }
                     })
                 }
-                "new-user" => user::create(screen, store).map(|_| ()),
                 "protocol" => {
                     let mut kind = inbound.protocol.kind();
-                    protocols.insert(kind, inbound.protocol.clone());
-                    let candidate = |kind: Kind| {
-                        let mut edited = inbound.clone();
-                        if kind != inbound.protocol.kind() {
-                            edited.core = kind.core();
-                        }
-                        edited.protocol = protocols
-                            .get(&kind)
-                            .cloned()
-                            .unwrap_or_else(|| kind.protocol());
-                        edited.fit();
-                        edited
-                    };
-                    match kind.edit(screen, &menu, selected, Rc::new(|_, _| Ok(()))) {
-                        Ok(true) => {
-                            let edited = candidate(kind);
-                            if existing && kind != inbound.protocol.kind() {
-                                previous.get_or_insert_with(|| inbound.clone());
+                    kind.edit(screen, &menu, selected, form::local())
+                        .map(|edited| {
+                            if edited {
+                                protocols.insert(
+                                    inbound.protocol.kind(),
+                                    (inbound.core, inbound.protocol.clone()),
+                                );
+                                (inbound.core, inbound.protocol) = protocols
+                                    .remove(&kind)
+                                    .unwrap_or_else(|| (kind.core(), kind.protocol()));
                             }
-                            inbound = edited;
-                            Ok(())
-                        }
-                        Ok(false) => Ok(()),
-                        Err(error) => Err(error),
-                    }
+                        })
                 }
                 "credentials" => {
-                    let creating = inbound.credentials.is_none();
                     let credentials = match &inbound.credentials {
                         Some(credentials) => Ok(credentials.clone()),
                         None => Credentials::new(),
                     };
                     credentials.and_then(|mut credentials| {
-                        if form::edit(
-                            screen,
-                            "入口凭据",
-                            &mut credentials,
-                            form::map(original, apply.clone(), |inbound, value| {
-                                inbound.credentials = Some(value)
-                            }),
-                            creating,
-                        )? {
+                        let changed = match inbound.protocol {
+                            Protocol::Mixed(_) => {
+                                form::edit(
+                                    screen,
+                                    "入口凭据",
+                                    &mut credentials,
+                                    form::local(),
+                                    false,
+                                )? || inbound.credentials.is_none()
+                            }
+                            Protocol::Vless(_) | Protocol::Vmess(_) => {
+                                credentials
+                                    .uuid
+                                    .edit(screen, &menu, selected, form::local())?
+                            }
+                            _ => {
+                                credentials
+                                    .password
+                                    .edit(screen, &menu, selected, form::local())?
+                            }
+                        };
+                        if changed {
                             inbound.credentials = Some(credentials);
                         }
                         Ok(())
                     })
                 }
-                "options" => inbound.protocol.edit(
-                    screen,
-                    form::map(original, apply.clone(), |inbound, value| {
-                        inbound.protocol = value
-                    }),
-                ),
+                "options" => inbound.protocol.edit(screen, form::local()),
                 "security" => {
                     let title = format!("{} / 加密", menu.title);
-                    inbound
+                    active
                         .security
-                        .choose(
-                            screen,
-                            &title,
-                            inbound.securities(),
-                            form::map(original, apply.clone(), |inbound, value| {
-                                inbound.security = value
-                            }),
-                        )
-                        .map(|_| ())
+                        .choose(screen, &title, inbound.securities(), form::local())
+                        .map(|edited| {
+                            if edited {
+                                inbound.security = active.security;
+                            }
+                        })
                 }
-                "transport" => inbound
-                    .transport
-                    .choose(
-                        screen,
-                        &menu,
-                        selected,
-                        form::map(original.clone(), apply.clone(), |inbound, value| {
-                            inbound.transport = value
-                        }),
-                        |value| original.supports_transport(value),
-                    )
-                    .map(|_| ()),
+                "transport" => {
+                    let mut transport = active.transport.clone();
+                    transport
+                        .choose(screen, &menu, selected, form::local(), |value| {
+                            active.supports_transport(value)
+                        })
+                        .map(|edited| {
+                            if edited {
+                                inbound.transport = transport;
+                            }
+                        })
+                }
                 "listen" => edit!(listen),
                 "handshake" => store.load().and_then(|config| {
                     let source = config
@@ -961,16 +942,20 @@ fn edit(
                 "create" | "apply" => {
                     let result = screen.work("保存入站", &inbound.name, |progress| {
                         store.update(progress, |config, _| {
-                            let mut value = inbound.clone();
+                            let mut value = active.clone();
                             if value.name.trim().is_empty() {
                                 value.name = value.summary();
                             }
                             if existing {
-                                *config
+                                let current = config
                                     .inbounds
                                     .iter_mut()
                                     .find(|current| current.uuid == inbound.uuid)
-                                    .ok_or("入站已被删除")? = value;
+                                    .ok_or("入站已被删除")?;
+                                if serde_json::to_vec(&*current)? != saved {
+                                    return Err("入站已在其他编辑中更改，请重新打开".into());
+                                }
+                                *current = value;
                             } else {
                                 config.inbounds.push(value);
                             }
@@ -978,12 +963,7 @@ fn edit(
                         })
                     });
                     if result.is_ok() {
-                        if existing {
-                            previous = None;
-                            selected = 1;
-                        } else {
-                            return Ok(Some(inbound.uuid));
-                        }
+                        return Ok(Some(inbound.uuid));
                     }
                     result
                 }
