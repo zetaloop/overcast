@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Display,
-    rc::Rc,
 };
 
 use percent_encoding::percent_decode_str;
@@ -324,96 +323,22 @@ impl Connection {
         }
     }
 
-    pub fn edit(&mut self, screen: &mut Screen, apply: form::Apply<'_, Self>) -> Result<()> {
-        self.form(screen, apply, false).map(|_| ())
-    }
-
-    fn form(
-        &mut self,
-        screen: &mut Screen,
-        apply: form::Apply<'_, Self>,
-        creating: bool,
-    ) -> Result<bool> {
+    pub fn edit(&mut self, screen: &mut Screen) -> Result<()> {
         let title = self.summary();
         match self {
-            Self::Direct(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Direct(value.clone()), screen)),
-                creating,
-            ),
-            Self::Http(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Http(value.clone()), screen)),
-                creating,
-            ),
-            Self::Socks(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Socks(value.clone()), screen)),
-                creating,
-            ),
-            Self::Vless(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Vless(value.clone()), screen)),
-                creating,
-            ),
-            Self::Vmess(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Vmess(value.clone()), screen)),
-                creating,
-            ),
-            Self::Trojan(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Trojan(value.clone()), screen)),
-                creating,
-            ),
-            Self::Shadowsocks(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Shadowsocks(value.clone()), screen)),
-                creating,
-            ),
-            Self::Forward(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Forward(value.clone()), screen)),
-                creating,
-            ),
-            Self::Hysteria2(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Hysteria2(value.clone()), screen)),
-                creating,
-            ),
-            Self::AnyTls(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::AnyTls(value.clone()), screen)),
-                creating,
-            ),
-            Self::Warp(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Warp(value.clone()), screen)),
-                creating,
-            ),
+            Self::Direct(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Http(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Socks(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Vless(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Vmess(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Trojan(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Shadowsocks(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Forward(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Hysteria2(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::AnyTls(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Warp(value) => form::edit(screen, &title, value, form::local(), false),
         }
+        .map(|_| ())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -474,10 +399,7 @@ impl Connection {
     }
 }
 
-pub fn create(
-    screen: &mut Screen,
-    apply: form::Apply<'_, Connection>,
-) -> Result<Option<Connection>> {
+pub fn create(screen: &mut Screen) -> Result<Option<Connection>> {
     let items = [
         Item::new("http", "HTTP".stylized()),
         Item::new("socks", "SOCKS".stylized()),
@@ -517,8 +439,8 @@ pub fn create(
                     10 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
-                let accepted = connection.form(screen, apply, true)?;
-                return Ok(accepted.then_some(connection));
+                connection.edit(screen)?;
+                return Ok(Some(connection));
             }
             _ => {}
         }

@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use serde::{Deserialize, Serialize};
 use termina::{
     event::{KeyCode, Modifiers},
@@ -11,7 +9,7 @@ use crate::{
     Result,
     config::Store,
     connection::{self, Connection},
-    form,
+    form::{self, Value},
     progress::Progress,
     tui::{Action, Item, Menu, Screen},
 };
@@ -235,25 +233,11 @@ fn edit(
     existing: bool,
     mut outbound: Outbound,
 ) -> Result<Option<Uuid>> {
-    let apply: form::Apply<'_, Outbound> = Rc::new(|edited, screen| {
-        if existing {
-            screen.work("保存出站", &format!(" -- {}", edited.name), |progress| {
-                store.update(progress, |config, _| {
-                    let current = config
-                        .outbounds
-                        .iter_mut()
-                        .find(|current| current.uuid == edited.uuid)
-                        .ok_or("出站已被删除")?;
-                    *current = edited.clone();
-                    Ok(())
-                })
-            })?;
-        }
-        Ok(())
-    });
+    let saved = serde_json::to_vec(&outbound)?;
     let mut selected = if existing { 0 } else { 1 };
     let mut notice = String::new();
     loop {
+        let changed = !existing || serde_json::to_vec(&outbound)? != saved;
         let title = if existing {
             format!("出站 / {}", outbound.name)
         } else {
@@ -269,30 +253,46 @@ fn edit(
                 .map(|(index, connection)| {
                     let mut item =
                         Item::new((index + 1).to_string(), connection.summary().stylized());
-                    item.marker = "↓";
+                    if index > 0 {
+                        item.marker = "↓";
+                    } else {
+                        item.gap = true;
+                    }
                     item
                 }),
         );
         items.push(Item::new("add", "添加连接".stylized()));
-        if !existing {
-            items.push(Item::new("create", "创建".stylized()));
-        }
-        items.extend([
-            Item::new("export", "连接资料".stylized()),
-            Item::new("select", "复制部分连接".stylized()),
-        ]);
-        if existing {
+        let actions = items.len();
+        if changed {
+            items.push(if existing {
+                Item::new("apply", "确定".stylized())
+            } else {
+                Item::new("create", "创建".stylized())
+            });
+        } else {
+            items.push(Item::new("export", "连接资料".stylized()));
+            if outbound.connections.len() > 1 {
+                items.push(Item::new("select", "复制部分连接".stylized()));
+            }
             items.push(Item::new(
                 "delete",
                 "删除出站".foreground(AnsiColor::BrightRed),
             ));
         }
-        items.push(Item::new("back", "返回".stylized()));
+        items.push(Item::new(
+            "back",
+            if changed { "取消" } else { "返回" }.stylized(),
+        ));
+        items[actions].gap = true;
         let menu = Menu {
             title: &title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nEsc 返回",
+            help: if changed {
+                "方向键 选择\n回车键 编辑\nEsc 取消"
+            } else {
+                "方向键 选择\n回车键 编辑\nEsc 返回"
+            },
         };
         let action = screen.select(&menu, &mut selected, &notice)?;
         let connection = selected
@@ -300,7 +300,7 @@ fn edit(
             .filter(|index| *index < outbound.connections.len());
         let result = match (action, connection) {
             (Action::Back, _) => return Ok(existing.then_some(outbound.uuid)),
-            (Action::Paste(text), connection) => Selection::parse(&text).and_then(|selections| {
+            (Action::Paste(text), connection) => Selection::parse(&text).map(|selections| {
                 let position = connection.map_or(
                     if selected == 0 {
                         0
@@ -314,11 +314,8 @@ fn edit(
                     .flat_map(|selection| selection.connections)
                     .collect();
                 let count = connections.len();
-                let mut edited = outbound.clone();
-                edited.connections.splice(position..position, connections);
-                form::set(screen, &mut outbound, edited, &apply).map(|_| {
-                    selected = position + count;
-                })
+                outbound.connections.splice(position..position, connections);
+                selected = position + count;
             }),
             (Action::Key(key), connection) if matches!(key.code, KeyCode::Char('c' | 'C')) => {
                 if let Some(index) = connection {
@@ -340,9 +337,8 @@ fn edit(
                 )?)
             }
             (Action::Key(key), Some(index)) if key.code == KeyCode::Delete => {
-                let mut edited = outbound.clone();
-                edited.connections.remove(index);
-                form::set(screen, &mut outbound, edited, &apply).map(|_| ())
+                outbound.connections.remove(index);
+                Ok(())
             }
             (Action::Key(key), Some(index))
                 if key.modifiers.contains(Modifiers::ALT)
@@ -353,45 +349,18 @@ fn edit(
                 } else {
                     (index + 1).min(outbound.connections.len() - 1)
                 };
-                let mut edited = outbound.clone();
-                edited.connections.swap(index, destination);
-                form::set(screen, &mut outbound, edited, &apply).map(|_| {
-                    selected = destination + 1;
-                })
+                outbound.connections.swap(index, destination);
+                selected = destination + 1;
+                Ok(())
             }
-            (Action::Select, Some(index)) => {
-                let apply = form::map(
-                    Rc::new(outbound.clone()),
-                    apply.clone(),
-                    move |outbound, connection| {
-                        outbound.connections[index] = connection;
-                    },
-                );
-                outbound.connections[index].edit(screen, apply)
-            }
+            (Action::Select, Some(index)) => outbound.connections[index].edit(screen),
             (Action::Select, None) => match items[selected].key.as_str() {
-                "name" => {
-                    if let Some(value) =
-                        screen.input(&menu, selected, &outbound.name, |value, screen| {
-                            let edited = Outbound {
-                                name: value.to_owned(),
-                                ..outbound.clone()
-                            };
-                            apply(&edited, screen)?;
-                            Ok(edited.name)
-                        })?
-                    {
-                        outbound.name = value;
-                    }
-                    Ok(())
-                }
+                "name" => outbound
+                    .name
+                    .edit(screen, &menu, selected, form::local())
+                    .map(|_| ()),
                 "add" => {
-                    let apply = form::map(
-                        Rc::new(outbound.clone()),
-                        apply.clone(),
-                        |outbound, connection| outbound.connections.push(connection),
-                    );
-                    if let Some(value) = connection::create(screen, apply)? {
+                    if let Some(value) = connection::create(screen)? {
                         outbound.connections.push(value);
                         selected = outbound.connections.len();
                     }
@@ -405,7 +374,7 @@ fn edit(
                     }
                 }),
                 "select" => copy_connections(screen, &outbound),
-                "create" => {
+                "create" | "apply" => {
                     let result = screen.work(
                         "保存出站",
                         &format!(" -- {}", outbound.name),
@@ -415,7 +384,19 @@ fn edit(
                                 if value.name.trim().is_empty() {
                                     value.name = value.summary();
                                 }
-                                config.outbounds.push(value);
+                                if existing {
+                                    let current = config
+                                        .outbounds
+                                        .iter_mut()
+                                        .find(|current| current.uuid == outbound.uuid)
+                                        .ok_or("出站已被删除")?;
+                                    if serde_json::to_vec(&*current)? != saved {
+                                        return Err("出站已在其他编辑中更改，请重新打开".into());
+                                    }
+                                    *current = value;
+                                } else {
+                                    config.outbounds.push(value);
+                                }
                                 Ok(())
                             })
                         },
