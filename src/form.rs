@@ -46,6 +46,7 @@ pub trait Value: Clone + Default {
 }
 
 pub trait Field {
+    fn key(&self) -> &'static str;
     fn item(&self) -> Item;
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool>;
     fn reset(&mut self);
@@ -89,6 +90,9 @@ pub fn field<'a, T: Value>(
 }
 
 impl<T: Value> Field for Binding<'_, T> {
+    fn key(&self) -> &'static str {
+        self.key
+    }
     fn item(&self) -> Item {
         let mut item = Item::new(self.key, self.label.stylized());
         item.value = self.value.text();
@@ -106,7 +110,24 @@ impl<T: Value> Field for Binding<'_, T> {
 }
 
 pub fn edit<T: Form>(screen: &mut Screen, title: &str, value: &mut T) -> Result<bool> {
-    edit_group(screen, title, value, None, None, None)
+    subset(screen, title, value, |_| true)
+}
+
+pub fn subset<T: Form>(
+    screen: &mut Screen,
+    title: &str,
+    value: &mut T,
+    allowed: impl Fn(&str) -> bool,
+) -> Result<bool> {
+    edit_group(screen, title, value, None, None, None, &allowed)
+}
+
+pub fn retain<T: Form>(value: &mut T, allowed: impl Fn(&str) -> bool) {
+    for mut field in value.fields(T::default()) {
+        if !allowed(field.key()) {
+            field.reset();
+        }
+    }
 }
 
 type Submit<'a, T> = dyn Fn(&T, &mut Screen) -> Result<()> + 'a;
@@ -125,6 +146,7 @@ pub fn page<T: Form + PartialEq>(
         None,
         Some((&|draft| draft != value, &save)),
         None,
+        &|_| true,
     )
     .map(|_| ())
 }
@@ -138,7 +160,15 @@ pub fn optional<T: Form>(
     let mut enabled = slot.is_some();
     let mut value = slot.clone().unwrap_or_default();
     let title = format!("{} / {}", menu.title, menu.items[selected].label.content);
-    let changed = edit_group(screen, &title, &mut value, None, None, Some(&mut enabled))?;
+    let changed = edit_group(
+        screen,
+        &title,
+        &mut value,
+        None,
+        None,
+        Some(&mut enabled),
+        &|_| true,
+    )?;
     if changed {
         *slot = enabled.then_some(value);
     }
@@ -152,6 +182,7 @@ fn edit_group<T: Form>(
     group: Option<&Group>,
     submit: Option<Confirm<'_, T>>,
     mut enabled: Option<&mut bool>,
+    allowed: &dyn Fn(&str) -> bool,
 ) -> Result<bool> {
     let mut selected = 0;
     let mut notice = String::new();
@@ -159,7 +190,7 @@ fn edit_group<T: Form>(
     loop {
         let pending = submit.is_some_and(|(dirty, _)| dirty(value));
         let active = enabled.as_deref().copied().unwrap_or(true);
-        let groups = if active && group.is_none() {
+        let mut groups = if active && group.is_none() {
             value.groups()
         } else {
             Vec::new()
@@ -169,14 +200,17 @@ fn edit_group<T: Form>(
         } else {
             Vec::new()
         };
-        fields.retain(|field| {
-            let item = field.item();
-            match group {
-                Some(group) => group.fields.contains(&item.key.as_str()),
-                None => !groups
-                    .iter()
-                    .any(|group| group.fields.contains(&item.key.as_str())),
-            }
+        fields.retain(|field| allowed(field.key()));
+        groups.retain(|group| {
+            fields
+                .iter()
+                .any(|field| group.fields.contains(&field.key()))
+        });
+        fields.retain(|field| match group {
+            Some(group) => group.fields.contains(&field.key()),
+            None => !groups
+                .iter()
+                .any(|group| group.fields.contains(&field.key())),
         });
         if let Some(flag) = enabled.as_deref_mut() {
             fields.insert(0, field("use", "启用", flag, false));
@@ -227,6 +261,7 @@ fn edit_group<T: Form>(
                     Some(group),
                     None,
                     None,
+                    allowed,
                 )
             }
             Action::Select => fields[selected].edit(screen, &menu, selected),

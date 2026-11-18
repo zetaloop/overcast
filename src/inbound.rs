@@ -157,6 +157,11 @@ impl Inbound {
         if !value.supports_transport(&value.transport) {
             value.transport = Transport::default();
         }
+        if let Security::Reality(reality) = &mut value.security {
+            reality.use_names();
+            let allowed = reality.fields_for(value.core);
+            form::retain(reality.as_mut(), allowed);
+        }
         value.users &= value.protocol.users();
         if value.users
             || !value.protocol.users()
@@ -806,12 +811,25 @@ fn edit(
                 "options" => inbound.protocol.edit(screen),
                 "security" => {
                     let title = format!("{} / 加密", menu.title);
-                    active
-                        .security
-                        .choose(screen, &title, inbound.securities())
+                    let mut security = if inbound.security.index() == active.security.index() {
+                        inbound.security.clone()
+                    } else {
+                        std::mem::take(&mut active.security)
+                    };
+                    security
+                        .choose(
+                            screen,
+                            &title,
+                            inbound.securities(),
+                            |screen, title, reality| {
+                                reality.use_names();
+                                let allowed = reality.fields_for(inbound.core);
+                                form::subset(screen, title, reality, allowed)
+                            },
+                        )
                         .map(|edited| {
                             if edited {
-                                inbound.security = active.security;
+                                inbound.security = security;
                             }
                         })
                 }

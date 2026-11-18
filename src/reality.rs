@@ -146,6 +146,29 @@ impl Client {
 }
 
 impl Server {
+    pub fn use_names(&mut self) {
+        if let Some(name) = self.tls.server_name.take()
+            && self.server_names.is_empty()
+        {
+            self.server_names.push(name);
+        }
+    }
+
+    pub fn fields_for(&self, core: crate::inbound::Core) -> impl Fn(&str) -> bool + use<> {
+        use crate::inbound::Core;
+        let blocked = self.outbound == Some(Destination::Block);
+        move |field| match field {
+            "target" | "server_names" | "private_key" | "short_ids" | "max_time_difference" => true,
+            "outbound" => core != Core::Xray || blocked,
+            "network" | "alpn" | "min_version" | "max_version" | "cipher_suites"
+            | "handshake_timeout" | "kernel_tx" | "kernel_rx" => core == Core::SingBox,
+            "upload" | "download" => core != Core::SingBox,
+            "key_log" | "target_network" | "proxy_protocol" | "min_client_version"
+            | "max_client_version" | "signature" | "signature_seed" | "debug" => core == Core::Xray,
+            _ => false,
+        }
+    }
+
     pub fn endpoint(&self) -> Result<Option<(String, u16)>> {
         if self.target.is_empty() {
             return Err("请填写 REALITY 握手目标".into());
@@ -244,7 +267,7 @@ fields!(Client {
 });
 
 fields!(Server {
-    tls: "TLS",
+    tls: ..,
     target: "握手目标",
     target_network: "目标网络类型",
     network: "目标连接参数",
@@ -261,6 +284,11 @@ fields!(Server {
     upload: "回落上传",
     download: "回落下载",
     debug: "调试",
+} groups {
+    authentication: "认证材料" => [private_key, short_ids, signature, signature_seed],
+    target_options: "目标连接" => [target_network, network, outbound, proxy_protocol],
+    clients: "客户端限制" => [min_client_version, max_client_version, max_time_difference],
+    fallback: "回落限速" => [upload, download],
 });
 
 fields!(Limit {

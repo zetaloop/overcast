@@ -55,7 +55,13 @@ impl<T, R: Handshake<T>> Security<T, R> {
 }
 
 impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
-    pub fn choose(&mut self, screen: &mut Screen, title: &str, modes: &[usize]) -> Result<bool> {
+    pub fn choose(
+        &mut self,
+        screen: &mut Screen,
+        title: &str,
+        modes: &[usize],
+        edit_reality: impl FnOnce(&mut Screen, &str, &mut R) -> Result<bool>,
+    ) -> Result<bool> {
         let labels = ["无", "TLS", "REALITY"];
         let mut items: Vec<_> = modes
             .iter()
@@ -98,7 +104,7 @@ impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
         let edited = match self {
             Self::None => false,
             Self::Tls(value) => form::edit(screen, &title, value)?,
-            Self::Reality(value) => form::edit(screen, &title, value.as_mut())?,
+            Self::Reality(value) => edit_reality(screen, &title, value.as_mut())?,
         };
         Ok(edited || switching)
     }
@@ -111,6 +117,6 @@ impl<T: Form, R: Form + Handshake<T>> Value for Security<T, R> {
 
     fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
-        self.choose(screen, &title, &[0, 1, 2])
+        self.choose(screen, &title, &[0, 1, 2], form::edit)
     }
 }
