@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeMap, rc::Rc};
+use std::{borrow::Cow, collections::BTreeMap};
 
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
@@ -375,15 +375,8 @@ impl Value for Transport {
         .to_owned()
     }
 
-    fn run(
-        &mut self,
-        screen: &mut Screen,
-        parent: &Menu<'_>,
-        field: usize,
-        apply: form::Apply<'_, Self>,
-        _: bool,
-    ) -> Result<bool> {
-        self.choose(screen, parent, field, apply, |_| true)
+    fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
+        self.choose(screen, parent, field, |_| true)
     }
 }
 
@@ -393,11 +386,10 @@ impl Transport {
         screen: &mut Screen,
         parent: &Menu<'_>,
         field: usize,
-        apply: form::Apply<'_, Self>,
         allowed: impl Fn(&Self) -> bool,
     ) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
-        let mut choices: Vec<_> = [
+        let choices: Vec<_> = [
             ("default", Self::Default),
             ("websocket", Self::WebSocket(Default::default())),
             ("httpupgrade", Self::HttpUpgrade(Default::default())),
@@ -410,7 +402,7 @@ impl Transport {
         .into_iter()
         .filter(|(_, value)| allowed(value))
         .collect();
-        let mut current = choices
+        let current = choices
             .iter()
             .position(|(_, value)| std::mem::discriminant(value) == std::mem::discriminant(self));
         let mut selected = current.unwrap_or(0);
@@ -419,116 +411,35 @@ impl Transport {
             .map(|(key, value)| Item::new(*key, value.text().stylized()))
             .collect();
         items.push(Item::new("back", "返回".stylized()));
-        let mut changed = false;
-        let mut notice = String::new();
+        if let Some(index) = current {
+            items[index].marker = "■";
+        }
         loop {
-            if let Some(index) = current {
-                items[index].marker = "■";
-            }
             let menu = Menu {
                 title: &title,
                 heading: "",
                 items: &items,
                 help: "方向键 选择\n回车键 编辑\nEsc 返回",
             };
-            match screen.select(&menu, &mut selected, &notice)? {
-                Action::Back => return Ok(changed),
-                Action::Select if selected == items.len() - 1 => return Ok(changed),
+            match screen.select(&menu, &mut selected, "")? {
+                Action::Back => return Ok(false),
+                Action::Select if selected == items.len() - 1 => return Ok(false),
                 Action::Select => {
-                    if let Some(index) = current {
-                        choices[index].1 = self.clone();
+                    let switching = current != Some(selected);
+                    if switching {
+                        *self = choices[selected].1.clone();
                     }
-                    let mut candidate = choices[selected].1.clone();
-                    let creating = current != Some(selected);
-                    let result = match &mut candidate {
-                        Self::Default => form::set(screen, self, Self::Default, &apply),
-                        Self::Quic => form::set(screen, self, Self::Quic, &apply),
-                        Self::WebSocket(value) => {
-                            let apply = apply.clone();
-                            form::edit(
-                                screen,
-                                &format!("{title} / WebSocket"),
-                                value,
-                                Rc::new(move |value, screen| {
-                                    apply(&Self::WebSocket(value.clone()), screen)
-                                }),
-                                creating,
-                            )
-                        }
-                        Self::HttpUpgrade(value) => {
-                            let apply = apply.clone();
-                            form::edit(
-                                screen,
-                                &format!("{title} / HTTPUpgrade"),
-                                value,
-                                Rc::new(move |value, screen| {
-                                    apply(&Self::HttpUpgrade(value.clone()), screen)
-                                }),
-                                creating,
-                            )
-                        }
-                        Self::Grpc(value) => {
-                            let apply = apply.clone();
-                            form::edit(
-                                screen,
-                                &format!("{title} / gRPC"),
-                                value,
-                                Rc::new(move |value, screen| {
-                                    apply(&Self::Grpc(value.clone()), screen)
-                                }),
-                                creating,
-                            )
-                        }
-                        Self::XHttp(value) => {
-                            let apply = apply.clone();
-                            form::edit(
-                                screen,
-                                &format!("{title} / XHTTP"),
-                                value.as_mut(),
-                                Rc::new(move |value, screen| {
-                                    apply(&Self::XHttp(Box::new(value.clone())), screen)
-                                }),
-                                creating,
-                            )
-                        }
-                        Self::Http(value) => {
-                            let apply = apply.clone();
-                            form::edit(
-                                screen,
-                                &format!("{title} / HTTP"),
-                                value,
-                                Rc::new(move |value, screen| {
-                                    apply(&Self::Http(value.clone()), screen)
-                                }),
-                                creating,
-                            )
-                        }
-                        Self::Kcp(value) => {
-                            let apply = apply.clone();
-                            form::edit(
-                                screen,
-                                &format!("{title} / KCP"),
-                                value,
-                                Rc::new(move |value, screen| {
-                                    apply(&Self::Kcp(value.clone()), screen)
-                                }),
-                                creating,
-                            )
-                        }
+                    let title = format!("{title} / {}", self.text());
+                    let edited = match self {
+                        Self::Default | Self::Quic => false,
+                        Self::WebSocket(value) => form::edit(screen, &title, value)?,
+                        Self::HttpUpgrade(value) => form::edit(screen, &title, value)?,
+                        Self::Grpc(value) => form::edit(screen, &title, value)?,
+                        Self::XHttp(value) => form::edit(screen, &title, value.as_mut())?,
+                        Self::Http(value) => form::edit(screen, &title, value)?,
+                        Self::Kcp(value) => form::edit(screen, &title, value)?,
                     };
-                    match result {
-                        Ok(accepted) => {
-                            if accepted {
-                                if let Some(index) = current.replace(selected) {
-                                    items[index].marker = ">";
-                                }
-                                *self = candidate;
-                                changed = true;
-                            }
-                            notice.clear();
-                        }
-                        Err(error) => notice = error.to_string(),
-                    }
+                    return Ok(edited || switching);
                 }
                 _ => {}
             }

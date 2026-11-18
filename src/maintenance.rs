@@ -1,4 +1,4 @@
-use std::{rc::Rc, time::Duration};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
@@ -134,45 +134,25 @@ impl From<jiff::civil::Weekday> for Day {
 }
 
 impl form::Form for Schedule {
-    fn fields<'a>(&'a mut self, defaults: Self, apply: form::Apply<'a, Self>) -> form::Fields<'a> {
-        let source = Rc::new(self.clone());
+    fn fields(&mut self, defaults: Self) -> form::Fields<'_> {
+        let mode = self.mode;
         let mut fields = vec![
-            form::field(
-                "enabled",
-                "启用",
-                &mut self.enabled,
-                defaults.enabled,
-                form::map(source.clone(), apply.clone(), |value, enabled| {
-                    value.enabled = enabled
-                }),
-            ),
-            form::field(
-                "mode",
-                "安排方式",
-                &mut self.mode,
-                defaults.mode,
-                form::map(source.clone(), apply.clone(), |value, mode| {
-                    value.mode = mode
-                }),
-            ),
+            form::field("enabled", "启用", &mut self.enabled, defaults.enabled),
+            form::field("mode", "安排方式", &mut self.mode, defaults.mode),
         ];
-        match source.mode {
+        match mode {
             Mode::Calendar => {
                 fields.push(form::field(
                     "time",
                     "时间",
                     &mut self.calendar.time,
                     defaults.calendar.time,
-                    form::map(source.clone(), apply.clone(), |value, time| {
-                        value.calendar.time = time
-                    }),
                 ));
                 fields.push(form::field(
                     "weekdays",
                     "星期",
                     &mut self.calendar.weekdays,
                     defaults.calendar.weekdays,
-                    form::map(source, apply, |value, days| value.calendar.weekdays = days),
                 ));
             }
             Mode::Interval => fields.push(form::field(
@@ -180,7 +160,6 @@ impl form::Form for Schedule {
                 "间隔",
                 &mut self.interval,
                 defaults.interval,
-                form::map(source, apply, |value, interval| value.interval = interval),
             )),
         }
         fields
@@ -200,14 +179,7 @@ impl Value for Weekdays {
         }
     }
 
-    fn run(
-        &mut self,
-        screen: &mut Screen,
-        _: &Menu<'_>,
-        _: usize,
-        apply: form::Apply<'_, Self>,
-        _: bool,
-    ) -> Result<bool> {
+    fn edit(&mut self, screen: &mut Screen, _: &Menu<'_>, _: usize) -> Result<bool> {
         let days = Day::choices();
         let mut selected = 0;
         let mut changed = false;
@@ -246,7 +218,8 @@ impl Value for Weekdays {
                         }
                     }
                     if *self != next {
-                        changed |= form::set(screen, self, next, &apply)?;
+                        *self = next;
+                        changed = true;
                     }
                 }
                 _ => {}
@@ -364,21 +337,19 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                 "logs" => crate::service::logs(screen, store),
                 "rules" => screen.work("更新规则数据", "", |progress| rules(store, progress)),
                 "update" => screen.work("更新资源", "", |progress| update(store, progress)),
-                "schedule" => form::edit(
+                "schedule" => form::page(
                     screen,
                     "定时维护",
-                    &mut config.maintenance.clone(),
-                    Rc::new(|settings: &Schedule, screen| {
+                    &config.maintenance,
+                    |settings: &Schedule, screen| {
                         screen.work("更新维护日程", "", |progress| {
                             store.update(progress, |config, _| {
                                 config.maintenance = settings.clone();
                                 Ok(())
                             })
                         })
-                    }),
-                    true,
-                )
-                .map(|_| ()),
+                    },
+                ),
                 _ => return Ok(()),
             }
         };

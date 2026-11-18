@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     net::{IpAddr, Ipv6Addr},
     path::Path,
-    rc::Rc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -334,67 +333,17 @@ impl Protocol {
         }
     }
 
-    fn edit(&mut self, screen: &mut Screen, apply: form::Apply<'_, Self>) -> Result<()> {
+    fn edit(&mut self, screen: &mut Screen) -> Result<()> {
         let title = self.kind().text();
         match self {
-            Self::Mixed(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Mixed(value.clone()), screen)),
-                false,
-            ),
-            Self::Vless(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Vless(value.clone()), screen)),
-                false,
-            ),
-            Self::Vmess(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Vmess(value.clone()), screen)),
-                false,
-            ),
-            Self::Trojan(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Trojan(value.clone()), screen)),
-                false,
-            ),
-            Self::Shadowsocks(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Shadowsocks(value.clone()), screen)),
-                false,
-            ),
-            Self::Forward(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::Forward(value.clone()), screen)),
-                false,
-            ),
-            Self::Hysteria2(value) => form::edit(
-                screen,
-                &title,
-                value.as_mut(),
-                Rc::new(move |value, screen| {
-                    apply(&Self::Hysteria2(Box::new(value.clone())), screen)
-                }),
-                false,
-            ),
-            Self::AnyTls(value) => form::edit(
-                screen,
-                &title,
-                value,
-                Rc::new(move |value, screen| apply(&Self::AnyTls(value.clone()), screen)),
-                false,
-            ),
+            Self::Mixed(value) => form::edit(screen, &title, value),
+            Self::Vless(value) => form::edit(screen, &title, value),
+            Self::Vmess(value) => form::edit(screen, &title, value),
+            Self::Trojan(value) => form::edit(screen, &title, value),
+            Self::Shadowsocks(value) => form::edit(screen, &title, value),
+            Self::Forward(value) => form::edit(screen, &title, value),
+            Self::Hysteria2(value) => form::edit(screen, &title, value.as_mut()),
+            Self::AnyTls(value) => form::edit(screen, &title, value),
         }
         .map(|_| ())
     }
@@ -412,8 +361,7 @@ pub struct Fallback {
 }
 
 impl form::Form for Fallback {
-    fn fields<'a>(&'a mut self, defaults: Self, apply: form::Apply<'a, Self>) -> form::Fields<'a> {
-        let original = Rc::new(self.clone());
+    fn fields(&mut self, defaults: Self) -> form::Fields<'_> {
         let address = matches!(self.target, Endpoint::Address(_));
         let mut fields = Vec::new();
         macro_rules! field {
@@ -423,9 +371,6 @@ impl form::Form for Fallback {
                     $label,
                     &mut self.$name,
                     defaults.$name,
-                    form::map(original.clone(), apply.clone(), |value, field| {
-                        value.$name = field
-                    }),
                 ));
             };
         }
@@ -763,10 +708,7 @@ fn edit(
         }
         macro_rules! edit {
             ($field:ident) => {
-                inbound
-                    .$field
-                    .edit(screen, &menu, selected, form::local())
-                    .map(|_| ())
+                inbound.$field.edit(screen, &menu, selected).map(|_| ())
             };
         }
         let result = match action {
@@ -793,16 +735,7 @@ fn edit(
                         .position(|(_, _, core)| *core == inbound.core)
                         .unwrap_or_default();
                     let title = format!("{} / 核心", menu.title);
-                    form::choose(
-                        &mut inbound.core,
-                        screen,
-                        &title,
-                        &choices,
-                        current,
-                        form::local(),
-                        false,
-                    )
-                    .map(|_| ())
+                    form::choose(&mut inbound.core, screen, &title, &choices, current).map(|_| ())
                 }
                 "users" => {
                     if inbound.users
@@ -836,18 +769,17 @@ fn edit(
                 }
                 "protocol" => {
                     let mut kind = inbound.protocol.kind();
-                    kind.edit(screen, &menu, selected, form::local())
-                        .map(|edited| {
-                            if edited {
-                                protocols.insert(
-                                    inbound.protocol.kind(),
-                                    (inbound.core, inbound.protocol.clone()),
-                                );
-                                (inbound.core, inbound.protocol) = protocols
-                                    .remove(&kind)
-                                    .unwrap_or_else(|| (kind.core(), kind.protocol()));
-                            }
-                        })
+                    kind.edit(screen, &menu, selected).map(|edited| {
+                        if edited {
+                            protocols.insert(
+                                inbound.protocol.kind(),
+                                (inbound.core, inbound.protocol.clone()),
+                            );
+                            (inbound.core, inbound.protocol) = protocols
+                                .remove(&kind)
+                                .unwrap_or_else(|| (kind.core(), kind.protocol()));
+                        }
+                    })
                 }
                 "credentials" => {
                     let credentials = match &inbound.credentials {
@@ -857,24 +789,13 @@ fn edit(
                     credentials.and_then(|mut credentials| {
                         let changed = match inbound.protocol {
                             Protocol::Mixed(_) => {
-                                form::edit(
-                                    screen,
-                                    "入口凭据",
-                                    &mut credentials,
-                                    form::local(),
-                                    false,
-                                )? || inbound.credentials.is_none()
+                                form::edit(screen, "入口凭据", &mut credentials)?
+                                    || inbound.credentials.is_none()
                             }
                             Protocol::Vless(_) | Protocol::Vmess(_) => {
-                                credentials
-                                    .uuid
-                                    .edit(screen, &menu, selected, form::local())?
+                                credentials.uuid.edit(screen, &menu, selected)?
                             }
-                            _ => {
-                                credentials
-                                    .password
-                                    .edit(screen, &menu, selected, form::local())?
-                            }
+                            _ => credentials.password.edit(screen, &menu, selected)?,
                         };
                         if changed {
                             inbound.credentials = Some(credentials);
@@ -882,12 +803,12 @@ fn edit(
                         Ok(())
                     })
                 }
-                "options" => inbound.protocol.edit(screen, form::local()),
+                "options" => inbound.protocol.edit(screen),
                 "security" => {
                     let title = format!("{} / 加密", menu.title);
                     active
                         .security
-                        .choose(screen, &title, inbound.securities(), form::local())
+                        .choose(screen, &title, inbound.securities())
                         .map(|edited| {
                             if edited {
                                 inbound.security = active.security;
@@ -897,7 +818,7 @@ fn edit(
                 "transport" => {
                     let mut transport = active.transport.clone();
                     transport
-                        .choose(screen, &menu, selected, form::local(), |value| {
+                        .choose(screen, &menu, selected, |value| {
                             active.supports_transport(value)
                         })
                         .map(|edited| {
@@ -1049,7 +970,7 @@ pub fn create(
     menu: &Menu<'_>,
     selected: usize,
 ) -> Result<Option<Uuid>> {
-    match Kind::create(screen, menu, selected, Rc::new(|_, _| Ok(())))? {
+    match Kind::create(screen, menu, selected)? {
         Some(kind) => edit(screen, store, false, Inbound::new(kind)),
         None => Ok(None),
     }

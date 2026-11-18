@@ -9,7 +9,7 @@ use crate::{
     Result,
     config::Store,
     connection::{self, Connection},
-    form::{self, Value},
+    form::Value,
     progress::Progress,
     tui::{Action, Item, Menu, Screen},
 };
@@ -355,10 +355,7 @@ fn edit(
             }
             (Action::Select, Some(index)) => outbound.connections[index].edit(screen),
             (Action::Select, None) => match items[selected].key.as_str() {
-                "name" => outbound
-                    .name
-                    .edit(screen, &menu, selected, form::local())
-                    .map(|_| ()),
+                "name" => outbound.name.edit(screen, &menu, selected).map(|_| ()),
                 "add" => {
                     if let Some(value) = connection::create(screen)? {
                         outbound.connections.push(value);

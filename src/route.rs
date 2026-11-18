@@ -12,7 +12,7 @@ use crate::{
     Result,
     condition::Condition,
     config::{Config, Reference, Store},
-    form::{self, Value},
+    form::Value,
     geodata::Catalog,
     graph::Coverage,
     inbound,
@@ -116,16 +116,12 @@ impl Value for Destination {
         }
     }
 
-    fn run(
-        &mut self,
-        screen: &mut Screen,
-        _: &Menu<'_>,
-        _: usize,
-        apply: form::Apply<'_, Self>,
-        _: bool,
-    ) -> Result<bool> {
+    fn edit(&mut self, screen: &mut Screen, _: &Menu<'_>, _: usize) -> Result<bool> {
         match destination(screen, &Store::open(None)?, *self, false, |_, _| Ok(true))? {
-            Some(value) => form::set(screen, self, value, &apply),
+            Some(value) => {
+                *self = value;
+                Ok(true)
+            }
             None => Ok(false),
         }
     }

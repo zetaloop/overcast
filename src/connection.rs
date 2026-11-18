@@ -326,17 +326,17 @@ impl Connection {
     pub fn edit(&mut self, screen: &mut Screen) -> Result<()> {
         let title = self.summary();
         match self {
-            Self::Direct(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Http(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Socks(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Vless(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Vmess(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Trojan(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Shadowsocks(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Forward(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Hysteria2(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::AnyTls(value) => form::edit(screen, &title, value, form::local(), false),
-            Self::Warp(value) => form::edit(screen, &title, value, form::local(), false),
+            Self::Direct(value) => form::edit(screen, &title, value),
+            Self::Http(value) => form::edit(screen, &title, value),
+            Self::Socks(value) => form::edit(screen, &title, value),
+            Self::Vless(value) => form::edit(screen, &title, value),
+            Self::Vmess(value) => form::edit(screen, &title, value),
+            Self::Trojan(value) => form::edit(screen, &title, value),
+            Self::Shadowsocks(value) => form::edit(screen, &title, value),
+            Self::Forward(value) => form::edit(screen, &title, value),
+            Self::Hysteria2(value) => form::edit(screen, &title, value),
+            Self::AnyTls(value) => form::edit(screen, &title, value),
+            Self::Warp(value) => form::edit(screen, &title, value),
         }
         .map(|_| ())
     }
@@ -687,14 +687,7 @@ impl Value for FastOpen {
         }
     }
 
-    fn run(
-        &mut self,
-        screen: &mut Screen,
-        parent: &Menu<'_>,
-        field: usize,
-        apply: form::Apply<'_, Self>,
-        _: bool,
-    ) -> Result<bool> {
+    fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let mut items = [
             Item::new("on", "开启".stylized()),
@@ -723,15 +716,15 @@ impl Value for FastOpen {
                 Action::Back => return Ok(false),
                 Action::Select => match selected {
                     0 | 1 => {
-                        return form::set(screen, self, Self::Enabled(selected == 0), &apply);
+                        *self = Self::Enabled(selected == 0);
+                        return Ok(true);
                     }
                     2 => {
                         if let Some(value) =
-                            screen.input(&menu, selected, &queue.to_string(), |value, screen| {
+                            screen.input(&menu, selected, &queue.to_string(), |value, _| {
                                 let value = value
                                     .parse()
                                     .map_err(|error| format!("队列长度格式不正确：{error}"))?;
-                                apply(&Self::Queue(value), screen)?;
                                 Ok(value)
                             })?
                         {

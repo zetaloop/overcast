@@ -247,14 +247,7 @@ impl form::Value for Registration {
         }
     }
 
-    fn run(
-        &mut self,
-        screen: &mut Screen,
-        menu: &Menu<'_>,
-        selected: usize,
-        apply: form::Apply<'_, Self>,
-        _: bool,
-    ) -> Result<bool> {
+    fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
         let title = format!("{} / {}", menu.title, menu.items[selected].label.content);
         let mut items = vec![
             Item::new("register", "注册 WARP".stylized()),
@@ -279,7 +272,8 @@ impl form::Value for Registration {
                         let store = Store::open(None)?;
                         let edited = screen
                             .work("注册 WARP", "", |progress| register(&store, progress))?;
-                        return form::set(screen, self, edited, &apply);
+                        *self = edited;
+                        return Ok(true);
                     }
                     "import" => {
                         let current = if self.private_key.is_empty() {
@@ -287,11 +281,10 @@ impl form::Value for Registration {
                         } else {
                             serde_json::to_string_pretty(self)?
                         };
-                        let edited = screen.input(&menu, selected, &current, |text, screen| {
+                        let edited = screen.input(&menu, selected, &current, |text, _| {
                             let registration: Registration = serde_json::from_str(text)
                                 .map_err(|error| format!("WARP 资料格式不正确：{error}"))?;
                             registration.validate()?;
-                            apply(&registration, screen)?;
                             Ok(registration)
                         })?;
                         if let Some(edited) = edited {

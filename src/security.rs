@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
 
@@ -57,13 +55,7 @@ impl<T, R: Handshake<T>> Security<T, R> {
 }
 
 impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
-    pub fn choose(
-        &mut self,
-        screen: &mut Screen,
-        title: &str,
-        modes: &[usize],
-        apply: form::Apply<'_, Self>,
-    ) -> Result<bool> {
+    pub fn choose(&mut self, screen: &mut Screen, title: &str, modes: &[usize]) -> Result<bool> {
         let labels = ["无", "TLS", "REALITY"];
         let mut items: Vec<_> = modes
             .iter()
@@ -83,72 +75,32 @@ impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
             .iter()
             .position(|&mode| mode == self.index())
             .unwrap_or_default();
-        let mut notice = String::new();
-        let mut direct = modes == [self.index()];
-        loop {
-            let action = if std::mem::take(&mut direct) {
-                Action::Select
-            } else {
-                screen.select(&menu, &mut selected, &notice)?
-            };
-            match action {
-                Action::Back => return Ok(false),
-                Action::Select if selected == modes.len() => return Ok(false),
-                Action::Select => {
-                    let mode = modes[selected];
-                    let creating = mode != self.index();
-                    let mut candidate = if creating {
-                        match mode {
-                            1 => Self::Tls(T::default()),
-                            2 => Self::Reality(Box::default()),
-                            _ => Self::None,
-                        }
-                    } else {
-                        self.clone()
-                    };
-                    let title = format!("{title} / {}", labels[mode]);
-                    let result = match &mut candidate {
-                        Self::None if !creating => return Ok(false),
-                        Self::None => form::set(screen, self, Self::None, &apply),
-                        Self::Tls(value) => {
-                            let apply = apply.clone();
-                            form::edit(
-                                screen,
-                                &title,
-                                value,
-                                Rc::new(move |value, screen| {
-                                    apply(&Self::Tls(value.clone()), screen)
-                                }),
-                                creating,
-                            )
-                        }
-                        Self::Reality(value) => {
-                            let apply = apply.clone();
-                            form::edit(
-                                screen,
-                                &title,
-                                value.as_mut(),
-                                Rc::new(move |value, screen| {
-                                    apply(&Self::Reality(Box::new(value.clone())), screen)
-                                }),
-                                creating,
-                            )
-                        }
-                    };
-                    match result {
-                        Ok(changed) if changed || !creating => {
-                            if changed && !matches!(candidate, Self::None) {
-                                *self = candidate;
-                            }
-                            return Ok(changed);
-                        }
-                        Ok(_) => notice.clear(),
-                        Err(error) => notice = error.to_string(),
-                    }
+        if modes.len() != 1 {
+            loop {
+                match screen.select(&menu, &mut selected, "")? {
+                    Action::Back => return Ok(false),
+                    Action::Select if selected == modes.len() => return Ok(false),
+                    Action::Select => break,
+                    _ => {}
                 }
-                _ => {}
             }
         }
+        let mode = modes[selected];
+        let switching = mode != self.index();
+        if switching {
+            *self = match mode {
+                1 => Self::Tls(T::default()),
+                2 => Self::Reality(Box::default()),
+                _ => Self::None,
+            };
+        }
+        let title = format!("{title} / {}", labels[mode]);
+        let edited = match self {
+            Self::None => false,
+            Self::Tls(value) => form::edit(screen, &title, value)?,
+            Self::Reality(value) => form::edit(screen, &title, value.as_mut())?,
+        };
+        Ok(edited || switching)
     }
 }
 
@@ -157,15 +109,8 @@ impl<T: Form, R: Form + Handshake<T>> Value for Security<T, R> {
         ["无", "TLS", "REALITY"][self.index()].to_owned()
     }
 
-    fn run(
-        &mut self,
-        screen: &mut Screen,
-        parent: &Menu<'_>,
-        field: usize,
-        apply: form::Apply<'_, Self>,
-        _: bool,
-    ) -> Result<bool> {
+    fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
-        self.choose(screen, &title, &[0, 1, 2], apply)
+        self.choose(screen, &title, &[0, 1, 2])
     }
 }

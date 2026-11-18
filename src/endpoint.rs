@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
 use uuid::Uuid;
@@ -7,7 +5,7 @@ use uuid::Uuid;
 use crate::{
     Result,
     config::Store,
-    form::{self, Value},
+    form::Value,
     inbound,
     route::Destination,
     tui::{Action, Item, Menu, Screen},
@@ -41,14 +39,7 @@ impl Value for Endpoint {
         }
     }
 
-    fn run(
-        &mut self,
-        screen: &mut Screen,
-        parent: &Menu<'_>,
-        field: usize,
-        apply: form::Apply<'_, Self>,
-        _: bool,
-    ) -> Result<bool> {
+    fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let mut selected = match self {
             Self::Block => 0,
@@ -72,27 +63,20 @@ impl Value for Endpoint {
             let result = match screen.select(&menu, &mut selected, &notice)? {
                 Action::Back => return Ok(false),
                 Action::Select => match items[selected].key.as_str() {
-                    "block" => form::set(screen, self, Self::Block, &apply),
+                    "block" => {
+                        *self = Self::Block;
+                        Ok(true)
+                    }
                     "address" => {
                         let mut address = match self {
                             Self::Address(value) => value.clone(),
                             _ => String::new(),
                         };
-                        let update = apply.clone();
-                        address
-                            .edit(
-                                screen,
-                                &menu,
-                                selected,
-                                Rc::new(move |value, screen| {
-                                    update(&Self::Address(value.clone()), screen)
-                                }),
-                            )
-                            .inspect(|&changed| {
-                                if changed {
-                                    *self = Self::Address(address);
-                                }
-                            })
+                        address.edit(screen, &menu, selected).inspect(|&changed| {
+                            if changed {
+                                *self = Self::Address(address);
+                            }
+                        })
                     }
                     "inbound" => {
                         let current = match self {
@@ -100,7 +84,10 @@ impl Value for Endpoint {
                             _ => None,
                         };
                         match inbound::select(screen, &Store::open(None)?, current, |_| true)? {
-                            Some(uuid) => form::set(screen, self, Self::Inbound(uuid), &apply),
+                            Some(uuid) => {
+                                *self = Self::Inbound(uuid);
+                                Ok(true)
+                            }
                             None => Ok(false),
                         }
                     }
