@@ -7,7 +7,7 @@ use crate::{
     Result,
     component::{self, Component},
     config::Store,
-    form::{self, choices, fields},
+    form::{self, Value, choices},
     geodata::Catalog,
     progress::Progress,
     resource::{self, Resources},
@@ -46,14 +46,14 @@ pub enum Mode {
 #[serde(default, deny_unknown_fields)]
 pub struct Calendar {
     pub time: String,
-    pub weekdays: Vec<Day>,
+    pub weekdays: Weekdays,
 }
 
 impl Default for Calendar {
     fn default() -> Self {
         Self {
             time: "04:00".to_owned(),
-            weekdays: Vec::new(),
+            weekdays: Weekdays::default(),
         }
     }
 }
@@ -70,6 +70,10 @@ pub enum Day {
     Saturday,
     Sunday,
 }
+
+#[derive(Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct Weekdays(Vec<Day>);
 
 impl Schedule {
     pub fn next(&self) -> Result<Option<Duration>> {
@@ -93,8 +97,8 @@ impl Schedule {
                 for _ in 0..8 {
                     let at = date.to_datetime(time).to_zoned(now.time_zone().clone())?;
                     if at > now
-                        && (self.calendar.weekdays.is_empty()
-                            || self.calendar.weekdays.contains(&Day::from(at.weekday())))
+                        && (self.calendar.weekdays.0.is_empty()
+                            || self.calendar.weekdays.0.contains(&Day::from(at.weekday())))
                     {
                         return Ok(Some(now.duration_until(&at).unsigned_abs()));
                     }
@@ -153,13 +157,24 @@ impl form::Form for Schedule {
             ),
         ];
         match source.mode {
-            Mode::Calendar => fields.push(form::field(
-                "calendar",
-                "日历安排",
-                &mut self.calendar,
-                defaults.calendar,
-                form::map(source, apply, |value, calendar| value.calendar = calendar),
-            )),
+            Mode::Calendar => {
+                fields.push(form::field(
+                    "time",
+                    "时间",
+                    &mut self.calendar.time,
+                    defaults.calendar.time,
+                    form::map(source.clone(), apply.clone(), |value, time| {
+                        value.calendar.time = time
+                    }),
+                ));
+                fields.push(form::field(
+                    "weekdays",
+                    "星期",
+                    &mut self.calendar.weekdays,
+                    defaults.calendar.weekdays,
+                    form::map(source, apply, |value, days| value.calendar.weekdays = days),
+                ));
+            }
             Mode::Interval => fields.push(form::field(
                 "interval",
                 "间隔",
@@ -172,10 +187,73 @@ impl form::Form for Schedule {
     }
 }
 
-fields!(Calendar {
-    time: "时间",
-    weekdays: "星期筛选",
-});
+impl Value for Weekdays {
+    fn text(&self) -> String {
+        if self.0.is_empty() {
+            "每天".to_owned()
+        } else {
+            self.0
+                .iter()
+                .map(Value::text)
+                .collect::<Vec<_>>()
+                .join("、")
+        }
+    }
+
+    fn run(
+        &mut self,
+        screen: &mut Screen,
+        _: &Menu<'_>,
+        _: usize,
+        apply: form::Apply<'_, Self>,
+        _: bool,
+    ) -> Result<bool> {
+        let days = Day::choices();
+        let mut selected = 0;
+        let mut changed = false;
+        loop {
+            let mut items = vec![Item::new("daily", "每天".stylized())];
+            items[0].marker = self.0.is_empty().marker();
+            for (key, label, day) in &days {
+                let mut item = Item::new(*key, (*label).stylized());
+                item.marker = self.0.contains(day).marker();
+                items.push(item);
+            }
+            items.push(Item::new("back", "返回".stylized()));
+            let menu = Menu {
+                title: "星期",
+                heading: "",
+                items: &items,
+                help: "方向键 选择\n回车键 切换\nEsc 返回",
+            };
+            match screen.select(&menu, &mut selected, "")? {
+                Action::Back => return Ok(changed),
+                Action::Select if selected == items.len() - 1 => return Ok(changed),
+                Action::Select => {
+                    let mut next = self.clone();
+                    if selected == 0 {
+                        next.0.clear()
+                    } else {
+                        let day = days[selected - 1].2;
+                        if next.0.contains(&day) {
+                            next.0.retain(|value| *value != day);
+                        } else {
+                            next.0.push(day);
+                            next.0.sort();
+                        }
+                        if next.0.len() == days.len() {
+                            next.0.clear();
+                        }
+                    }
+                    if *self != next {
+                        changed |= form::set(screen, self, next, &apply)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
 
 choices!(Mode {
     Calendar: "calendar" => "日历安排",
@@ -239,6 +317,8 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             Item::new("update", "更新全部".stylized()),
             schedule,
         ];
+        items[2].gap = true;
+        let versions = items.len();
         items.extend(Component::ALL.iter().map(|component| {
             let mut item = Item::new(component.key(), component.name().stylized());
             item.value = resources.components.get(component).map_or_else(
@@ -247,6 +327,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             );
             item
         }));
+        items[versions].gap = true;
         items.push(Item::new("back", "返回".stylized()));
         let menu = Menu {
             title: "维护",
@@ -295,7 +376,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                             })
                         })
                     }),
-                    false,
+                    true,
                 )
                 .map(|_| ()),
                 _ => return Ok(()),
