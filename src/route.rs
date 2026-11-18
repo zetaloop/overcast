@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use termina::{
@@ -250,69 +249,79 @@ fn select_inbound(screen: &mut Screen, store: &Store) -> Result<Option<Condition
     )
 }
 
-fn select_target(
-    screen: &mut Screen,
-    config: &Config,
-    catalog: &Catalog,
-) -> Result<Option<Condition>> {
-    let literals = [
+fn select_target(screen: &mut Screen, store: &Store) -> Result<Option<Condition>> {
+    let targets = [
         ("domain", "域名"),
         ("suffix", "域名及子域"),
         ("keyword", "域名关键词"),
         ("regex", "域名正则"),
         ("ip", "IP 地址或网段"),
+        ("site", "GeoSite"),
+        ("geoip", "GeoIP"),
+        ("asn", "ASN"),
+        ("back", "返回"),
     ];
-    let sets = catalog
-        .sites
+    let mut items: Vec<_> = targets
         .iter()
-        .map(|name| (Condition::Site(name.clone()), String::new()))
-        .chain(
-            catalog
-                .ips
-                .iter()
-                .map(|name| (Condition::Geoip(name.clone()), String::new())),
-        )
-        .chain(
-            catalog
-                .asns
-                .iter()
-                .map(|(number, name)| (Condition::Asn(*number), name.clone())),
-        )
-        .map(|(condition, name)| {
-            let text = condition.text(config);
-            let mut item = Item::new(text.clone(), text.stylized());
-            item.value = name;
-            (item, Some(condition))
-        });
-    let (items, values): (Vec<_>, Vec<_>) = literals
-        .iter()
-        .map(|(key, label)| (Item::new(*key, label.stylized()), None))
-        .chain(sets)
-        .unzip();
+        .map(|&(key, label)| Item::new(key, label.stylized()))
+        .collect();
+    items[5].gap = true;
+    let menu = Menu {
+        title: "选择目标",
+        heading: "",
+        items: &items,
+        help: "方向键 选择\n回车键 确定\nEsc 返回",
+    };
     let mut selected = 0;
+    let mut catalog = None;
     loop {
-        let Some(index) = screen.search("选择目标", &items, selected)? else {
-            return Ok(None);
-        };
-        selected = index;
-        if let Some(condition) = &values[index] {
-            return Ok(Some(condition.clone()));
+        match screen.select(&menu, &mut selected, "")? {
+            Action::Back => return Ok(None),
+            Action::Select => {}
+            _ => continue,
         }
-        let (kind, label) = literals[index];
-        let fields = [Item::new(kind, label.stylized())];
-        let menu = Menu {
-            title: "目标条件",
-            heading: "",
-            items: &fields,
-            help: "",
-        };
-        if let Some(condition) = screen.input(&menu, 0, "", |value, _| {
-            Condition::parse(
-                &format!("{kind}:{}", serde_json::to_string(value)?),
-                config,
-                catalog,
-                &BTreeMap::new(),
-            )
+        let (kind, label) = targets[selected];
+        if kind == "back" {
+            return Ok(None);
+        }
+        if matches!(kind, "site" | "geoip" | "asn") {
+            let catalog = match &catalog {
+                Some(value) => value,
+                None => catalog.insert(screen.work("读取规则数据", "", |progress| {
+                    let mut release = crate::resource::Resources::load(store)?.geodata;
+                    Catalog::ensure(store, &mut release, progress)
+                })?),
+            };
+            let choices: Vec<_> = match kind {
+                "asn" => catalog
+                    .asns
+                    .iter()
+                    .map(|(number, org)| {
+                        let mut item =
+                            Item::new(number.to_string(), format!("AS{number}").stylized());
+                        item.value = org.clone();
+                        item
+                    })
+                    .collect(),
+                _ => (if kind == "site" {
+                    &catalog.sites
+                } else {
+                    &catalog.ips
+                })
+                .iter()
+                .map(|name| Item::new(name, name.clone().stylized()))
+                .collect(),
+            };
+            if let Some(index) = screen.search(label, &choices, 0)? {
+                let name = &choices[index].key;
+                return Ok(Some(match kind {
+                    "site" => Condition::Site(name.clone()),
+                    "geoip" => Condition::Geoip(name.clone()),
+                    _ => Condition::Asn(name.parse()?),
+                }));
+            }
+        } else if let Some(condition) = screen.input(&menu, selected, "", |value, _| {
+            Condition::literal(kind, value)
         })? {
             return Ok(Some(condition));
         }
@@ -413,10 +422,6 @@ pub(crate) fn destination(
 }
 
 fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
-    let mut resources = crate::resource::Resources::load(store)?;
-    let catalog = screen.work("准备规则数据", "", |progress| {
-        Catalog::ensure(store, &mut resources.geodata, progress)
-    })?;
     let config = store.load()?;
     let condition = &get(&config.rules, path)?.condition;
     let bindings = condition.bindings(&config);
@@ -440,9 +445,13 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
     let apply = |text: &str, screen: &mut Screen| {
         screen.work("编辑条件", text, |progress| {
             store.update(progress, |config, resources| {
-                let condition = Condition::parse(text, config, &catalog, &bindings)?;
+                let condition = Condition::parse(
+                    text,
+                    config,
+                    || Catalog::ensure(store, &mut resources.geodata, progress),
+                    &bindings,
+                )?;
                 get_mut(&mut config.rules, path)?.condition = condition;
-                resources.geodata = Some(catalog.release);
                 Ok(())
             })
         })
@@ -493,9 +502,7 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
                     let result = match items[selected - 1].key.as_str() {
                         "user" => select_user(screen, store),
                         "inbound" => select_inbound(screen, store),
-                        "target" => store
-                            .load()
-                            .and_then(|config| select_target(screen, &config, &catalog)),
+                        "target" => select_target(screen, store),
                         _ => Ok(Some(Condition::Never)),
                     };
                     match result {

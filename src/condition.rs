@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{cell::LazyCell, collections::BTreeMap};
 
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
@@ -169,11 +169,12 @@ impl Condition {
                     bindings.extend(child.bindings(config));
                 }
             }
-            _ => {
+            Self::User(_) | Self::Inbound(_) => {
                 if let Some((kind, value)) = self.reference(config) {
                     bindings.insert(format!("{kind}:{value}"), self.clone());
                 }
             }
+            _ => {}
         }
         bindings
     }
@@ -181,7 +182,7 @@ impl Condition {
     pub fn parse(
         text: &str,
         config: &Config,
-        catalog: &Catalog,
+        catalog: impl FnOnce() -> Result<Catalog>,
         bindings: &BTreeMap<String, Self>,
     ) -> Result<Self> {
         if text.trim().is_empty() {
@@ -191,7 +192,7 @@ impl Condition {
             text,
             position: 0,
             config,
-            catalog,
+            catalog: LazyCell::new(catalog),
             bindings,
         };
         let condition = parser.or()?;
@@ -200,6 +201,23 @@ impl Condition {
             return Err(format!("条件中有多余内容：{}", &text[parser.position..]).into());
         }
         Ok(condition)
+    }
+
+    pub fn literal(kind: &str, name: &str) -> Result<Self> {
+        if name.is_empty() {
+            return Err(format!("{kind} 条件缺少内容").into());
+        }
+        match kind {
+            "domain" => domain(name).map(Self::Domain),
+            "suffix" => domain(name).map(Self::Suffix),
+            "keyword" => Ok(Self::Keyword(name.to_owned())),
+            "regex" => {
+                pattern::parse(name)?;
+                Ok(Self::Regex(name.to_owned()))
+            }
+            "ip" => network(name).map(Self::Ip),
+            _ => Err(format!("未知目标类型：{kind}").into()),
+        }
     }
 
     pub fn replace_user(&mut self, previous: Uuid, current: Uuid) {
@@ -251,15 +269,15 @@ fn quote(value: &str) -> String {
     }
 }
 
-struct Parser<'a> {
+struct Parser<'a, F> {
     text: &'a str,
     position: usize,
     config: &'a Config,
-    catalog: &'a Catalog,
+    catalog: LazyCell<Result<Catalog>, F>,
     bindings: &'a BTreeMap<String, Condition>,
 }
 
-impl Parser<'_> {
+impl<F: FnOnce() -> Result<Catalog>> Parser<'_, F> {
     fn space(&mut self) {
         while let Some(character) = self.text[self.position..].chars().next()
             && character.is_whitespace()
@@ -360,14 +378,9 @@ impl Parser<'_> {
                 return Err(format!("{kind} 条件缺少内容").into());
             }
             match kind {
-                "domain" => return domain(name).map(Condition::Domain),
-                "suffix" => return domain(name).map(Condition::Suffix),
-                "keyword" => return Ok(Condition::Keyword(name.to_owned())),
-                "regex" => {
-                    pattern::parse(name)?;
-                    return Ok(Condition::Regex(name.to_owned()));
+                "domain" | "suffix" | "keyword" | "regex" | "ip" => {
+                    return Condition::literal(kind, name);
                 }
-                "ip" => return network(name).map(Condition::Ip),
                 "user" | "inbound" | "site" | "geoip" | "asn" => {
                     return self.named(Some(kind), name);
                 }
@@ -394,18 +407,21 @@ impl Parser<'_> {
                 }
             }
         }
-        let tag = name.to_ascii_lowercase();
-        if kind.is_none_or(|kind| kind == "site") && self.catalog.sites.contains(&tag) {
-            matches.push(Condition::Site(tag.clone()));
-        }
-        if kind.is_none_or(|kind| kind == "geoip") && self.catalog.ips.contains(&tag) {
-            matches.push(Condition::Geoip(tag.clone()));
-        }
-        if kind.is_none_or(|kind| kind == "asn")
-            && let Ok(number) = tag.strip_prefix("as").unwrap_or(&tag).parse::<u32>()
-            && self.catalog.asns.contains_key(&number)
-        {
-            matches.push(Condition::Asn(number));
+        if !matches!(kind, Some("user" | "inbound")) {
+            let catalog = self.catalog.as_ref().map_err(|error| error.to_string())?;
+            let tag = name.to_ascii_lowercase();
+            if kind.is_none_or(|kind| kind == "site") && catalog.sites.contains(&tag) {
+                matches.push(Condition::Site(tag.clone()));
+            }
+            if kind.is_none_or(|kind| kind == "geoip") && catalog.ips.contains(&tag) {
+                matches.push(Condition::Geoip(tag.clone()));
+            }
+            if kind.is_none_or(|kind| kind == "asn")
+                && let Ok(number) = tag.strip_prefix("as").unwrap_or(&tag).parse::<u32>()
+                && catalog.asns.contains_key(&number)
+            {
+                matches.push(Condition::Asn(number));
+            }
         }
         if kind.is_none()
             && name.contains('.')
