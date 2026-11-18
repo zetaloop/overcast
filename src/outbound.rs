@@ -79,6 +79,16 @@ impl Outbound {
             connections: self.connections.clone(),
         }
     }
+
+    fn effective(&self) -> Self {
+        let mut value = self.clone();
+        for connection in &mut value.connections {
+            if let Connection::AnyTls(client) = connection {
+                client.security = client.security();
+            }
+        }
+        value
+    }
 }
 
 impl Selection {
@@ -234,10 +244,12 @@ fn edit(
     mut outbound: Outbound,
 ) -> Result<Option<Uuid>> {
     let saved = serde_json::to_vec(&outbound)?;
+    let initial = serde_json::to_vec(&outbound.effective())?;
     let mut selected = if existing { 0 } else { 1 };
     let mut notice = String::new();
     loop {
-        let changed = !existing || serde_json::to_vec(&outbound)? != saved;
+        let active = outbound.effective();
+        let changed = !existing || serde_json::to_vec(&active)? != initial;
         let title = if existing {
             format!("出站 / {}", outbound.name)
         } else {
@@ -321,15 +333,15 @@ fn edit(
                 if let Some(index) = connection {
                     Selection {
                         name: String::new(),
-                        connections: vec![outbound.connections[index].clone()],
+                        connections: vec![active.connections[index].clone()],
                     }
                     .copy(screen)
                 } else {
-                    outbound.selection().copy(screen)
+                    active.selection().copy(screen)
                 }
             }
             (Action::Key(key), Some(index)) if matches!(key.code, KeyCode::Char('l' | 'L')) => {
-                let connection = &outbound.connections[index];
+                let connection = &active.connections[index];
                 screen.copy(&crate::share::link(
                     connection,
                     &connection.summary(),
@@ -377,7 +389,7 @@ fn edit(
                         &format!(" -- {}", outbound.name),
                         |progress| {
                             store.update(progress, |config, _| {
-                                let mut value = outbound.clone();
+                                let mut value = active.clone();
                                 if value.name.trim().is_empty() {
                                     value.name = value.summary();
                                 }

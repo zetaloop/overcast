@@ -301,15 +301,26 @@ impl form::Value for Registration {
     }
 }
 
-fields!(Client {
-    name: "名称",
-    registration: "登记资料",
-    server: "地址",
-    port: "端口",
-    core: "核心",
-    warp: "WARP",
-    network: "网络",
-});
+impl form::Form for Client {
+    fn fields(&mut self, d: Self) -> form::Fields<'_> {
+        vec![
+            form::field("name", "名称", &mut self.name, d.name),
+            form::field(
+                "registration",
+                "登记资料",
+                &mut self.registration,
+                d.registration,
+            ),
+            form::field("server", "地址", &mut self.server, d.server),
+            form::field("port", "端口", &mut self.port, d.port),
+            form::choice_field("core", "核心", &mut self.core, d.core, |core| {
+                *core != Core::SingBox
+            }),
+            form::field("warp", "MASQUE", &mut self.warp, d.warp),
+            form::field("network", "网络", &mut self.network, d.network),
+        ]
+    }
+}
 
 fields!(ClientOptions {
     mode: "承载",

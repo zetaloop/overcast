@@ -382,6 +382,9 @@ impl Connection {
                 if value.password.is_empty() {
                     return Err("请填写 AnyTLS 密码".into());
                 }
+                if matches!(value.security, Security::None) {
+                    return Err("AnyTLS 连接需要 TLS 或 REALITY 握手".into());
+                }
                 (value.server.as_str(), value.port)
             }
             Self::Warp(value) => {

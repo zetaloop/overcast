@@ -68,11 +68,13 @@ pub trait Form: Clone + Default {
     }
 }
 
-struct Binding<'a, T> {
+struct Binding<'a, T, E> {
     key: &'static str,
     label: &'static str,
     value: &'a mut T,
     default: T,
+    preview: Option<String>,
+    edit: E,
 }
 
 pub fn field<'a, T: Value>(
@@ -81,32 +83,77 @@ pub fn field<'a, T: Value>(
     value: &'a mut T,
     default: T,
 ) -> Box<dyn Field + 'a> {
+    control(key, label, value, default, None, T::edit)
+}
+
+pub fn control<'a, T: Value>(
+    key: &'static str,
+    label: &'static str,
+    value: &'a mut T,
+    default: T,
+    preview: Option<String>,
+    edit: impl FnMut(&mut T, &mut Screen, &Menu<'_>, usize) -> Result<bool> + 'a,
+) -> Box<dyn Field + 'a> {
     Box::new(Binding {
         key,
         label,
         value,
         default,
+        preview,
+        edit,
     })
 }
 
-impl<T: Value> Field for Binding<'_, T> {
+impl<T: Value, E: FnMut(&mut T, &mut Screen, &Menu<'_>, usize) -> Result<bool>> Field
+    for Binding<'_, T, E>
+{
     fn key(&self) -> &'static str {
         self.key
     }
     fn item(&self) -> Item {
         let mut item = Item::new(self.key, self.label.stylized());
-        item.value = self.value.text();
+        item.value = self.preview.clone().unwrap_or_else(|| self.value.text());
         item.marker = self.value.marker();
         item
     }
 
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
-        self.value.edit(screen, menu, selected)
+        (self.edit)(self.value, screen, menu, selected)
     }
 
     fn reset(&mut self) {
         *self.value = self.default.clone();
     }
+}
+
+pub fn choice_field<'a, T: Value + PartialEq>(
+    key: &'static str,
+    label: &'static str,
+    value: &'a mut T,
+    default: T,
+    allowed: impl Fn(&T) -> bool + 'a,
+) -> Box<dyn Field + 'a> {
+    control(
+        key,
+        label,
+        value,
+        default,
+        None,
+        move |value, screen, menu, _| {
+            let choices: Vec<_> = T::choices()
+                .into_iter()
+                .filter(|(_, _, v)| allowed(v))
+                .collect();
+            let current = choices.iter().position(|(_, _, v)| v == value).unwrap_or(0);
+            choose(
+                value,
+                screen,
+                &format!("{} / {label}", menu.title),
+                &choices,
+                current,
+            )
+        },
+    )
 }
 
 pub fn edit<T: Form>(screen: &mut Screen, title: &str, value: &mut T) -> Result<bool> {

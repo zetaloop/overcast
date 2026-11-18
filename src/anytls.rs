@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     connection::{Core, Network, Security, Tls},
-    form::fields,
+    form::{self, Value, fields},
 };
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -51,16 +51,55 @@ pub struct Server {
     pub padding_scheme: Vec<String>,
 }
 
-fields!(Client {
-    name: "名称",
-    server: "地址",
-    port: "端口",
-    password: "密码",
-    core: "核心",
-    anytls: "AnyTLS",
-    security: "加密",
-    network: "网络",
-});
+impl Client {
+    pub fn security(&self) -> Security {
+        match &self.security {
+            Security::Reality(_) if self.core == Core::Mihomo => Security::Tls(Tls::default()),
+            value => value.clone(),
+        }
+    }
+}
+
+impl form::Form for Client {
+    fn fields(&mut self, d: Self) -> form::Fields<'_> {
+        let modes: &[usize] = if self.core == Core::Mihomo {
+            &[1]
+        } else {
+            &[1, 2]
+        };
+        let mut active = self.security();
+        vec![
+            form::field("name", "名称", &mut self.name, d.name),
+            form::field("server", "地址", &mut self.server, d.server),
+            form::field("port", "端口", &mut self.port, d.port),
+            form::field("password", "密码", &mut self.password, d.password),
+            form::choice_field("core", "核心", &mut self.core, d.core, |core| {
+                *core != Core::Xray
+            }),
+            form::control(
+                "security",
+                "握手",
+                &mut self.security,
+                d.security,
+                Some(active.text()),
+                move |value, screen, menu, _| {
+                    let changed = active.choose(
+                        screen,
+                        &format!("{} / 握手", menu.title),
+                        modes,
+                        form::edit,
+                    )?;
+                    if changed {
+                        *value = active.clone();
+                    }
+                    Ok(changed)
+                },
+            ),
+            form::field("anytls", "会话参数", &mut self.anytls, d.anytls),
+            form::field("network", "网络", &mut self.network, d.network),
+        ]
+    }
+}
 
 fields!(ClientOptions {
     tcp: "TCP",
