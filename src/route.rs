@@ -1,4 +1,3 @@
-
 use serde::{Deserialize, Serialize};
 use termina::{
     Event,
@@ -641,8 +640,15 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
             Item::new("delete", "删除规则".foreground(AnsiColor::BrightRed)),
             Item::new("back", "返回".stylized()),
         ];
-        items[0].value = rule.condition.text(&config);
+        items[0].value = if rule.condition == Condition::Always {
+            "全部".to_owned()
+        } else {
+            rule.condition.text(&config)
+        };
         items[1].value = rule.destination.name(&config);
+        items[0].show_value = true;
+        items[1].show_value = true;
+        items[2].gap = true;
         let menu = Menu {
             title: "编辑规则",
             heading: "",

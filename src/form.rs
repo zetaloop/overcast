@@ -452,10 +452,13 @@ impl<T: Value> Value for Vec<T> {
                         Item::new((index + 1).to_string(), (index + 1).to_string().stylized());
                     item.value = value.text();
                     item.marker = value.marker();
+                    item.show_value = true;
                     item
                 })
                 .collect();
-            items.push(Item::new("add", "添加".stylized()));
+            let mut add = Item::new("add", "添加".stylized());
+            add.gap = !items.is_empty();
+            items.push(add);
             items.push(Item::new("back", "返回".stylized()));
             let menu = Menu {
                 title: &title,
@@ -530,10 +533,13 @@ impl<T: Value> Value for BTreeMap<String, T> {
                     let mut item = Item::new(key.clone(), key.clone().stylized());
                     item.value = value.text();
                     item.marker = value.marker();
+                    item.show_value = true;
                     item
                 })
                 .collect();
-            items.push(Item::new("add", "添加".stylized()));
+            let mut add = Item::new("add", "添加".stylized());
+            add.gap = !items.is_empty();
+            items.push(add);
             items.push(Item::new("back", "返回".stylized()));
             let menu = Menu {
                 title: &title,

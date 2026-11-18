@@ -37,6 +37,7 @@ pub struct Item {
     pub branch: Option<String>,
     pub label: Line,
     pub value: String,
+    pub show_value: bool,
     pub detail: String,
     pub gap: bool,
     pub inert: bool,
@@ -50,6 +51,7 @@ impl Item {
             branch: None,
             label,
             value: String::new(),
+            show_value: false,
             detail: String::new(),
             gap: false,
             inert: false,
@@ -333,6 +335,8 @@ impl Screen {
                                     value
                                         .as_ref()
                                         .map_or(item.value.as_str(), |(text, _, _)| text)
+                                } else if item.show_value {
+                                    &item.value
                                 } else {
                                     ""
                                 },
