@@ -83,8 +83,14 @@ impl Outbound {
     fn effective(&self) -> Self {
         let mut value = self.clone();
         for connection in &mut value.connections {
-            if let Connection::AnyTls(client) = connection {
-                client.security = client.security();
+            match connection {
+                Connection::AnyTls(client) => client.security = client.security(),
+                Connection::Hysteria2(client) => {
+                    if let Some(obfs) = &mut client.hysteria.obfs {
+                        obfs.fit();
+                    }
+                }
+                _ => {}
             }
         }
         value

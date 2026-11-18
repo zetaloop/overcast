@@ -157,6 +157,9 @@ impl Inbound {
         if !value.supports_transport(&value.transport) {
             value.transport = Transport::default();
         }
+        if let Protocol::Hysteria2(server) = &mut value.protocol {
+            server.fit(value.core);
+        }
         if let Security::Reality(reality) = &mut value.security {
             reality.use_names();
             let allowed = reality.fields_for(value.core);
@@ -338,7 +341,7 @@ impl Protocol {
         }
     }
 
-    fn edit(&mut self, screen: &mut Screen) -> Result<()> {
+    fn edit(&mut self, screen: &mut Screen, core: Core) -> Result<()> {
         let title = self.kind().text();
         match self {
             Self::Mixed(value) => form::edit(screen, &title, value),
@@ -347,7 +350,7 @@ impl Protocol {
             Self::Trojan(value) => form::edit(screen, &title, value),
             Self::Shadowsocks(value) => form::edit(screen, &title, value),
             Self::Forward(value) => form::edit(screen, &title, value),
-            Self::Hysteria2(value) => form::edit(screen, &title, value.as_mut()),
+            Self::Hysteria2(value) => value.edit(screen, &title, core),
             Self::AnyTls(value) => form::edit(screen, &title, value),
         }
         .map(|_| ())
@@ -669,7 +672,15 @@ fn edit(
             selected = items.len();
         }
         items.push(listen);
-        items.push(Item::new("options", "协议参数".stylized()));
+        items.push(Item::new(
+            "options",
+            if matches!(inbound.protocol, Protocol::AnyTls(_)) {
+                "填充方案"
+            } else {
+                "协议参数"
+            }
+            .stylized(),
+        ));
         if inbound.transports() {
             items.push(transport);
         }
@@ -808,7 +819,13 @@ fn edit(
                         Ok(())
                     })
                 }
-                "options" => inbound.protocol.edit(screen),
+                "options" => match &mut inbound.protocol {
+                    Protocol::AnyTls(value) => value
+                        .padding_scheme
+                        .edit(screen, &menu, selected)
+                        .map(|_| ()),
+                    protocol => protocol.edit(screen, inbound.core),
+                },
                 "security" => {
                     let title = format!("{} / 加密", menu.title);
                     let mut security = if inbound.security.index() == active.security.index() {

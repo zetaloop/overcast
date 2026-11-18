@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Result,
     connection::{self, Core, Network, Tls},
-    form::{choices, fields},
+    form::{self, Form, Value, choices, fields},
+    inbound::Core as ServerCore,
     transport::Quic,
+    tui::{Menu, Screen},
 };
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -134,24 +136,209 @@ fields!(Client {
     network: "网络",
 });
 
-fields!(ClientOptions {
-    tcp: "TCP",
-    udp: "UDP",
-    obfs: "混淆",
-    ports: "跳跃端口",
-    hop_interval: "跳跃间隔",
-    hop_interval_max: "最大跳跃间隔",
-    quic: "QUIC",
-});
+fn mode<T: Form, K: Value + Copy + PartialEq>(
+    value: &mut Option<T>,
+    screen: &mut Screen,
+    title: &str,
+    kinds: Vec<(&'static str, &'static str, K)>,
+    kind: fn(&mut T) -> &mut K,
+    edit: impl FnOnce(&mut T, &mut Screen, &str) -> Result<bool>,
+) -> Result<bool> {
+    let previous = value.as_mut().map(|v| *kind(v));
+    let choices: Vec<_> = std::iter::once(("none", "无", None))
+        .chain(kinds.into_iter().map(|(key, name, k)| (key, name, Some(k))))
+        .collect();
+    let mut selected = previous.filter(|k| choices.iter().any(|(_, _, v)| *v == Some(*k)));
+    let current = choices.iter().position(|(_, _, v)| *v == selected).unwrap();
+    if !form::choose(&mut selected, screen, title, &choices, current)? {
+        return Ok(false);
+    }
+    if let Some(selected) = selected {
+        let value = value.get_or_insert_with(T::default);
+        *kind(value) = selected;
+        Ok(
+            edit(value, screen, &format!("{title} / {}", selected.text()))?
+                || Some(selected) != previous,
+        )
+    } else {
+        Ok(value.take().is_some())
+    }
+}
 
-fields!(Server {
-    obfs: "混淆",
-    quic: "QUIC",
-    client: "客户端 QUIC",
-    ignore_client_bandwidth: "忽略客户端带宽",
-    masquerade: "伪装响应",
-    user_level: "用户等级",
-});
+impl Obfs {
+    fn field(slot: &mut Option<Self>) -> Box<dyn form::Field + '_> {
+        let text = slot
+            .as_ref()
+            .map_or_else(|| "无".to_owned(), |v| v.kind.text());
+        form::control(
+            "obfs",
+            "混淆",
+            slot,
+            None,
+            Some(text),
+            |value, screen, _, _| {
+                mode(
+                    value,
+                    screen,
+                    "混淆",
+                    ObfsKind::choices(),
+                    |obfs| &mut obfs.kind,
+                    |obfs, screen, title| {
+                        let gecko = obfs.kind == ObfsKind::Gecko;
+                        if gecko {
+                            form::subset(screen, title, obfs, |key| key != "kind")
+                        } else {
+                            let items = [crate::tui::Item::new(
+                                "password",
+                                termina::style::StyleExt::stylized("密码"),
+                            )];
+                            obfs.password.edit(
+                                screen,
+                                &Menu {
+                                    title,
+                                    heading: "",
+                                    items: &items,
+                                    help: "",
+                                },
+                                0,
+                            )
+                        }
+                    },
+                )
+            },
+        )
+    }
+
+    pub fn fit(&mut self) {
+        if self.kind == ObfsKind::Salamander {
+            self.min_packet_size = None;
+            self.max_packet_size = None;
+        }
+    }
+}
+
+impl MasqueradeKind {
+    fn field(self, core: ServerCore, key: &str) -> bool {
+        match self {
+            Self::File => key == "directory",
+            Self::Proxy => match key {
+                "url" => true,
+                "rewrite_host" => core != ServerCore::Mihomo,
+                "forwarded" | "verify_certificate" => core == ServerCore::Xray,
+                _ => false,
+            },
+            Self::String => matches!(key, "content" | "status_code" | "headers"),
+        }
+    }
+}
+
+impl Server {
+    pub fn fit(&mut self, core: ServerCore) {
+        if let Some(obfs) = &mut self.obfs {
+            obfs.fit();
+        }
+        if let Some(mask) = &mut self.masquerade {
+            let kind = mask.kind;
+            if core == ServerCore::Mihomo && kind == MasqueradeKind::String {
+                self.masquerade = None;
+            } else {
+                form::retain(mask, |key| key == "kind" || kind.field(core, key));
+            }
+        }
+    }
+
+    pub fn edit(&mut self, screen: &mut Screen, title: &str, core: ServerCore) -> Result<bool> {
+        let mut page = ServerPage {
+            core,
+            options: std::mem::take(self),
+        };
+        let result = form::edit(screen, title, &mut page);
+        *self = page.options;
+        result
+    }
+}
+
+#[derive(Clone, Default)]
+struct ServerPage {
+    core: ServerCore,
+    options: Server,
+}
+
+impl Form for ServerPage {
+    fn fields(&mut self, d: Self) -> form::Fields<'_> {
+        let core = self.core;
+        let v = &mut self.options;
+        let d = d.options;
+        let text = v
+            .masquerade
+            .as_ref()
+            .filter(|mask| mask.kind != MasqueradeKind::String || core != ServerCore::Mihomo)
+            .map_or_else(|| "无".to_owned(), |mask| mask.kind.text());
+        vec![
+            Obfs::field(&mut v.obfs),
+            form::control(
+                "masquerade",
+                "伪装响应",
+                &mut v.masquerade,
+                None,
+                Some(text),
+                move |slot, screen, _, _| {
+                    let kinds = MasqueradeKind::choices()
+                        .into_iter()
+                        .filter(|(_, _, m)| {
+                            *m != MasqueradeKind::String || core != ServerCore::Mihomo
+                        })
+                        .collect();
+                    mode(
+                        slot,
+                        screen,
+                        "伪装响应",
+                        kinds,
+                        |v| &mut v.kind,
+                        |mask, screen, title| {
+                            let kind = mask.kind;
+                            form::subset(screen, title, mask, |key| kind.field(core, key))
+                        },
+                    )
+                },
+            ),
+            form::field("quic", "服务端 QUIC", &mut v.quic, d.quic),
+            form::field("client", "客户端 QUIC", &mut v.client, d.client),
+            form::field(
+                "ignore_client_bandwidth",
+                "忽略客户端带宽",
+                &mut v.ignore_client_bandwidth,
+                d.ignore_client_bandwidth,
+            ),
+            form::field("user_level", "用户等级", &mut v.user_level, d.user_level),
+        ]
+    }
+}
+
+impl Form for ClientOptions {
+    fn fields(&mut self, d: Self) -> form::Fields<'_> {
+        vec![
+            Obfs::field(&mut self.obfs),
+            form::field("ports", "跳跃端口", &mut self.ports, d.ports),
+            form::field(
+                "hop_interval",
+                "跳跃间隔",
+                &mut self.hop_interval,
+                d.hop_interval,
+            ),
+            form::field(
+                "hop_interval_max",
+                "最大跳跃间隔",
+                &mut self.hop_interval_max,
+                d.hop_interval_max,
+            ),
+            form::field("tcp", "TCP", &mut self.tcp, d.tcp),
+            form::field("udp", "UDP", &mut self.udp, d.udp),
+            form::field("quic", "QUIC", &mut self.quic, d.quic),
+        ]
+    }
+}
+form::group!(ClientOptions);
 
 fields!(Obfs {
     kind: "类型",
