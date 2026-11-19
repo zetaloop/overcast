@@ -83,11 +83,18 @@ pub fn copy(
                 return Err("当前没有可用的接入连接".into());
             }
             if links {
-                Ok(profiles
-                    .iter()
-                    .map(|profile| crate::share::path(&profile.connections, &profile.name, store))
-                    .collect::<Result<Vec<_>>>()?
-                    .join("\n"))
+                let mut links = Vec::new();
+                for profile in &profiles {
+                    progress.check()?;
+                    match crate::share::path(&profile.connections, &profile.name, store) {
+                        Ok(link) => links.push(link),
+                        Err(error) => progress.warn(&profile.name, &error.to_string()),
+                    }
+                }
+                if links.is_empty() {
+                    return Err("没有可复制的节点链接".into());
+                }
+                Ok(links.join("\n"))
             } else {
                 Ok(serde_json::to_string(&profiles)?)
             }

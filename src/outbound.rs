@@ -256,7 +256,6 @@ fn edit(
     loop {
         let active = outbound.effective();
         let changed = !existing || serde_json::to_vec(&active)? != initial;
-        let share_link = !changed && crate::share::has_link(&active.connections);
         let title = if existing {
             format!("出站 / {}", outbound.name)
         } else {
@@ -289,15 +288,7 @@ fn edit(
                 Item::new("create", "创建".stylized())
             });
         } else {
-            items.push(Item::new(
-                "export",
-                if share_link {
-                    "连接资料"
-                } else {
-                    "复制出站配置"
-                }
-                .stylized(),
-            ));
+            items.push(Item::new("export", "连接资料".stylized()));
             if outbound.connections.len() > 1 {
                 items.push(Item::new("select", "复制部分连接".stylized()));
             }
@@ -387,7 +378,6 @@ fn edit(
                     }
                     Ok(())
                 }
-                "export" if !share_link => active.selection().copy(screen),
                 "export" => crate::share::copy(screen, "连接资料", |_, links| {
                     if links {
                         crate::share::path(&active.connections, &active.name, store)

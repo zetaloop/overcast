@@ -31,7 +31,7 @@ pub fn copy(
 ) -> Result<()> {
     let items = [
         Item::new("links", "分享链接".stylized()),
-        Item::new("config", "Overcast 配置".stylized()),
+        Item::new("config", "复制 Overcast 配置".stylized()),
         Item::new("back", "返回".stylized()),
     ];
     let menu = Menu {
@@ -55,17 +55,6 @@ pub fn copy(
             _ => {}
         }
     }
-}
-
-pub fn has_link(connections: &[Connection]) -> bool {
-    let mut chain = connections
-        .iter()
-        .rev()
-        .filter(|c| !matches!(c, Connection::Direct(_)));
-    chain
-        .next()
-        .is_some_and(|c| !matches!(c, Connection::Forward(_) | Connection::Warp(_)))
-        && chain.all(|c| matches!(c, Connection::Forward(_)))
 }
 
 pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<String> {
