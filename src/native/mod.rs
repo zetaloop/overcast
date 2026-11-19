@@ -179,6 +179,17 @@ pub fn prepare(
     let mut builder = Builder::new(store, config, progress);
     let mut scopes = HashMap::new();
     let graph = builder.graph(geodata, Some(&mut scopes))?;
+    let planned: BTreeSet<_> = builder
+        .chains
+        .keys()
+        .filter(|(_, _, payload)| *payload == Payload::Proxy)
+        .map(|(uuid, _, _)| *uuid)
+        .collect();
+    for outbound in &config.outbounds {
+        if !planned.contains(&outbound.uuid) {
+            builder.plan(outbound, None, Payload::Proxy)?;
+        }
+    }
     let mut coverage = graph::Coverage::default();
     let mut include = |uuid: Uuid| {
         if let Some(scope) = scopes.remove(&uuid) {
@@ -973,6 +984,19 @@ impl<'a> Builder<'a> {
             .iter()
             .find(|outbound| outbound.uuid == uuid)
             .ok_or_else(|| format!("找不到出站：{uuid}"))?;
+        let paths = self.plan(source, Some(preferred), payload)?;
+        Ok(self
+            .chains
+            .entry((uuid, preferred, payload))
+            .or_insert(paths))
+    }
+
+    fn plan(
+        &self,
+        source: &crate::outbound::Outbound,
+        preferred: Option<Core>,
+        payload: Payload,
+    ) -> Result<Vec<Chain>> {
         let mut chains = vec![Chain {
             nodes: Vec::new(),
             networks: [true, true],
@@ -983,11 +1007,10 @@ impl<'a> Builder<'a> {
                 break;
             }
             let requested = connection.core();
-            let mut candidates = vec![preferred];
-            candidates.extend(
+            let candidates = preferred.into_iter().chain(
                 [Core::Xray, Core::SingBox, Core::Mihomo]
                     .into_iter()
-                    .filter(|core| *core != preferred),
+                    .filter(|core| Some(*core) != preferred),
             );
             let mut nodes = Vec::new();
             let mut errors = Vec::new();
@@ -1077,10 +1100,36 @@ impl<'a> Builder<'a> {
                     });
                 }
             }
+            if next.is_empty()
+                && index > 0
+                && payload == Payload::Proxy
+                && nodes
+                    .iter()
+                    .any(|node| carrier.requests(node.core, [true, true]) != [false, false])
+            {
+                let prefix: BTreeSet<_> = chains
+                    .iter()
+                    .map(|path| match path.networks {
+                        [true, true] => "TCP + UDP",
+                        [true, false] => "TCP",
+                        [false, true] => "UDP",
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                return Err(format!(
+                    "出站 {} 第 {} 段（{}）之后可用 {}，无法承载第 {} 段（{}）",
+                    source.name,
+                    index,
+                    source.connections[index - 1].summary(),
+                    prefix.into_iter().collect::<Vec<_>>().join(" 或 "),
+                    index + 1,
+                    connection.summary(),
+                )
+                .into());
+            }
             chains = next;
         }
-        self.chains.insert((uuid, preferred, payload), chains);
-        Ok(&self.chains[&(uuid, preferred, payload)])
+        Ok(chains)
     }
 
     fn outbound(
