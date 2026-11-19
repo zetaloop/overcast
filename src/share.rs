@@ -692,13 +692,9 @@ fn transport(
                 query.insert("host".to_owned(), json!(value));
             }
             if !value.checksum || value.header == Header::Dns && value.domain.is_some() {
-                let native = crate::native::transport::xray(source, false, store, secure)?;
                 query.insert(
                     "fm".to_owned(),
-                    native
-                        .get("finalmask")
-                        .cloned()
-                        .unwrap_or_else(|| json!({"udp": []})),
+                    json!({"udp": crate::native::transport::kcp_masks(value)?}),
                 );
             }
         }

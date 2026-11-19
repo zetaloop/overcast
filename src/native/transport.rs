@@ -97,26 +97,7 @@ pub fn xray(
             for field in ["checksum", "seed", "header", "domain"] {
                 options.take(field);
             }
-            let mut masks = Vec::new();
-            if value.header != crate::transport::Header::None {
-                let header = if value.header == crate::transport::Header::WechatVideo {
-                    json!("wechat")
-                } else {
-                    serde_json::to_value(value.header)?
-                };
-                let mut settings = Map::from_iter([("header".to_owned(), header)]);
-                if value.header == crate::transport::Header::Dns
-                    && let Some(domain) = &value.domain
-                {
-                    settings.insert("value".to_owned(), json!(domain));
-                }
-                masks.push(json!({"type": "mkcp-legacy", "settings": settings}));
-            }
-            if let Some(seed) = value.seed.as_ref().filter(|seed| !seed.is_empty()) {
-                masks.push(json!({"type": "mkcp-legacy", "settings": {"value": seed}}));
-            } else if value.checksum {
-                masks.push(json!({"type": "mkcp-legacy"}));
-            }
+            let masks = kcp_masks(value)?;
             if !masks.is_empty() {
                 output.insert("finalmask".to_owned(), json!({"udp": masks}));
             }
@@ -230,6 +211,32 @@ pub fn xray(
         output.insert(name.to_owned(), json!(settings));
     }
     Ok(output)
+}
+
+pub(crate) fn kcp_masks(value: &crate::transport::Kcp) -> Result<Vec<Value>> {
+    use crate::transport::Header;
+
+    let mut masks = Vec::new();
+    if value.header != Header::None {
+        let header = if value.header == Header::WechatVideo {
+            json!("wechat")
+        } else {
+            serde_json::to_value(value.header)?
+        };
+        let mut settings = Map::from_iter([("header".to_owned(), header)]);
+        if value.header == Header::Dns
+            && let Some(domain) = &value.domain
+        {
+            settings.insert("value".to_owned(), json!(domain));
+        }
+        masks.push(json!({"type": "mkcp-legacy", "settings": settings}));
+    }
+    if let Some(seed) = value.seed.as_ref().filter(|seed| !seed.is_empty()) {
+        masks.push(json!({"type": "mkcp-legacy", "settings": {"value": seed}}));
+    } else if value.checksum {
+        masks.push(json!({"type": "mkcp-legacy"}));
+    }
+    Ok(masks)
 }
 
 pub fn singbox(
