@@ -31,7 +31,7 @@ impl Credential {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Mode {
+pub(crate) enum Mode {
     Http1,
     Http2,
     Http3,
@@ -49,7 +49,10 @@ enum Mode {
 }
 
 impl Mode {
-    fn wire(self) -> Network {
+    fn wire(self, source: &Inbound, layer: Layer) -> Network {
+        if layer == Layer::Transport && source.quic() {
+            return Network::Udp;
+        }
         match self {
             Self::Http3
             | Self::SocksUdp
@@ -74,18 +77,45 @@ impl Mode {
         }
     }
 
-    fn carries(self, core: Core, network: Network) -> bool {
+    pub fn carries(self, source: &Inbound, network: Network) -> bool {
+        if network == Network::Udp
+            && matches!(&source.protocol, Protocol::Mixed(value) if !value.udp)
+        {
+            return false;
+        }
         match self {
             Self::SocksUdp | Self::ShadowsocksUdp | Self::ForwardUdp => network == Network::Udp,
             Self::Forward => network == Network::Tcp,
-            Self::Socks => network == Network::Tcp || core != Core::Mihomo,
+            Self::Socks => network == Network::Tcp || source.core != Core::Mihomo,
             Self::Vless
             | Self::Vmess
             | Self::Trojan
             | Self::Shadowsocks
             | Self::Hysteria2
             | Self::AnyTls => true,
-            _ => network == Network::Tcp || core == Core::SingBox,
+            _ => network == Network::Tcp || source.core == Core::SingBox,
+        }
+    }
+
+    pub fn verifies(self, source: &Inbound) -> bool {
+        self != Self::SocksUdp && source.protocol.credential().is_some()
+    }
+
+    pub fn accepts(self, source: &Inbound, wire: Network, network: Network, layer: Layer) -> bool {
+        self.wire(source, layer) == wire && self.carries(source, network)
+    }
+
+    pub fn matches_client(self, client: &crate::connection::Connection) -> bool {
+        use crate::connection::{Connection, HttpVersion};
+        match client {
+            Connection::Http(v) => match v.http.version {
+                HttpVersion::Auto => matches!(self, Self::Http1 | Self::Http2 | Self::Http3),
+                HttpVersion::Http1 => self == Self::Http1,
+                HttpVersion::Http2 => self == Self::Http2,
+                HttpVersion::Http3 => self == Self::Http3,
+            },
+            Connection::Socks(_) => matches!(self, Self::Socks | Self::SocksUdp),
+            _ => true,
         }
     }
 }
@@ -111,7 +141,13 @@ impl Member {
     pub fn carries(&self, network: Network) -> bool {
         self.modes
             .iter()
-            .any(|mode| mode.carries(self.source.core, network))
+            .any(|mode| mode.carries(&self.source, network))
+    }
+
+    pub fn accepts(&self, wire: Network, network: Network, layer: Layer) -> bool {
+        self.modes
+            .iter()
+            .any(|mode| mode.accepts(&self.source, wire, network, layer))
     }
 
     pub fn internal(&self, port: u16, layer: Layer) -> Result<Listener> {
@@ -127,7 +163,9 @@ impl Member {
                     format!("入站 {} 的 Vision 处理需要外层 TLS 上下文", source.name).into(),
                 );
             }
-            member.modes.retain(|mode| mode.wire() == Network::Tcp);
+            member
+                .modes
+                .retain(|mode| mode.wire(&source, layer) == Network::Tcp);
             source.transport = crate::transport::Transport::default();
             source.security = crate::inbound::Security::None;
             networks = BTreeSet::from([Network::Tcp]);
@@ -154,19 +192,7 @@ impl Member {
     }
 }
 
-pub fn accepts(source: &Inbound, wire: Network, network: Network, layer: Layer) -> bool {
-    let udp = layer == Layer::Transport && source.quic();
-    modes(source, &[network]).iter().any(|mode| {
-        mode.carries(source.core, network)
-            && if udp {
-                wire == Network::Udp
-            } else {
-                wire == mode.wire()
-            }
-    })
-}
-
-fn modes(source: &Inbound, networks: &[Network]) -> BTreeSet<Mode> {
+pub fn modes(source: &Inbound) -> BTreeSet<Mode> {
     let mut modes = BTreeSet::new();
     match &source.protocol {
         Protocol::Mixed(protocol) => {
@@ -188,7 +214,7 @@ fn modes(source: &Inbound, networks: &[Network]) -> BTreeSet<Mode> {
             }
             if protocol.socks.enabled {
                 modes.insert(Mode::Socks);
-                if source.core == Core::Mihomo && networks.contains(&Network::Udp) {
+                if source.core == Core::Mihomo && protocol.udp {
                     modes.insert(Mode::SocksUdp);
                 }
             }
@@ -212,15 +238,15 @@ fn modes(source: &Inbound, networks: &[Network]) -> BTreeSet<Mode> {
             if value.tcp {
                 modes.insert(Mode::Shadowsocks);
             }
-            if value.udp && networks.contains(&Network::Udp) {
+            if value.udp {
                 modes.insert(Mode::ShadowsocksUdp);
             }
         }
-        Protocol::Forward(_) => {
-            if networks.contains(&Network::Tcp) {
+        Protocol::Forward(value) => {
+            if value.tcp {
                 modes.insert(Mode::Forward);
             }
-            if networks.contains(&Network::Udp) {
+            if value.udp {
                 modes.insert(Mode::ForwardUdp);
             }
         }
@@ -268,7 +294,11 @@ fn validate(
     if unix && source.core != Core::Xray {
         return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
     }
-    if unix && (transport_udp || modes.iter().any(|mode| mode.wire() == Network::Udp)) {
+    if unix
+        && modes
+            .iter()
+            .any(|mode| mode.wire(source, Layer::Transport) == Network::Udp)
+    {
         return Err(format!("入站 {} 的传输需要 UDP 监听地址", source.name).into());
     }
     if (unix || transport_udp)
@@ -407,15 +437,18 @@ pub fn build(
         }
         let unix = source.listen.address.starts_with('@')
             || Path::new(&source.listen.address).is_absolute();
-        let transport_udp = source.quic();
-        let modes = modes(
-            &source,
-            &entry
+        let mut modes = modes(&source);
+        let needed = |network| {
+            entry
                 .accounts
                 .iter()
-                .map(|account| account.network)
-                .collect::<Vec<_>>(),
-        );
+                .any(|account| account.network == network)
+        };
+        modes.retain(|mode| match mode {
+            Mode::SocksUdp | Mode::ShadowsocksUdp | Mode::ForwardUdp => needed(Network::Udp),
+            Mode::Forward => needed(Network::Tcp),
+            _ => true,
+        });
         let parts =
             if source.core == Core::SingBox && modes.contains(&Mode::Http3) && modes.len() > 1 {
                 let mut tcp = modes.clone();
@@ -441,7 +474,11 @@ pub fn build(
                     .iter()
                     .any(|account| account.network == Network::Udp);
             }
-            if transport_udp || modes.iter().all(|mode| mode.wire() == Network::Udp) {
+            let wires: BTreeSet<_> = modes
+                .iter()
+                .map(|mode| mode.wire(&source, Layer::Transport))
+                .collect();
+            if !wires.contains(&Network::Tcp) {
                 let socket = &mut source.listen.socket;
                 socket.tcp_fast_open = None;
                 socket.tcp_multi_path = None;
@@ -453,15 +490,7 @@ pub fn build(
                 socket.tcp_max_segment = None;
                 socket.tcp_user_timeout = None;
             }
-            let binding = Binding::new(
-                &source,
-                ports[0],
-                if transport_udp {
-                    BTreeSet::from([Network::Udp])
-                } else {
-                    modes.iter().map(|mode| mode.wire()).collect()
-                },
-            )?;
+            let binding = Binding::new(&source, ports[0], wires)?;
             if binding.current_namespace()? {
                 source.listen.socket.namespace = None;
             }
@@ -792,7 +821,7 @@ fn merge(
                 continue;
             }
             for &mode in &modes {
-                let identities: Vec<_> = if users.is_empty() || mode == Mode::SocksUdp {
+                let identities: Vec<_> = if users.is_empty() || !mode.verifies(&source) {
                     vec![None]
                 } else {
                     credentials.iter().map(Some).collect()
@@ -833,21 +862,23 @@ fn merge(
                 continue;
             }
             for network in [Network::Tcp, Network::Udp] {
-                if !left.carries(network) || !right.carries(network) {
-                    continue;
-                }
-                if source.core == Core::Mihomo
-                    && !left.modes.iter().any(|mode| {
-                        mode.carries(source.core, network)
+                let mut overlap = left
+                    .modes
+                    .iter()
+                    .filter(|mode| {
+                        mode.carries(&source, network)
                             && right.modes.iter().any(|other| {
-                                other.family() == mode.family()
-                                    && other.carries(source.core, network)
+                                other.carries(&source, network)
+                                    && (source.core != Core::Mihomo
+                                        || other.family() == mode.family())
                             })
                     })
-                {
+                    .peekable();
+                if overlap.peek().is_none() {
                     continue;
                 }
-                let identities: Vec<_> = if !network.identity(&source) || users.is_empty() {
+                let verified = overlap.all(|mode| mode.verifies(&source));
+                let identities: Vec<_> = if !verified || users.is_empty() {
                     vec![(None, None)]
                 } else if password_identity {
                     left.users

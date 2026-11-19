@@ -63,10 +63,7 @@ impl From<&Protocol> for Payload {
 
 impl Account<'_> {
     pub fn identity(&self, inbound: &Inbound) -> Option<Uuid> {
-        inbound
-            .account(self.user)
-            .filter(|_| self.network.identity(inbound))
-            .map(|(id, _)| id)
+        inbound.account(self.user).map(|(id, _)| id)
     }
 }
 
@@ -220,35 +217,6 @@ impl Network {
             Self::Udp => "udp",
         }
     }
-
-    pub fn identity(self, inbound: &Inbound) -> bool {
-        !(self == Self::Udp
-            && inbound.core == Core::Mihomo
-            && matches!(inbound.protocol, Protocol::Mixed(_)))
-            && inbound.protocol.credential().is_some()
-    }
-
-    pub fn enabled(self, inbound: &Inbound) -> bool {
-        match (self, &inbound.protocol) {
-            (Self::Tcp, Protocol::Shadowsocks(value)) => value.tcp,
-            (Self::Tcp, Protocol::Forward(value)) => value.tcp,
-            (Self::Tcp, _) => true,
-            (Self::Udp, Protocol::Mixed(value)) => {
-                value.udp
-                    && (value.socks.enabled || value.http.enabled && inbound.core == Core::SingBox)
-            }
-            (
-                Self::Udp,
-                Protocol::Vless(_)
-                | Protocol::Vmess(_)
-                | Protocol::Trojan(_)
-                | Protocol::Hysteria2(_)
-                | Protocol::AnyTls(_),
-            ) => true,
-            (Self::Udp, Protocol::Shadowsocks(value)) => value.tcp || value.udp,
-            (Self::Udp, Protocol::Forward(value)) => value.udp,
-        }
-    }
 }
 
 pub fn build<'a>(
@@ -303,10 +271,16 @@ pub fn build<'a>(
             .filter(|_| inbound.protocol.routing())
             .map(|coverage| coverage.entry(inbound.uuid).or_default());
         let mut accounts = Vec::new();
+        let modes = crate::native::listener::modes(inbound);
         for network in [Network::Tcp, Network::Udp] {
-            if inbound.response_only() || !network.enabled(inbound) {
+            let mut receivers = modes
+                .iter()
+                .filter(|mode| mode.carries(inbound, network))
+                .peekable();
+            if inbound.response_only() || receivers.peek().is_none() {
                 continue;
             }
+            let verified = receivers.all(|mode| mode.verifies(inbound));
             if inbound.system_users() {
                 for user in &config.users {
                     let routes = graph.routes(
@@ -320,7 +294,7 @@ pub fn build<'a>(
                         .iter()
                         .find(|route| route.destination != Destination::Block)
                     {
-                        if !network.identity(inbound) {
+                        if !verified {
                             return Err(format!(
                                 "入站 {} 的 {} 接收器未验证凭据，规则 {} 要求提供用户 {} 的接入",
                                 inbound.name,
@@ -341,7 +315,7 @@ pub fn build<'a>(
                 let anonymous =
                     graph.routes(inbound, None, network, &mut reachable, scope.as_deref_mut())?;
                 if inbound.account(None).is_some()
-                    && !network.identity(inbound)
+                    && !verified
                     && anonymous
                         .iter()
                         .any(|route| route.destination != Destination::Block)
@@ -759,10 +733,14 @@ impl<'a> Analysis<'a> {
             } else {
                 vec![None]
             };
+            let modes = crate::native::listener::modes(inbound);
+            let accepts = |network| {
+                modes
+                    .iter()
+                    .any(|mode| mode.accepts(inbound, wire, network, layer))
+            };
             for network in [Network::Tcp, Network::Udp] {
-                if !network.enabled(inbound)
-                    || !crate::native::listener::accepts(inbound, wire, network, layer)
-                {
+                if !accepts(network) {
                     continue;
                 }
                 for &user in &users {
@@ -780,7 +758,7 @@ impl<'a> Analysis<'a> {
                     }
                 }
             }
-            if crate::native::listener::accepts(inbound, wire, Network::Tcp, layer) {
+            if accepts(Network::Tcp) {
                 if inbound.protocol.responds() {
                     result = true;
                     break;
@@ -815,9 +793,7 @@ impl<'a> Analysis<'a> {
         {
             return Ok(false);
         }
-        Ok(
-            !matches!(&inbound.protocol, Protocol::Mixed(protocol) if !protocol.http.enabled && !protocol.socks.enabled),
-        )
+        Ok(true)
     }
 
     fn outcome(&mut self, routes: &[Route], destination: Destination) -> Lit {

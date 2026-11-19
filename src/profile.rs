@@ -133,17 +133,18 @@ impl Builder<'_> {
         }
         let clients = self.clients(source, user.filter(|_| authenticated))?;
         let payload = Payload::from(&source.protocol);
+        let modes = crate::native::listener::modes(source);
         let mut result = Vec::new();
         for (network, destination) in routes {
+            let clients = clients.iter().filter(|client| {
+                modes
+                    .iter()
+                    .any(|mode| mode.carries(source, network) && mode.matches_client(client))
+            });
             match destination {
                 Destination::Block => {}
                 Destination::Outbound(_) if payload == Payload::Proxy => {
-                    result.extend(
-                        clients
-                            .iter()
-                            .filter(|client| carries(client, source, network))
-                            .map(|client| (authenticated, vec![client.clone()])),
-                    );
+                    result.extend(clients.map(|client| (authenticated, vec![client.clone()])));
                 }
                 Destination::Inbound(uuid) => {
                     let Some(next) = self
@@ -172,21 +173,21 @@ impl Builder<'_> {
                                             .filter(|_| receiver.system_users())
                                             .map(|user| user.uuid)
                             })
-                            && crate::native::listener::accepts(
-                                receiver,
-                                Network::Tcp,
-                                Network::Udp,
-                                crate::graph::Layer::Transport,
-                            )
+                            && crate::native::listener::modes(receiver).iter().any(|mode| {
+                                mode.matches_client(&path[0])
+                                    && mode.accepts(
+                                        receiver,
+                                        Network::Tcp,
+                                        Network::Udp,
+                                        crate::graph::Layer::Transport,
+                                    )
+                            })
                         {
                             stream(&mut path[0], receiver.core);
                         }
                         for address in addresses {
                             path[0].set_server(&address);
-                            for client in clients
-                                .iter()
-                                .filter(|client| carries(client, source, network))
-                            {
+                            for client in clients.clone() {
                                 let mut connections = vec![client.clone()];
                                 connections.extend(path.clone());
                                 result.push((authenticated || child_user, connections));
@@ -202,10 +203,7 @@ impl Builder<'_> {
                         .find(|value| value.uuid == uuid)
                         .and_then(|value| value.connections.last())
                         .unwrap();
-                    for client in clients
-                        .iter()
-                        .filter(|client| carries(client, source, network))
-                    {
+                    for client in clients {
                         result.push((authenticated, vec![client.clone(), self.remote(target)?]));
                     }
                 }
@@ -603,8 +601,4 @@ fn multiplex(source: Option<&crate::multiplex::Server>) -> Option<crate::multipl
         }),
         ..crate::multiplex::Client::default()
     })
-}
-
-fn carries(client: &Connection, source: &Inbound, network: Network) -> bool {
-    !matches!(client, Connection::Http(_) if network == Network::Udp && source.core != Core::SingBox)
 }

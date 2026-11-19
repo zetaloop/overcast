@@ -266,12 +266,7 @@ pub fn prepare(
                     && if layer == Layer::Transport {
                         member.binding.networks.contains(&network)
                     } else {
-                        listener::accepts(
-                            graph.entries[member.entry].inbound,
-                            network,
-                            graph::Network::Tcp,
-                            layer,
-                        )
+                        member.accepts(network, graph::Network::Tcp, layer)
                     }
             });
             let Some(member) = member else {
