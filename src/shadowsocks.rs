@@ -322,18 +322,21 @@ impl Keys {
     }
 }
 
-fields!(Client {
-    name: "名称",
-    server: "地址",
-    port: "端口",
-    password: "密码",
-    core: "核心",
-    shadowsocks: "Shadowsocks",
-    security: "加密",
-    transport: "传输",
-    multiplex: "多路复用",
-    network: "网络",
-});
+crate::connection::client_fields!(
+    Shadowsocks,
+    Client {
+        name: "名称",
+        server: "地址",
+        port: "端口",
+        password: "密码",
+        core: "核心",
+        shadowsocks: "Shadowsocks",
+        security: "加密",
+        transport: "传输",
+        multiplex: "多路复用",
+        network: "网络",
+    }
+);
 
 fields!(ClientOptions {
     cipher: "算法",

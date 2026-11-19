@@ -369,15 +369,8 @@ impl Value for Transport {
 }
 
 impl Transport {
-    pub fn choose(
-        &mut self,
-        screen: &mut Screen,
-        parent: &Menu<'_>,
-        field: usize,
-        allowed: impl Fn(&Self) -> bool,
-    ) -> Result<bool> {
-        let title = format!("{} / {}", parent.title, parent.items[field].label.content);
-        let choices: Vec<_> = [
+    pub(crate) fn variants() -> [(&'static str, Self); 8] {
+        [
             ("default", Self::Default),
             ("websocket", Self::WebSocket(Default::default())),
             ("httpupgrade", Self::HttpUpgrade(Default::default())),
@@ -387,9 +380,30 @@ impl Transport {
             ("kcp", Self::Kcp(Default::default())),
             ("quic", Self::Quic),
         ]
-        .into_iter()
-        .filter(|(_, value)| allowed(value))
-        .collect();
+    }
+
+    pub fn choose(
+        &mut self,
+        screen: &mut Screen,
+        parent: &Menu<'_>,
+        field: usize,
+        allowed: impl Fn(&Self) -> bool,
+    ) -> Result<bool> {
+        let choices: Vec<_> = Self::variants()
+            .into_iter()
+            .filter(|(_, value)| allowed(value))
+            .collect();
+        self.select(screen, parent, field, &choices)
+    }
+
+    pub(crate) fn select(
+        &mut self,
+        screen: &mut Screen,
+        parent: &Menu<'_>,
+        field: usize,
+        choices: &[(&str, Self)],
+    ) -> Result<bool> {
+        let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let current = choices
             .iter()
             .position(|(_, value)| std::mem::discriminant(value) == std::mem::discriminant(self));

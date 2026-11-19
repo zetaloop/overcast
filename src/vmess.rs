@@ -108,18 +108,21 @@ choices!(Cipher {
     Zero: "zero" => "明文透传",
 });
 
-fields!(Client {
-    name: "名称",
-    server: "地址",
-    port: "端口",
-    uuid: "UUID",
-    core: "核心",
-    vmess: "VMess",
-    security: "加密",
-    transport: "传输",
-    multiplex: "多路复用",
-    network: "网络",
-});
+crate::connection::client_fields!(
+    Vmess,
+    Client {
+        name: "名称",
+        server: "地址",
+        port: "端口",
+        uuid: "UUID",
+        core: "核心",
+        vmess: "VMess",
+        security: "加密",
+        transport: "传输",
+        multiplex: "多路复用",
+        network: "网络",
+    }
+);
 
 fields!(ClientOptions {
     cipher: "加密算法",

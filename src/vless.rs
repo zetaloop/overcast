@@ -78,18 +78,21 @@ choices!(Flow {
     Vision: "vision" => "Vision",
 });
 
-fields!(Client {
-    name: "名称",
-    server: "地址",
-    port: "端口",
-    uuid: "UUID",
-    core: "核心",
-    vless: "VLESS",
-    security: "加密",
-    transport: "传输",
-    multiplex: "多路复用",
-    network: "网络",
-});
+crate::connection::client_fields!(
+    Vless,
+    Client {
+        name: "名称",
+        server: "地址",
+        port: "端口",
+        uuid: "UUID",
+        core: "核心",
+        vless: "VLESS",
+        security: "加密",
+        transport: "传输",
+        multiplex: "多路复用",
+        network: "网络",
+    }
+);
 
 fields!(ClientOptions {
     flow: "流模式",

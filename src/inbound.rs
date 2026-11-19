@@ -17,6 +17,7 @@ use crate::{
     connection::{FastOpen, SocketOption},
     endpoint::Endpoint,
     form::{self, Value, choices, fields},
+    native::stack::Stack,
     transport::Transport,
     tui::{Action, Item, Menu, Screen},
     user,
@@ -81,22 +82,9 @@ impl Inbound {
             return Err("监听地址需要填写 IP、localhost 或套接字路径".into());
         }
         self.ports()?;
-        let kind = self.protocol.kind();
-        if !kind.cores().contains(&self.core) {
-            return Err(format!("{} 入站没有 {} 实现", kind.text(), self.core.text()).into());
-        }
-        if !self.securities().contains(&self.security.index()) {
-            return Err(format!("{} 入站不支持 {} 加密", kind.text(), self.security.text()).into());
-        }
-        if !self.supports_transport(&self.transport) {
-            return Err(format!(
-                "{} 的 {} 入站不能使用 {} 传输",
-                self.core.text(),
-                kind.text(),
-                self.transport.text()
-            )
-            .into());
-        }
+        Stack::Inbound(&self.protocol)
+            .check(self.core, self.security.index(), &self.transport)
+            .map_err(|error| format!("入站 {}：{error}", self.name))?;
         let credential = self.protocol.credential();
         if self.users && !self.protocol.supports_users(self.core) {
             return Err(format!("入站 {} 的协议设置不支持系统用户认证", self.name).into());
@@ -125,47 +113,12 @@ impl Inbound {
         Ok(())
     }
 
-    fn securities(&self) -> &'static [usize] {
-        match (self.protocol.kind(), self.core) {
-            (Kind::Hysteria2, _) => &[1],
-            (Kind::AnyTls, Core::Mihomo) => &[0, 1],
-            (Kind::Shadowsocks | Kind::Forward, Core::SingBox | Core::Mihomo) => &[0],
-            _ => &[0, 1, 2],
-        }
-    }
-
-    fn transports(&self) -> bool {
-        match self.protocol.kind() {
-            Kind::Hysteria2 | Kind::AnyTls => false,
-            Kind::Mixed | Kind::Shadowsocks | Kind::Forward => self.core == Core::Xray,
-            Kind::Vless | Kind::Vmess | Kind::Trojan => true,
-        }
+    fn securities(&self) -> Vec<usize> {
+        Stack::Inbound(&self.protocol).modes(std::iter::once(self.core))
     }
 
     fn supports_transport(&self, transport: &Transport) -> bool {
-        if transport.is_default() {
-            return true;
-        }
-        self.transports()
-            && match self.core {
-                Core::Xray => {
-                    !matches!(transport, Transport::Quic)
-                        && (self.security.reality().is_none() || transport.xray_reality())
-                }
-                Core::SingBox => match transport {
-                    Transport::Kcp(_) | Transport::XHttp(_) => false,
-                    Transport::Quic => matches!(self.security, Security::Tls(_)),
-                    _ => true,
-                },
-                Core::Mihomo => {
-                    matches!(transport, Transport::WebSocket(_) | Transport::Grpc(_))
-                        || matches!(
-                            (&self.protocol, transport),
-                            (Protocol::Vless(_), Transport::XHttp(_))
-                                | (Protocol::Vmess(_), Transport::Kcp(_))
-                        )
-                }
-            }
+        Stack::Inbound(&self.protocol).transport(self.core, self.security.index(), transport)
     }
 
     fn effective(&self) -> Self {
@@ -290,13 +243,6 @@ impl Kind {
             | Self::AnyTls
             | Self::Forward => Core::SingBox,
             Self::Vless => Core::Xray,
-        }
-    }
-
-    fn cores(self) -> &'static [Core] {
-        match self {
-            Self::AnyTls => &[Core::SingBox, Core::Mihomo],
-            _ => &[Core::Xray, Core::SingBox, Core::Mihomo],
         }
     }
 
@@ -761,7 +707,10 @@ fn edit(
             }
             .stylized(),
         ));
-        if inbound.transports() {
+        if Transport::variants()
+            .iter()
+            .any(|(_, value)| !value.is_default() && active.supports_transport(value))
+        {
             items.push(transport);
         }
         if inbound.securities() != [0] {
@@ -821,10 +770,9 @@ fn edit(
                 "export" => crate::profile::copy(screen, store, Some(inbound.uuid), None),
                 "name" => edit!(name),
                 "core" => {
-                    let kind = inbound.protocol.kind();
                     let choices: Vec<_> = Core::choices()
                         .into_iter()
-                        .filter(|(_, _, core)| kind.cores().contains(core))
+                        .filter(|(_, _, core)| Stack::Inbound(&inbound.protocol).implements(*core))
                         .collect();
                     let current = choices
                         .iter()
@@ -919,7 +867,7 @@ fn edit(
                         .choose(
                             screen,
                             &title,
-                            inbound.securities(),
+                            &inbound.securities(),
                             |screen, title, reality| {
                                 reality.use_names();
                                 let allowed = reality.fields_for(inbound.core);

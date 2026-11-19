@@ -56,18 +56,21 @@ pub struct Server {
     pub multiplex: Option<crate::multiplex::Server>,
 }
 
-fields!(Client {
-    name: "名称",
-    server: "地址",
-    port: "端口",
-    password: "密码",
-    core: "核心",
-    trojan: "Trojan",
-    security: "加密",
-    transport: "传输",
-    multiplex: "多路复用",
-    network: "网络",
-});
+crate::connection::client_fields!(
+    Trojan,
+    Client {
+        name: "名称",
+        server: "地址",
+        port: "端口",
+        password: "密码",
+        core: "核心",
+        trojan: "Trojan",
+        security: "加密",
+        transport: "传输",
+        multiplex: "多路复用",
+        network: "网络",
+    }
+);
 
 fields!(ClientOptions {
     tcp: "TCP",

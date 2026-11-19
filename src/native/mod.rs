@@ -11,6 +11,7 @@ mod reality;
 mod routing;
 pub(crate) mod shadowsocks;
 mod singbox;
+pub(crate) mod stack;
 pub(crate) mod transport;
 mod warp;
 mod xray;
@@ -1006,19 +1007,11 @@ impl<'a> Builder<'a> {
             if chains.is_empty() {
                 break;
             }
-            let requested = connection.core();
-            let candidates = preferred.into_iter().chain(
-                [Core::Xray, Core::SingBox, Core::Mihomo]
-                    .into_iter()
-                    .filter(|core| Some(*core) != preferred),
-            );
+            let candidates = connection.core().candidates(preferred);
             let mut nodes = Vec::new();
             let mut errors = Vec::new();
             let forward = payload != Payload::Proxy && index == source.connections.len() - 1;
             for core in candidates {
-                if !matches_core(requested, core) {
-                    continue;
-                }
                 if index != 0
                     && core != Core::Xray
                     && (forward || matches!(connection, Connection::Direct(_)))
@@ -1030,11 +1023,7 @@ impl<'a> Builder<'a> {
                 let result = if forward {
                     forward::outbound(connection.network(), core, self.store, &mut globals)
                 } else {
-                    match core {
-                        Core::Xray => xray::outbound(connection, self.store),
-                        Core::SingBox => singbox::outbound(connection, self.store, &mut globals),
-                        Core::Mihomo => mihomo::outbound(connection, self.store, &mut globals),
-                    }
+                    core.outbound(connection, self.store, &mut globals)
                 };
                 match result {
                     Ok(value) => {
@@ -1394,14 +1383,26 @@ impl<'a> Builder<'a> {
     }
 }
 
-fn matches_core(requested: connection::Core, core: Core) -> bool {
-    matches!(requested, connection::Core::Auto)
-        || matches!(
-            (requested, core),
-            (connection::Core::Xray, Core::Xray)
-                | (connection::Core::SingBox, Core::SingBox)
-                | (connection::Core::Mihomo, Core::Mihomo)
-        )
+impl Core {
+    fn outbound(
+        self,
+        connection: &Connection,
+        store: &Store,
+        globals: &mut Map<String, Value>,
+    ) -> Result<Map<String, Value>> {
+        stack::Stack::Outbound(connection).check(
+            self,
+            connection.security_mode(),
+            connection
+                .transport()
+                .unwrap_or(&crate::transport::Transport::Default),
+        )?;
+        match self {
+            Self::Xray => xray::outbound(connection, store),
+            Self::SingBox => singbox::outbound(connection, store, globals),
+            Self::Mihomo => mihomo::outbound(connection, store, globals),
+        }
+    }
 }
 
 fn key(core: Core) -> &'static str {

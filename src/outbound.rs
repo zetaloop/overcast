@@ -83,15 +83,7 @@ impl Outbound {
     fn effective(&self) -> Self {
         let mut value = self.clone();
         for connection in &mut value.connections {
-            match connection {
-                Connection::AnyTls(client) => client.security = client.security(),
-                Connection::Hysteria2(client) => {
-                    if let Some(obfs) = &mut client.hysteria.obfs {
-                        obfs.fit();
-                    }
-                }
-                _ => {}
-            }
+            connection.fit();
         }
         value
     }
@@ -132,6 +124,13 @@ impl Selection {
                 .any(|selection| selection.connections.is_empty())
         {
             return Err("粘贴内容中没有连接".into());
+        }
+        for selection in &selections {
+            for (index, connection) in selection.connections.iter().enumerate() {
+                connection
+                    .check_stack()
+                    .map_err(|error| format!("第 {} 段连接：{error}", index + 1))?;
+            }
         }
         Ok(selections)
     }

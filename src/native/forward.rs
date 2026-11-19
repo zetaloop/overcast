@@ -32,9 +32,5 @@ pub fn outbound(
         network: network.clone(),
         ..connection::Direct::default()
     });
-    match core {
-        Core::Xray => super::xray::outbound(&direct, store),
-        Core::SingBox => super::singbox::outbound(&direct, store, globals),
-        Core::Mihomo => super::mihomo::outbound(&direct, store, globals),
-    }
+    core.outbound(&direct, store, globals)
 }

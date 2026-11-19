@@ -125,16 +125,19 @@ pub fn password(value: &str) -> Result<()> {
     Ok(())
 }
 
-fields!(Client {
-    name: "名称",
-    server: "地址",
-    port: "端口",
-    password: "密码",
-    core: "核心",
-    hysteria: "Hysteria 2",
-    tls: "TLS",
-    network: "网络",
-});
+crate::connection::client_fields!(
+    Hysteria2,
+    Client {
+        name: "名称",
+        server: "地址",
+        port: "端口",
+        password: "密码",
+        core: "核心",
+        hysteria: "Hysteria 2",
+        tls: "TLS",
+        network: "网络",
+    }
+);
 
 fn mode<T: Form, K: Value + Copy + PartialEq>(
     value: &mut Option<T>,

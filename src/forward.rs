@@ -53,15 +53,18 @@ impl Default for Server {
     }
 }
 
-fields!(Client {
-    name: "名称",
-    server: "地址",
-    port: "端口",
-    core: "核心",
-    security: "加密",
-    transport: "传输",
-    network: "网络",
-});
+crate::connection::client_fields!(
+    Forward,
+    Client {
+        name: "名称",
+        server: "地址",
+        port: "端口",
+        core: "核心",
+        security: "加密",
+        transport: "传输",
+        network: "网络",
+    }
+);
 
 fields!(Server {
     tcp: "TCP 接收",

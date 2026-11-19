@@ -14,9 +14,6 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    if matches!(source, Connection::Forward(_)) {
-        return unsupported("sing-box 固定目标使用路由地址改写");
-    }
     if source.multiplex().is_some()
         && !matches!(
             source,
@@ -27,18 +24,6 @@ pub fn outbound(
         )
     {
         return unsupported("sing-box HTTP/SOCKS 出站没有流复用配置");
-    }
-    if !matches!(
-        source,
-        Connection::Vless(_)
-            | Connection::Vmess(_)
-            | Connection::Trojan(_)
-            | Connection::Shadowsocks(_)
-    ) && source
-        .transport()
-        .is_some_and(|transport| !transport.is_default())
-    {
-        return unsupported("sing-box 的 HTTP/SOCKS 出站没有传输封装配置");
     }
     let (kind, proxy, network) = match source {
         Connection::Direct(value) => ("direct", None, &value.network),
@@ -79,9 +64,6 @@ pub fn outbound(
             );
         }
         Connection::AnyTls(value) => {
-            if matches!(value.security, Security::None) {
-                return unsupported("sing-box AnyTLS 出站使用 TLS");
-            }
             if matches!(value.network.tcp_fast_open, Some(FastOpen::Enabled(true))) {
                 return unsupported("sing-box AnyTLS 出站与 TCP Fast Open 不兼容");
             }
@@ -137,9 +119,6 @@ pub fn outbound(
             }
         }
         Connection::Socks(value) => {
-            if !matches!(value.security, Security::None) {
-                return unsupported("sing-box SOCKS 出站没有 TLS 配置");
-            }
             let mut options = Options::new(&value.socks)?;
             options.take("version");
             output.insert(
@@ -333,9 +312,6 @@ pub fn outbound(
             }
         }
         Connection::Shadowsocks(value) => {
-            if !matches!(value.security, Security::None) || !value.transport.is_default() {
-                return unsupported("sing-box Shadowsocks 通过 SIP003 插件配置传输封装");
-            }
             let mut options = Options::new(&value.shadowsocks)?;
             output.insert("server".to_owned(), json!(value.server));
             output.insert("server_port".to_owned(), json!(value.port));

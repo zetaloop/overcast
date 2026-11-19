@@ -20,21 +20,6 @@ pub fn outbound(
     store: &Store,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    if let Connection::Forward(_) = source {
-        return unsupported("Mihomo Direct 按请求目标发送数据");
-    }
-    if !matches!(
-        source,
-        Connection::Vless(_)
-            | Connection::Vmess(_)
-            | Connection::Trojan(_)
-            | Connection::Shadowsocks(_)
-    ) && source
-        .transport()
-        .is_some_and(|transport| !transport.is_default())
-    {
-        return unsupported("Mihomo 的 HTTP/SOCKS 出站没有传输封装配置");
-    }
     let (kind, proxy, network) = match source {
         Connection::Direct(value) => ("direct", None, &value.network),
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
@@ -100,9 +85,6 @@ pub fn outbound(
             None
         }
         Connection::AnyTls(value) => {
-            if matches!(value.security, Security::None) {
-                return unsupported("Mihomo AnyTLS 出站使用 TLS");
-            }
             let mut options = Options::new(&value.anytls)?;
             options.take("tcp");
             options.take("udp");
@@ -137,9 +119,6 @@ pub fn outbound(
             Some(Cow::Owned(Security::Tls(value.tls.clone())))
         }
         Connection::Shadowsocks(value) => {
-            if !matches!(value.security, Security::None) || !value.transport.is_default() {
-                return unsupported("Mihomo Shadowsocks 通过插件配置传输封装");
-            }
             let mut options = Options::new(&value.shadowsocks)?;
             output.insert("server".to_owned(), json!(value.server));
             output.insert("port".to_owned(), json!(value.port));
@@ -184,27 +163,6 @@ pub fn outbound(
             None
         }
         Connection::Trojan(value) => {
-            if matches!(value.security, Security::None) {
-                return unsupported("Mihomo Trojan 出站使用 TLS");
-            }
-            if !matches!(
-                value.transport,
-                crate::transport::Transport::Default
-                    | crate::transport::Transport::WebSocket(_)
-                    | crate::transport::Transport::HttpUpgrade(_)
-                    | crate::transport::Transport::Grpc(_)
-            ) {
-                return unsupported("Mihomo Trojan 使用原生 TCP、WebSocket、HTTPUpgrade 或 gRPC");
-            }
-            if value.security.reality().is_some()
-                && matches!(
-                    value.transport,
-                    crate::transport::Transport::WebSocket(_)
-                        | crate::transport::Transport::HttpUpgrade(_)
-                )
-            {
-                return unsupported("Mihomo 的 WebSocket 连接没有 REALITY 握手支持");
-            }
             let mut options = Options::new(&value.trojan)?;
             output.insert("server".to_owned(), json!(value.server));
             output.insert("port".to_owned(), json!(value.port));
@@ -242,18 +200,6 @@ pub fn outbound(
             Some(Cow::Borrowed(&value.security))
         }
         Connection::Vmess(value) => {
-            if matches!(value.transport, crate::transport::Transport::XHttp(_)) {
-                return unsupported("Mihomo VMess 没有 XHTTP 传输配置");
-            }
-            if value.security.reality().is_some()
-                && matches!(
-                    value.transport,
-                    crate::transport::Transport::WebSocket(_)
-                        | crate::transport::Transport::HttpUpgrade(_)
-                )
-            {
-                return unsupported("Mihomo 的 WebSocket 连接没有 REALITY 握手支持");
-            }
             let mut options = Options::new(&value.vmess)?;
             output.insert("server".to_owned(), json!(value.server));
             output.insert("port".to_owned(), json!(value.port));
@@ -325,9 +271,6 @@ pub fn outbound(
             Some(Cow::Borrowed(&value.security))
         }
         Connection::Vless(value) => {
-            if matches!(value.transport, crate::transport::Transport::Kcp(_)) {
-                return unsupported("Mihomo VLESS 没有 KCP 传输配置");
-            }
             if value
                 .security
                 .reality()
@@ -335,15 +278,6 @@ pub fn outbound(
                 && matches!(value.transport, crate::transport::Transport::XHttp(_))
             {
                 return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
-            }
-            if value.security.reality().is_some()
-                && matches!(
-                    value.transport,
-                    crate::transport::Transport::WebSocket(_)
-                        | crate::transport::Transport::HttpUpgrade(_)
-                )
-            {
-                return unsupported("Mihomo 的 WebSocket 连接没有 REALITY 握手支持");
             }
             let mut options = Options::new(&value.vless)?;
             output.insert("server".to_owned(), json!(value.server));

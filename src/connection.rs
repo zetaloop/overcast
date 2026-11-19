@@ -1,3 +1,6 @@
+pub(crate) mod editor;
+pub(crate) use editor::client_fields;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Display,
@@ -283,6 +286,21 @@ impl Connection {
         }
     }
 
+    pub(crate) fn security_mode(&self) -> usize {
+        match self {
+            Self::Direct(_) | Self::Warp(_) => 0,
+            Self::Hysteria2(_) => 1,
+            Self::Http(v) => v.security.index(),
+            Self::Socks(v) => v.security.index(),
+            Self::Vless(v) => v.security.index(),
+            Self::Vmess(v) => v.security.index(),
+            Self::Trojan(v) => v.security.index(),
+            Self::Shadowsocks(v) => v.security.index(),
+            Self::AnyTls(v) => v.security.index(),
+            Self::Forward(v) => v.security.index(),
+        }
+    }
+
     pub fn multiplex(&self) -> Option<&crate::multiplex::Client> {
         match self {
             Self::Direct(_) | Self::Hysteria2(_) | Self::AnyTls(_) | Self::Warp(_) => None,
@@ -354,6 +372,7 @@ impl Connection {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.check_stack()?;
         let (server, port) = match self {
             Self::Direct(_) => return Ok(()),
             Self::Http(value) => (value.proxy.server.as_str(), value.proxy.port),
@@ -862,38 +881,51 @@ choices!(AddressStrategy {
     TryIpv6Ipv4: "try-ipv6-ipv4" => "依次尝试 IPv6、IPv4",
 });
 
-fields!(Proxy {
-    name: "名称",
-    server: "地址",
-    port: "端口",
-    username: "用户名",
-    password: "密码",
-    core: "核心",
-});
+impl Proxy {
+    fn fields(&mut self, d: Self, choices: &editor::Choices) -> form::Fields<'_> {
+        vec![
+            form::field("name", "名称", &mut self.name, d.name),
+            form::field("server", "地址", &mut self.server, d.server),
+            form::field("port", "端口", &mut self.port, d.port),
+            form::field("username", "用户名", &mut self.username, d.username),
+            form::field("password", "密码", &mut self.password, d.password),
+            choices.core(&mut self.core, d.core),
+        ]
+    }
+}
 
-fields!(Http {
-    proxy: ..,
-    security: "加密",
-    http: "HTTP",
-    transport: "传输",
-    multiplex: "多路复用",
-    network: "网络",
-});
+client_fields!(
+    Http,
+    Http {
+        proxy: ..,
+        security: "加密",
+        http: "HTTP",
+        transport: "传输",
+        multiplex: "多路复用",
+        network: "网络",
+    }
+);
 
-fields!(Socks {
-    proxy: ..,
-    security: "加密",
-    socks: "SOCKS",
-    transport: "传输",
-    multiplex: "多路复用",
-    network: "网络",
-});
+client_fields!(
+    Socks,
+    Socks {
+        proxy: ..,
+        security: "加密",
+        socks: "SOCKS",
+        transport: "传输",
+        multiplex: "多路复用",
+        network: "网络",
+    }
+);
 
-fields!(Direct {
-    name: "名称",
-    core: "核心",
-    network: "网络",
-});
+client_fields!(
+    Direct,
+    Direct {
+        name: "名称",
+        core: "核心",
+        network: "网络",
+    }
+);
 
 fields!(SocksOptions {
     version: "版本",
