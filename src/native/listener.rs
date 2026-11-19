@@ -389,18 +389,11 @@ pub fn build(
         }
         if let Protocol::Shadowsocks(value) = &mut source.protocol {
             if value.password.is_none()
-                && source.core != Core::Mihomo
-                && matches!(
-                    value.cipher,
-                    crate::shadowsocks::Cipher::Aes128Gcm2022
-                        | crate::shadowsocks::Cipher::Aes256Gcm2022
-                )
                 && let Some(material) = keys
                     .get(&source.uuid)
                     .and_then(|keys| keys.shadowsocks.as_ref())
-                && value.cipher.key_size() == material.cipher.key_size()
             {
-                value.password = Some(material.password.clone());
+                material.apply(value, source.core);
             }
             if let Some(password) = &value.password {
                 value.password = Some(value.cipher.password(password)?);
@@ -751,7 +744,7 @@ fn merge(
                 let mut omitted = vec!["tcp", "udp", "password"];
                 if source.core == Core::Xray {
                     omitted.push("user_level");
-                    if current.cipher.aead() && other.cipher.aead() {
+                    if current.cipher.aead(source.core) && other.cipher.aead(source.core) {
                         omitted.push("cipher");
                     }
                 }

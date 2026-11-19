@@ -52,8 +52,7 @@ impl Keys {
         Ok(keys)
     }
 
-    pub fn apply(&self, source: &mut Inbound, users: usize) {
-        let shared = crate::native::shadowsocks::shared(source, users);
+    pub fn apply(&self, source: &mut Inbound) {
         if let crate::inbound::Security::Reality(reality) = &mut source.security
             && let Some(keys) = &self.reality
         {
@@ -65,18 +64,16 @@ impl Keys {
         {
             encryption.private_keys = keys.private_keys.clone();
         }
-        if shared
-            && let Protocol::Shadowsocks(value) = &mut source.protocol
+        if let Protocol::Shadowsocks(value) = &mut source.protocol
             && let Some(keys) = &self.shadowsocks
         {
-            value.password = Some(keys.password.clone());
+            keys.apply(value, source.core);
         }
     }
 
     pub fn show(&self, source: &Inbound, screen: &mut Screen) -> Result<()> {
         let mut values = Vec::new();
-        if matches!(&source.protocol, Protocol::Shadowsocks(value) if matches!(value.cipher, crate::shadowsocks::Cipher::Aes128Gcm2022 | crate::shadowsocks::Cipher::Aes256Gcm2022))
-            && source.core != crate::inbound::Core::Mihomo
+        if matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher.identity_key(source.core))
             && let Some(keys) = &self.shadowsocks
         {
             values.push(("password", "入口共享密钥", keys.password.clone()));

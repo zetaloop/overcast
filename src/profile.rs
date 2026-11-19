@@ -230,7 +230,7 @@ impl Builder<'_> {
         let password = credentials.map_or("", |(_, password)| password);
         let mut source = source.clone();
         if let Some(keys) = self.config.keys.get(&source.uuid) {
-            keys.apply(&mut source, usize::from(credentials.is_some()));
+            keys.apply(&mut source);
         }
         let mut clients = Vec::new();
         for port in source.ports()? {

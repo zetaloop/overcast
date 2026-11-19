@@ -348,7 +348,7 @@ pub fn prepare(
             }
         }
         if let Some(keys) = keys.get(&listener.source.uuid) {
-            keys.apply(&mut listener.source, listener.users.len());
+            keys.apply(&mut listener.source);
         }
         let inbound = &listener.source;
         step.detail(&inbound.name);

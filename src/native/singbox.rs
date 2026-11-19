@@ -586,12 +586,6 @@ pub fn listeners(
         return Ok(vec![output]);
     }
     if let Protocol::Shadowsocks(value) = &source.protocol {
-        let multi = super::shadowsocks::multi(source, users.len());
-        if value.cipher != crate::shadowsocks::Cipher::None
-            && (users.is_empty() || !multi && users.len() > 1)
-        {
-            return unsupported("当前 Shadowsocks 算法的入站需要单个认证密钥");
-        }
         let mut options = Options::new(value)?;
         for name in ["cipher", "tcp", "udp", "multiplex"] {
             options.take(name);
@@ -609,25 +603,7 @@ pub fn listeners(
             networks.push("udp");
         }
         output.insert("network".to_owned(), json!(networks));
-        if multi {
-            if value.cipher.key_size().is_some() {
-                options.take("password");
-                output.insert(
-                    "password".to_owned(),
-                    json!(
-                        value
-                            .password
-                            .as_ref()
-                            .ok_or("缺少 Shadowsocks 入口共享密钥")?
-                    ),
-                );
-            }
-        } else {
-            output.remove("users");
-            if let Some((_, credential)) = users.first() {
-                output.insert("password".to_owned(), json!(credential.password));
-            }
-        }
+        super::shadowsocks::authentication(source, users, &mut options, &mut output)?;
         if let Some(multiplex) = &value.multiplex {
             output.insert(
                 "multiplex".to_owned(),

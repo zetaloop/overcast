@@ -13,12 +13,14 @@ use crate::{
 };
 
 use super::{
-    listener::{self, Listener},
+    listener::{self, Credential, Listener},
+    options::Options,
     unsupported,
 };
 
 pub fn cipher(value: Cipher, core: Core, inbound: bool) -> Result<Value> {
-    let standard = value.aead() || value.key_size().is_some() || value == Cipher::None;
+    let supported_aead =
+        value.aead(core) || value.identity_key(core) || value == Cipher::Chacha20Poly13052022;
     let stream = matches!(
         value,
         Cipher::Aes128Ctr
@@ -32,8 +34,8 @@ pub fn cipher(value: Cipher, core: Core, inbound: bool) -> Result<Value> {
             | Cipher::Xchacha20
     );
     let supported = match core {
-        Core::Xray => standard && !matches!(value, Cipher::None | Cipher::Aes192Gcm),
-        Core::SingBox => standard || !inbound && stream,
+        Core::Xray => supported_aead && value != Cipher::Aes192Gcm,
+        Core::SingBox => supported_aead || value == Cipher::None || !inbound && stream,
         Core::Mihomo => true,
     };
     if !supported {
@@ -50,14 +52,39 @@ pub fn multi(source: &Inbound, users: usize) -> bool {
     let Protocol::Shadowsocks(value) = &source.protocol else {
         return false;
     };
-    source.core != Core::Mihomo
-        && (value.cipher.aead()
-            || matches!(value.cipher, Cipher::Aes128Gcm2022 | Cipher::Aes256Gcm2022)
-                && (source.users || users > 1 || value.password.is_some()))
+    value.cipher.aead(source.core) && (source.users || users > 1) || shared(source, users)
 }
 
 pub fn shared(source: &Inbound, users: usize) -> bool {
-    matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher.key_size().is_some() && multi(source, users))
+    matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher.identity_key(source.core)
+        && (source.users || users > 1 || value.password.is_some()))
+}
+
+pub fn authentication(
+    source: &Inbound,
+    users: &[(String, Credential)],
+    options: &mut Options,
+    output: &mut Map<String, Value>,
+) -> Result<()> {
+    if shared(source, users.len()) {
+        output.insert(
+            "password".to_owned(),
+            options
+                .take("password")
+                .ok_or("缺少 Shadowsocks 入口共享密钥")?,
+        );
+    } else if !multi(source, users.len()) {
+        output.remove("users");
+        match users {
+            [(_, credential)] => {
+                output.insert("password".to_owned(), json!(credential.password));
+            }
+            [] if matches!(&source.protocol, Protocol::Shadowsocks(v) if v.cipher == Cipher::None) =>
+                {}
+            _ => return unsupported("当前 Shadowsocks 算法的入站需要单个认证密钥"),
+        }
+    }
+    Ok(())
 }
 
 pub fn prepare(
@@ -69,9 +96,12 @@ pub fn prepare(
     for group in listener::related(
         listeners
             .iter()
-            .filter(|listener| shared(&listener.source, listener.users.len())),
+            .filter(|listener| matches!(&listener.source.protocol, Protocol::Shadowsocks(v) if v.cipher.identity_key(listener.source.core))),
         progress,
     )? {
+        if !group.listeners.iter().any(|listener| shared(&listener.source, listener.users.len())) {
+            continue;
+        }
         let sources: Vec<_> = group
             .listeners
             .iter()

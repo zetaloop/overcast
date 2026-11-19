@@ -6,6 +6,7 @@ use crate::{
     Result,
     connection::{Core, Network, Security},
     form::{choices, fields},
+    inbound::Core as ServerCore,
     transport::Transport,
 };
 
@@ -91,6 +92,10 @@ pub enum Cipher {
     Aes128Gcm2022,
     #[serde(rename = "2022-blake3-aes-256-gcm")]
     Aes256Gcm2022,
+    #[serde(rename = "2022-blake3-aes-128-ccm")]
+    Aes128Ccm2022,
+    #[serde(rename = "2022-blake3-aes-256-ccm")]
+    Aes256Ccm2022,
     #[serde(rename = "2022-blake3-chacha20-poly1305")]
     Chacha20Poly13052022,
     #[serde(rename = "aes-128-gcm")]
@@ -164,21 +169,46 @@ pub enum Cipher {
 impl Cipher {
     pub fn key_size(self) -> Option<usize> {
         match self {
-            Self::Aes128Gcm2022 => Some(16),
-            Self::Aes256Gcm2022 | Self::Chacha20Poly13052022 => Some(32),
+            Self::Aes128Gcm2022 | Self::Aes128Ccm2022 => Some(16),
+            Self::Aes256Gcm2022 | Self::Aes256Ccm2022 | Self::Chacha20Poly13052022 => Some(32),
             _ => None,
         }
     }
 
-    pub fn aead(self) -> bool {
-        matches!(
-            self,
+    pub fn identity_key(self, core: ServerCore) -> bool {
+        match self {
+            Self::Aes128Gcm2022 | Self::Aes256Gcm2022 => true,
+            Self::Aes128Ccm2022 | Self::Aes256Ccm2022 => core == ServerCore::Mihomo,
+            _ => false,
+        }
+    }
+
+    pub fn aead(self, core: ServerCore) -> bool {
+        match self {
             Self::Aes128Gcm
-                | Self::Aes192Gcm
-                | Self::Aes256Gcm
-                | Self::Chacha20Poly1305
-                | Self::Xchacha20Poly1305
-        )
+            | Self::Aes192Gcm
+            | Self::Aes256Gcm
+            | Self::Chacha20Poly1305
+            | Self::Xchacha20Poly1305 => true,
+            Self::Chacha8Poly1305
+            | Self::Xchacha8Poly1305
+            | Self::Rabbit128Poly1305
+            | Self::Aes128Ccm
+            | Self::Aes192Ccm
+            | Self::Aes256Ccm
+            | Self::Aes128GcmSiv
+            | Self::Aes256GcmSiv
+            | Self::Aegis128l
+            | Self::Aegis256
+            | Self::Aez384
+            | Self::DeoxysII256128
+            | Self::Lea128Gcm
+            | Self::Lea192Gcm
+            | Self::Lea256Gcm
+            | Self::Ascon128
+            | Self::Ascon128a => core == ServerCore::Mihomo,
+            _ => false,
+        }
     }
 
     pub fn credential(self, password: &str) -> String {
@@ -229,6 +259,12 @@ pub struct Keys {
 }
 
 impl Keys {
+    pub fn apply(&self, source: &mut Server, core: ServerCore) {
+        if source.cipher.identity_key(core) && source.cipher.key_size() == self.cipher.key_size() {
+            source.password = Some(self.password.clone());
+        }
+    }
+
     pub fn resolve(source: &Server, previous: Option<&Self>) -> Result<Self> {
         let size = source.cipher.key_size().ok_or("当前算法使用用户密码")?;
         let password = if let Some(password) = &source.password {
@@ -293,6 +329,8 @@ fields!(Plugin {
 choices!(Cipher {
     Aes128Gcm2022: "2022-blake3-aes-128-gcm" => "2022-blake3-aes-128-gcm",
     Aes256Gcm2022: "2022-blake3-aes-256-gcm" => "2022-blake3-aes-256-gcm",
+    Aes128Ccm2022: "2022-blake3-aes-128-ccm" => "2022-blake3-aes-128-ccm",
+    Aes256Ccm2022: "2022-blake3-aes-256-ccm" => "2022-blake3-aes-256-ccm",
     Chacha20Poly13052022: "2022-blake3-chacha20-poly1305" => "2022-blake3-chacha20-poly1305",
     Aes128Gcm: "aes-128-gcm" => "aes-128-gcm",
     Aes192Gcm: "aes-192-gcm" => "aes-192-gcm",

@@ -419,7 +419,7 @@ pub fn listeners(
             "users".to_owned(),
             if matches!(
                 source.protocol,
-                Protocol::Hysteria2(_) | Protocol::AnyTls(_)
+                Protocol::Hysteria2(_) | Protocol::AnyTls(_) | Protocol::Shadowsocks(_)
             ) {
                 json!(
                     users
@@ -456,11 +456,10 @@ pub fn listeners(
                             }
                             Protocol::Trojan(_) =>
                                 json!({"username": name, "password": credential.password}),
-                            Protocol::Shadowsocks(_) =>
-                                json!({"username": name, "password": credential.password}),
-                            Protocol::Hysteria2(_) => unreachable!(),
-                            Protocol::AnyTls(_) => unreachable!(),
-                            Protocol::Forward(_) => unreachable!(),
+                            Protocol::Hysteria2(_)
+                            | Protocol::AnyTls(_)
+                            | Protocol::Shadowsocks(_)
+                            | Protocol::Forward(_) => unreachable!(),
                         })
                         .collect::<Vec<_>>()
                 )
@@ -586,9 +585,6 @@ pub fn listeners(
         if !value.tcp {
             return unsupported("Mihomo Shadowsocks 入站启用 TCP 监听");
         }
-        if value.cipher != crate::shadowsocks::Cipher::None && users.len() != 1 {
-            return unsupported("Mihomo Shadowsocks 入站使用单个认证密钥");
-        }
         let mut options = Options::new(value)?;
         for name in ["cipher", "tcp", "udp", "multiplex"] {
             options.take(name);
@@ -599,10 +595,7 @@ pub fn listeners(
             super::shadowsocks::cipher(value.cipher, inbound::Core::Mihomo, true)?,
         );
         output.insert("udp".to_owned(), json!(value.udp));
-        output.remove("users");
-        if let Some((_, credential)) = users.first() {
-            output.insert("password".to_owned(), json!(credential.password));
-        }
+        super::shadowsocks::authentication(source, users, &mut options, &mut output)?;
         if let Some(multiplex) = &value.multiplex {
             output.insert(
                 "mux-option".to_owned(),
