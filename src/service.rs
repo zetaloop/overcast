@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod macos;
+mod startup;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod systemd;
 #[cfg(windows)]
@@ -18,7 +19,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{ErrorKind, Write},
     path::PathBuf,
-    process::{Command, ExitStatus, Stdio},
+    process::Command,
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread,
     time::{Duration, Instant},
@@ -72,7 +73,7 @@ struct Status {
 enum Event {
     Reload,
     Stop,
-    Exited(String, u64, std::io::Result<ExitStatus>),
+    Exited(String, u64),
     Maintained(Result<()>),
 }
 
@@ -253,6 +254,7 @@ impl Unit {
             }
             Component::SingBox => vec![
                 if check { "check" } else { "run" }.into(),
+                "--disable-color".into(),
                 "-c".into(),
                 self.config.as_os_str().to_owned(),
                 "-D".into(),
@@ -477,6 +479,7 @@ pub fn run(store: Store) -> Result<()> {
                 if notify.send(Event::Reload).is_err() {
                     return;
                 }
+                cancel.notify();
             }
         });
         finish(&store, orchestrate(&store, sender, events, &progress))
@@ -492,7 +495,8 @@ struct Process {
     pid: u32,
     generation: u64,
     started: Instant,
-    done: Receiver<()>,
+    done: Receiver<String>,
+    exit: Option<String>,
 }
 
 struct Orchestrator<'a> {
@@ -558,13 +562,13 @@ fn orchestrate(
         match event {
             Ok(Event::Reload) => pending = true,
             Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => break,
-            Ok(Event::Exited(name, generation, status)) => {
+            Ok(Event::Exited(name, generation)) => {
                 if orchestrator
                     .running
                     .get(&name)
                     .is_some_and(|process| process.generation == generation)
                 {
-                    let process = orchestrator.running.remove(&name).unwrap();
+                    let mut process = orchestrator.running.remove(&name).unwrap();
                     let delay = if process.started.elapsed() > BACKOFF {
                         RESTART
                     } else {
@@ -572,10 +576,13 @@ fn orchestrate(
                             .get(&name)
                             .map_or(RESTART, |delay| (*delay * 2).min(BACKOFF))
                     };
-                    match status {
-                        Ok(status) => log(store, &format!("{name} 退出：{status}")),
-                        Err(error) => log(store, &format!("{name} 退出：{error}")),
-                    }
+                    log(
+                        store,
+                        &format!(
+                            "{name} 退出：{}",
+                            process.status().expect("missing exit status")
+                        ),
+                    );
                     delays.insert(name.clone(), delay);
                     retries.insert(name, Instant::now() + delay);
                 }
@@ -645,8 +652,8 @@ impl Orchestrator<'_> {
             .iter()
             .filter(|unit| {
                 self.running
-                    .get(&unit.name)
-                    .is_none_or(|process| process.unit != **unit)
+                    .get_mut(&unit.name)
+                    .is_none_or(|process| process.unit != **unit || process.status().is_some())
             })
             .map(|unit| unit.name.clone())
             .collect();
@@ -661,6 +668,7 @@ impl Orchestrator<'_> {
             match caddy
                 .as_ref()
                 .and_then(|name| self.running.get_mut(name))
+                .and_then(|process| process.status().is_none().then_some(process))
                 .filter(|process| process.unit.program == unit.program)
             {
                 Some(process) => {
@@ -689,7 +697,9 @@ impl Orchestrator<'_> {
                 )),
                 None,
             )?;
+            let process = self.running.get_mut(&unit.name).unwrap();
             certificate::wait(self.store, &certificates, self.progress, || {
+                process.check()?;
                 Ok(Deployment::load(self.store)?.id == target.id)
             })?;
         } else if target.caddy().is_none()
@@ -741,55 +751,94 @@ impl Orchestrator<'_> {
             )?;
             self.start(unit)?;
         }
+        for process in self.running.values_mut() {
+            process.check()?;
+        }
         Ok(())
     }
 
     fn start(&mut self, unit: &Unit) -> Result<()> {
         let logs = self.store.directory.join("logs");
         self.store.create_dir(&logs)?;
-        let output = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(logs.join(format!("{}.log", unit.name)))?;
         let mut command = unit.command(false);
-        command
-            .stdin(Stdio::null())
-            .stdout(output.try_clone()?)
-            .stderr(output);
+        let startup = startup::Startup::prepare(
+            unit,
+            &mut command,
+            logs.join(format!("{}.log", unit.name)),
+            self.progress,
+        )?;
         isolate(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| format!("启动 {} 失败：{error}", unit.component.name()))?;
+        drop(command);
         self.generation += 1;
         let (finished, done) = mpsc::sync_channel(1);
         let (sender, name, generation) = (self.sender.clone(), unit.name.clone(), self.generation);
+        let notify = self.progress.clone();
         let pid = child.id();
         thread::spawn(move || {
             let status = child.wait();
-            let _ = finished.send(());
-            let _ = sender.send(Event::Exited(name, generation, status));
+            let _ = finished.send(
+                status
+                    .as_ref()
+                    .map_or_else(ToString::to_string, ToString::to_string),
+            );
+            notify.notify();
+            let _ = sender.send(Event::Exited(name, generation));
         });
-        self.running.insert(
-            unit.name.clone(),
-            Process {
-                unit: unit.clone(),
-                pid,
-                generation,
-                started: Instant::now(),
-                done,
-            },
-        );
+        let mut process = Process {
+            unit: unit.clone(),
+            pid,
+            generation,
+            started: Instant::now(),
+            done,
+            exit: None,
+        };
+        if let Err(error) = self.progress.until(|| {
+            let desired = Deployment::load(self.store)?;
+            if !desired.config.running || !desired.units.contains(unit) {
+                return Err(std::io::Error::new(ErrorKind::Interrupted, "部署已被替换").into());
+            }
+            startup.ready(process.status())
+        }) {
+            process.stop();
+            return Err(format!("启动 {} 失败：{error}", unit.name).into());
+        }
+        self.running.insert(unit.name.clone(), process);
         Ok(())
     }
 
     fn stop(&mut self, name: &str) {
-        let Some(process) = self.running.remove(name) else {
-            return;
-        };
-        terminate(process.pid);
-        if process.done.recv_timeout(Duration::from_secs(10)).is_err() {
-            kill(process.pid);
-            let _ = process.done.recv();
+        if let Some(process) = self.running.remove(name) {
+            process.stop();
+        }
+    }
+}
+
+impl Process {
+    fn status(&mut self) -> Option<&str> {
+        if self.exit.is_none() {
+            self.exit = self.done.try_recv().ok();
+        }
+        self.exit.as_deref()
+    }
+
+    fn check(&mut self) -> Result<()> {
+        if let Some(status) = self.status().map(str::to_owned) {
+            return Err(format!("{} 已退出：{status}", self.unit.name).into());
+        }
+        Ok(())
+    }
+
+    fn stop(mut self) {
+        if self.status().is_none() {
+            terminate(self.pid);
+            if let Err(RecvTimeoutError::Timeout) = self.done.recv_timeout(Duration::from_secs(10))
+            {
+                kill(self.pid);
+                let _ = self.done.recv();
+            }
         }
     }
 }

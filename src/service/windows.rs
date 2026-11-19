@@ -249,6 +249,7 @@ fn service(_: Vec<OsString>) {
         }
         ServiceControl::UserEvent(code) if code == RELOAD => {
             let _ = notify.send(Event::Reload);
+            cancel.notify();
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,

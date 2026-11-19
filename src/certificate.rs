@@ -87,7 +87,7 @@ pub fn wait(
     store: &Store,
     names: &BTreeSet<String>,
     progress: &Progress,
-    current: impl Fn() -> Result<bool>,
+    mut current: impl FnMut() -> Result<bool>,
 ) -> Result<()> {
     if names.is_empty() {
         return Ok(());
