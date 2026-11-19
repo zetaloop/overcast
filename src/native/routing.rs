@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Write,
-    io::Write as _,
+    fs,
+    io::{self, Write as _},
     path::Path,
 };
 
@@ -12,8 +13,9 @@ use crate::{
     Result,
     condition::Condition,
     config::Store,
-    geodata::{Cidr, DomainType, Geoip, Geoips, Site, Sites},
+    geodata::{Catalog, Cidr, DomainType, Geoip, Geoips, Site, Sites},
     graph::Network,
+    inbound::Core,
     target::Targets,
 };
 
@@ -31,23 +33,23 @@ pub struct Rule {
 pub struct Matchers<'a> {
     targets: &'a Targets,
     names: HashMap<Condition, String>,
-    pub used: BTreeSet<String>,
+    used: BTreeSet<String>,
 }
 
 impl<'a> Matchers<'a> {
-    pub fn new(targets: &'a Targets) -> Self {
+    pub fn new(targets: &'a Targets, catalog: &Catalog) -> Self {
+        let domains = (0..)
+            .map(|i| format!("d{i}"))
+            .filter(|name| !catalog.sites.contains(name));
+        let ips = (0..)
+            .map(|i| format!("i{i}"))
+            .filter(|name| !catalog.ips.contains(name));
         let names = targets
             .domains
             .iter()
-            .enumerate()
-            .map(|(index, (condition, _))| (condition.clone(), format!("d{index}")))
-            .chain(
-                targets
-                    .ips
-                    .iter()
-                    .enumerate()
-                    .map(|(index, (condition, _))| (condition.clone(), format!("i{index}"))),
-            )
+            .map(|(c, _)| c.clone())
+            .zip(domains)
+            .chain(targets.ips.iter().map(|(c, _)| c.clone()).zip(ips))
             .collect();
         Self {
             targets,
@@ -85,16 +87,21 @@ impl<'a> Matchers<'a> {
         name
     }
 
-    pub fn write(&self, store: &Store, directory: &Path) -> Result<()> {
+    pub fn write(
+        &self,
+        store: &Store,
+        directory: &Path,
+        data: &Path,
+        core: Core,
+    ) -> Result<Vec<String>> {
         let sites = Sites {
             entries: self
                 .targets
                 .domains
                 .iter()
-                .enumerate()
-                .filter(|(index, _)| self.used.contains(&format!("d{index}")))
-                .map(|(index, (_, entries))| Site {
-                    name: format!("D{index}"),
+                .filter(|(c, _)| self.used.contains(&self.names[c]))
+                .map(|(c, entries)| Site {
+                    name: self.names[c].to_ascii_uppercase(),
                     domains: entries.clone(),
                 })
                 .collect(),
@@ -104,10 +111,9 @@ impl<'a> Matchers<'a> {
                 .targets
                 .ips
                 .iter()
-                .enumerate()
-                .filter(|(index, _)| self.used.contains(&format!("i{index}")))
-                .map(|(index, (_, networks))| Geoip {
-                    name: format!("I{index}"),
+                .filter(|(c, _)| self.used.contains(&self.names[c]))
+                .map(|(c, networks)| Geoip {
+                    name: self.names[c].to_ascii_uppercase(),
                     networks: networks
                         .iter()
                         .map(|network| Cidr {
@@ -122,23 +128,37 @@ impl<'a> Matchers<'a> {
                 })
                 .collect(),
         };
-        for (name, bytes) in [
+        let mut assets = Vec::new();
+        for (name, additions) in [
             ("geosite.dat", sites.encode_to_vec()),
             ("geoip.dat", ips.encode_to_vec()),
         ] {
-            store.write(&directory.join(name), |file| {
-                file.write_all(&bytes)?;
-                Ok(())
-            })?;
+            let source = data.join(name);
+            let dest = directory.join(name);
+            if additions.is_empty() {
+                fs::hard_link(source, dest)?;
+            } else {
+                // Both DAT formats are protobuf lists; concatenation appends records.
+                store.write(&dest, |file| {
+                    io::copy(&mut fs::File::open(source)?, file)?;
+                    file.write_all(&additions)?;
+                    Ok(())
+                })?;
+            }
+            assets.push(name.to_owned());
         }
-        Ok(())
+        if core == Core::Mihomo {
+            fs::hard_link(data.join("GeoLite2-ASN.mmdb"), directory.join("ASN.mmdb"))?;
+            assets.push("ASN.mmdb".to_owned());
+        }
+        Ok(assets)
     }
 
     pub fn rule_sets(&self) -> Result<Vec<Value>> {
         let mut result = Vec::new();
-        for (index, (_, entries)) in self.targets.domains.iter().enumerate() {
-            let name = format!("d{index}");
-            if !self.used.contains(&name) {
+        for (condition, entries) in &self.targets.domains {
+            let name = &self.names[condition];
+            if !self.used.contains(name) {
                 continue;
             }
             let mut fields: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -159,9 +179,9 @@ impl<'a> Matchers<'a> {
                 .collect();
             result.push(json!({"tag": name, "rules": rules}));
         }
-        for (index, (_, networks)) in self.targets.ips.iter().enumerate() {
-            let name = format!("i{index}");
-            if self.used.contains(&name) {
+        for (condition, networks) in &self.targets.ips {
+            let name = &self.names[condition];
+            if self.used.contains(name) {
                 result.push(json!({
                     "tag": name,
                     "rules": [{"ip_cidr": networks.iter().map(ToString::to_string).collect::<Vec<_>>()}],
@@ -307,7 +327,21 @@ impl<'a> Matchers<'a> {
     }
 
     fn mihomo_condition(&mut self, condition: &Condition) -> String {
+        let tag = |name: &str| {
+            !name.starts_with('!') && name.trim() == name && !name.contains([',', '(', ')'])
+        };
         match condition {
+            Condition::Ip(network) => format!("IP-CIDR,{network}"),
+            Condition::Asn(n) if *n != 0 => format!("IP-ASN,{n}"),
+            Condition::Site(name) if tag(name) => format!("GEOSITE,{name}"),
+            Condition::Geoip(name) if tag(name) && !name.eq_ignore_ascii_case("lan") => {
+                let reverse = if self.targets.reversed.contains(name) {
+                    "!"
+                } else {
+                    ""
+                };
+                format!("GEOIP,{reverse}{name}")
+            }
             Condition::And(children) | Condition::Or(children) => {
                 let operator = if matches!(condition, Condition::And(_)) {
                     "AND"
@@ -337,7 +371,7 @@ impl<'a> Matchers<'a> {
 
     pub fn xray(&mut self, rules: &[Rule]) -> String {
         let mut body = String::new();
-        let mut names = BTreeSet::new();
+        let mut names = BTreeMap::new();
         for rule in rules {
             let condition = self.reduce(&rule.condition);
             if condition == Condition::Never {
@@ -374,17 +408,17 @@ impl<'a> Matchers<'a> {
         let mut script = String::from(
             "local geodata = require(\"xray.geodata\")\nlocal dns = require(\"xray.dns\")\nlocal log = require(\"xray.log\")\nlocal router = require(\"xray.router\")\nlocal matchers = {}\n",
         );
-        for name in names {
-            let (method, category) = if name.starts_with('d') {
-                ("BuildDomainMatcher", "geosite")
+        for (name, rule) in names {
+            let method = if name.starts_with('d') {
+                "BuildDomainMatcher"
             } else {
-                ("BuildIPMatcher", "geoip")
+                "BuildIPMatcher"
             };
             writeln!(
                 script,
                 "matchers[{}] = geodata.{method}({})",
                 lua(&name),
-                lua(&format!("{category}:{name}"))
+                lua(&rule)
             )
             .unwrap();
         }
@@ -396,7 +430,11 @@ impl<'a> Matchers<'a> {
         script
     }
 
-    fn xray_condition(&mut self, condition: &Condition, names: &mut BTreeSet<String>) -> String {
+    fn xray_condition(
+        &mut self,
+        condition: &Condition,
+        names: &mut BTreeMap<String, String>,
+    ) -> String {
         match condition {
             Condition::And(children) | Condition::Or(children) => {
                 let operator = if matches!(condition, Condition::And(_)) {
@@ -411,8 +449,28 @@ impl<'a> Matchers<'a> {
                 format!("({})", values.join(operator))
             }
             _ => {
-                let name = self.name(condition);
-                names.insert(name.to_owned());
+                let name = &self.names[condition];
+                names
+                    .entry(name.clone())
+                    .or_insert_with(|| match condition {
+                        Condition::Domain(value) => format!("full:{value}"),
+                        Condition::Suffix(value) => format!("domain:{value}"),
+                        Condition::Keyword(value) => format!("keyword:{value}"),
+                        Condition::Regex(value) => format!("regexp:{value}"),
+                        Condition::Site(value) => format!("geosite:{value}"),
+                        Condition::Ip(value) => value.to_string(),
+                        Condition::Geoip(value)
+                            if !value.starts_with('!')
+                                && !self.targets.reversed.contains(value) =>
+                        {
+                            format!("geoip:{value}")
+                        }
+                        Condition::Geoip(_) | Condition::Asn(_) => {
+                            self.used.insert(name.clone());
+                            format!("geoip:{name}")
+                        }
+                        _ => unreachable!("expected a target condition"),
+                    });
                 if name.starts_with('d') {
                     format!(
                         "(domain ~= \"\" and matchers[{}]:MatchAny(domain))",

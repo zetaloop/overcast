@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::LazyLock,
@@ -27,6 +27,7 @@ use crate::{
 pub struct Targets {
     pub domains: Vec<(Condition, Vec<Domain>)>,
     pub ips: Vec<(Condition, Vec<IpNetwork>)>,
+    pub reversed: BTreeSet<String>,
 }
 
 impl Targets {
@@ -87,8 +88,7 @@ impl Targets {
         let needs_ips = conditions.iter().any(|c| matches!(c, Condition::Geoip(_)));
         let needs_asns = conditions.iter().any(|c| matches!(c, Condition::Asn(_)));
         let directory = if needs_sites || needs_ips || needs_asns {
-            let catalog = Catalog::ensure(store, geodata, progress)?;
-            Some(catalog.directory(store))
+            Some(Catalog::files(store, geodata, progress)?)
         } else {
             None
         };
@@ -130,6 +130,7 @@ impl Targets {
                 }
             }
         }
+        let mut reversed = BTreeSet::new();
         for condition in conditions {
             progress.check()?;
             match &condition {
@@ -157,6 +158,7 @@ impl Targets {
                         })
                         .collect::<Result<Vec<_>>>()?;
                     if data.reverse {
+                        reversed.insert(name.clone());
                         prefixes = complement(&prefixes)?;
                     }
                     ips.push((condition.clone(), prefixes));
@@ -214,7 +216,11 @@ impl Targets {
             domains.len(),
             ips.len()
         ));
-        Ok(Self { domains, ips })
+        Ok(Self {
+            domains,
+            ips,
+            reversed,
+        })
     }
 
     pub fn domain_classes(&self, progress: &Progress) -> Result<BTreeMap<Vec<bool>, String>> {

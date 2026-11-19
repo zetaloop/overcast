@@ -196,6 +196,8 @@ pub fn prepare(
     if listeners.is_empty() {
         return Ok((None, coverage));
     }
+    let catalog = crate::geodata::Catalog::ensure(store, geodata, progress)?;
+    let data = crate::geodata::Catalog::directory(store, catalog.release);
     builder.reserved = listeners
         .iter()
         .map(|listener| listener.binding.clone())
@@ -672,7 +674,7 @@ pub fn prepare(
     };
     for (index, service) in builder.services.into_iter().enumerate() {
         progress.check()?;
-        let mut matchers = routing::Matchers::new(&graph.targets);
+        let mut matchers = routing::Matchers::new(&graph.targets, &catalog);
         let name = format!("{}-{index}", key(service.core));
         let working = directory.path().join(&name);
         store.create_dir(&working)?;
@@ -753,8 +755,7 @@ pub fn prepare(
             }
         }
         if service.core != Core::SingBox {
-            matchers.write(store, &working)?;
-            assets.extend(["geoip.dat".to_owned(), "geosite.dat".to_owned()]);
+            assets.extend(matchers.write(store, &working, &data, service.core)?);
         }
         store.write(&directory.path().join(&file), |file| {
             serde_json::to_writer_pretty(file, &output)?;

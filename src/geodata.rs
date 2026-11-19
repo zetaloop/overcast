@@ -26,6 +26,18 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn files(store: &Store, release: &mut Option<u64>, progress: &Progress) -> Result<PathBuf> {
+        let id = match *release {
+            Some(id) => id,
+            None => Self::ensure(store, release, progress)?.release,
+        };
+        Ok(Self::directory(store, id))
+    }
+
+    pub fn directory(store: &Store, release: u64) -> PathBuf {
+        store.directory.join("geodata").join(release.to_string())
+    }
+
     pub fn ensure(store: &Store, release: &mut Option<u64>, progress: &Progress) -> Result<Self> {
         if let Some(release) = *release {
             return Self::load(store, release);
@@ -35,19 +47,8 @@ impl Catalog {
         Ok(catalog)
     }
 
-    pub fn directory(&self, store: &Store) -> PathBuf {
-        store
-            .directory
-            .join("geodata")
-            .join(self.release.to_string())
-    }
-
     pub fn load(store: &Store, release: u64) -> Result<Self> {
-        let path = store
-            .directory
-            .join("geodata")
-            .join(release.to_string())
-            .join("index.json");
+        let path = Self::directory(store, release).join("index.json");
         Ok(serde_json::from_reader(BufReader::new(File::open(path)?))?)
     }
 
@@ -66,8 +67,7 @@ impl Catalog {
                 .as_deref()
                 .ok_or("规则数据版本尚未发布")?,
         );
-        let root = store.directory.join("geodata");
-        let directory = root.join(release.id.to_string());
+        let directory = Self::directory(store, release.id);
         store.create_dir(&directory)?;
         let asset = |name| {
             release
