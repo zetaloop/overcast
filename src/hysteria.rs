@@ -166,6 +166,29 @@ fn mode<T: Form, K: Value + Copy + PartialEq>(
 }
 
 impl Obfs {
+    pub fn validate(&self) -> Result<()> {
+        if self.password.len() < 4 {
+            return Err("HY2 混淆密码至少需要 4 个 UTF-8 字节".into());
+        }
+        if self.kind == ObfsKind::Gecko {
+            let (min, max) = self.packet_sizes();
+            if min > max || max > 2048 {
+                return Err(format!(
+                    "Gecko 数据包范围 {min}–{max} 无效：需要 1 ≤ 最小值 ≤ 最大值 ≤ 2048 字节"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn packet_sizes(&self) -> (u16, u16) {
+        (
+            self.min_packet_size.filter(|&v| v != 0).unwrap_or(512),
+            self.max_packet_size.filter(|&v| v != 0).unwrap_or(1200),
+        )
+    }
+
     fn field(slot: &mut Option<Self>) -> Box<dyn form::Field + '_> {
         let text = slot
             .as_ref()

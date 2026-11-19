@@ -223,28 +223,15 @@ fn parameters(
         output
     };
     if let Some(source) = obfs {
-        if source.password.len() < 4 {
-            return Err("HY2 混淆密码至少需要 4 个 UTF-8 字节".into());
-        }
         let mut options = Options::new(source)?;
         options.take("kind");
         options.take("password");
         let mut value = Map::from_iter([("password".to_owned(), json!(source.password))]);
         if source.kind == ObfsKind::Gecko {
-            let min = source
-                .min_packet_size
-                .filter(|value| *value != 0)
-                .unwrap_or(512);
-            let max = source
-                .max_packet_size
-                .filter(|value| *value != 0)
-                .unwrap_or(1200);
-            if max < min {
-                return Err("Gecko 数据包大小需要使用有效的递增范围".into());
-            }
             if core == Core::Xray {
                 options.take("min_packet_size");
                 options.take("max_packet_size");
+                let (min, max) = source.packet_sizes();
                 value.insert("packetSize".to_owned(), json!(format!("{min}-{max}")));
             } else {
                 options.copy(&mut value, &["min_packet_size", "max_packet_size"]);

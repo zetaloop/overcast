@@ -376,6 +376,9 @@ impl Connection {
             Self::Forward(value) => (value.server.as_str(), value.port),
             Self::Hysteria2(value) => {
                 crate::hysteria::password(&value.password)?;
+                if let Some(obfs) = &value.hysteria.obfs {
+                    obfs.validate()?;
+                }
                 (value.server.as_str(), value.port()?)
             }
             Self::AnyTls(value) => {

@@ -99,6 +99,11 @@ impl Inbound {
         if let Some(credentials) = &self.credentials {
             user::password(&credentials.password)?;
         }
+        if let Protocol::Hysteria2(server) = &self.protocol
+            && let Some(obfs) = &server.obfs
+        {
+            obfs.validate()?;
+        }
         Ok(())
     }
 
