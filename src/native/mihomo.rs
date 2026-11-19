@@ -35,36 +35,7 @@ pub fn outbound(
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     let mut options = Options::new(network)?;
-    options.rename(
-        &mut output,
-        &[
-            ("interface", "interface-name"),
-            ("routing_mark", "routing-mark"),
-            ("tcp_multi_path", "mptcp"),
-        ],
-    );
-    if let Some(FastOpen::Enabled(value)) = &network.tcp_fast_open {
-        options.take("tcp_fast_open");
-        output.insert("tfo".to_owned(), json!(value));
-    }
-    if let Some(strategy) = network.address_strategy {
-        let value = match strategy {
-            AddressStrategy::AsIs => "dual",
-            AddressStrategy::Ipv4Only => "ipv4",
-            AddressStrategy::Ipv6Only => "ipv6",
-            AddressStrategy::PreferIpv4 => "ipv4-prefer",
-            AddressStrategy::PreferIpv6 => "ipv6-prefer",
-            _ => {
-                return unsupported(format!(
-                    "Mihomo 无法表达地址策略：{}",
-                    serde_json::to_value(strategy)?
-                ));
-            }
-        };
-        options.take("address_strategy");
-        output.insert("ip-version".to_owned(), json!(value));
-    }
-    keep_alive(&mut options, globals)?;
+    dial_options(network, &mut options, &mut output, globals)?;
     options.finish("Mihomo 连接")?;
     if let Some(proxy) = proxy {
         output.insert("server".to_owned(), json!(proxy.server));
@@ -602,6 +573,47 @@ pub fn listeners(
     }
     server_tls(source, store, &mut output)?;
     Ok(vec![output])
+}
+
+pub(super) fn dial_options(
+    network: &connection::Network,
+    options: &mut Options,
+    output: &mut Map<String, Value>,
+    globals: &mut Map<String, Value>,
+) -> Result<()> {
+    options.rename(
+        output,
+        &[
+            ("interface", "interface-name"),
+            ("routing_mark", "routing-mark"),
+            ("tcp_multi_path", "mptcp"),
+        ],
+    );
+    if let Some(value) = options.take("tcp_fast_open") {
+        if !value.is_boolean() {
+            return unsupported("Mihomo 的 TCP 快速打开使用开关");
+        }
+        output.insert("tfo".to_owned(), value);
+    }
+    if options.take("address_strategy").is_some()
+        && let Some(strategy) = network.address_strategy
+    {
+        let value = match strategy {
+            AddressStrategy::AsIs => "dual",
+            AddressStrategy::Ipv4Only => "ipv4",
+            AddressStrategy::Ipv6Only => "ipv6",
+            AddressStrategy::PreferIpv4 => "ipv4-prefer",
+            AddressStrategy::PreferIpv6 => "ipv6-prefer",
+            _ => {
+                return unsupported(format!(
+                    "Mihomo 无法表达地址策略：{}",
+                    serde_json::to_value(strategy)?
+                ));
+            }
+        };
+        output.insert("ip-version".to_owned(), json!(value));
+    }
+    keep_alive(options, globals)
 }
 
 fn keep_alive(options: &mut Options, globals: &mut Map<String, Value>) -> Result<()> {

@@ -39,13 +39,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
     let mut settings = Map::new();
     let mut stream = Map::new();
     let mut options = Options::new(network)?;
-    if network.source_ipv4.is_some() && network.source_ipv6.is_some() {
-        return unsupported("Xray 每个出站的 sendThrough 使用一个源地址");
-    }
-    if let Some(value) = options
-        .take("source_ipv4")
-        .or_else(|| options.take("source_ipv6"))
-    {
+    if let Some(value) = source_address(&mut options)? {
         output.insert("sendThrough".to_owned(), value);
     }
     let sockopt = dialer(network, &mut options)?;
@@ -755,10 +749,20 @@ pub fn listeners(
     Ok(vec![output])
 }
 
+pub(super) fn source_address(options: &mut Options) -> Result<Option<Value>> {
+    let v4 = options.take("source_ipv4");
+    let v6 = options.take("source_ipv6");
+    if v4.is_some() && v6.is_some() {
+        return unsupported("Xray 每个出站的 sendThrough 使用一个源地址");
+    }
+    Ok(v4.or(v6))
+}
+
 pub fn dialer(source: &connection::Network, options: &mut Options) -> Result<Map<String, Value>> {
     let mut output = socket(options)?;
-    if let Some(strategy) = source.address_strategy {
-        options.take("address_strategy");
+    if options.take("address_strategy").is_some()
+        && let Some(strategy) = source.address_strategy
+    {
         let value = match strategy {
             AddressStrategy::AsIs => "AsIs",
             AddressStrategy::Resolve => "ForceIP",

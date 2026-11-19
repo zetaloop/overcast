@@ -94,6 +94,22 @@ impl Connection {
         }
     }
 
+    pub(crate) fn network_mut(&mut self) -> &mut Network {
+        match self {
+            Self::Direct(v) => &mut v.network,
+            Self::Http(v) => &mut v.network,
+            Self::Socks(v) => &mut v.network,
+            Self::Vless(v) => &mut v.network,
+            Self::Vmess(v) => &mut v.network,
+            Self::Trojan(v) => &mut v.network,
+            Self::Shadowsocks(v) => &mut v.network,
+            Self::Hysteria2(v) => &mut v.network,
+            Self::AnyTls(v) => &mut v.network,
+            Self::Warp(v) => &mut v.network,
+            Self::Forward(v) => &mut v.network,
+        }
+    }
+
     pub fn set_server(&mut self, server: &str) {
         if let Self::Warp(value) = self {
             value.server = Some(server.to_owned());
@@ -717,6 +733,13 @@ impl Default for FastOpen {
 }
 
 impl Value for FastOpen {
+    fn alternatives() -> Vec<(&'static str, &'static str, Self)> {
+        vec![
+            ("on", "开启", Self::Enabled(true)),
+            ("off", "关闭", Self::Enabled(false)),
+        ]
+    }
+
     fn text(&self) -> String {
         match self {
             Self::Enabled(value) => value.text(),

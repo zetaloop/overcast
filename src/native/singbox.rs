@@ -710,6 +710,15 @@ fn http(options: &mut Options, output: &mut Map<String, Value>) -> Result<()> {
 
 pub fn dialer(source: &connection::Network, output: &mut Map<String, Value>) -> Result<()> {
     let mut options = Options::new(source)?;
+    dial_options(source, &mut options, output)?;
+    options.finish("sing-box 连接")
+}
+
+pub(super) fn dial_options(
+    source: &connection::Network,
+    options: &mut Options,
+    output: &mut Map<String, Value>,
+) -> Result<()> {
     options.rename(
         output,
         &[
@@ -744,16 +753,15 @@ pub fn dialer(source: &connection::Network, output: &mut Map<String, Value>) -> 
         ],
         None,
     )?;
-    if let Some(value) = &source.tcp_fast_open {
-        match value {
-            FastOpen::Enabled(value) => {
-                output.insert("tcp_fast_open".to_owned(), json!(value));
-                options.take("tcp_fast_open");
-            }
-            FastOpen::Queue(_) => {}
+    if let Some(value) = options.take("tcp_fast_open") {
+        if !value.is_boolean() {
+            return unsupported("sing-box 的 TCP 快速打开使用开关");
         }
+        output.insert("tcp_fast_open".to_owned(), value);
     }
-    if let Some(strategy) = source.address_strategy {
+    if options.take("address_strategy").is_some()
+        && let Some(strategy) = source.address_strategy
+    {
         let value = match strategy {
             AddressStrategy::AsIs => "",
             AddressStrategy::Ipv4Only => "ipv4_only",
@@ -767,7 +775,6 @@ pub fn dialer(source: &connection::Network, output: &mut Map<String, Value>) -> 
                 ));
             }
         };
-        options.take("address_strategy");
         output.insert(
             "domain_resolver".to_owned(),
             json!({
@@ -776,7 +783,7 @@ pub fn dialer(source: &connection::Network, output: &mut Map<String, Value>) -> 
             }),
         );
     }
-    options.finish("sing-box 连接")
+    Ok(())
 }
 
 fn fallbacks(

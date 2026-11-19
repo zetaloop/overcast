@@ -23,6 +23,10 @@ pub trait Value: Clone + Default {
         Vec::new()
     }
 
+    fn alternatives() -> Vec<(&'static str, &'static str, Self)> {
+        Self::choices()
+    }
+
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool>;
 
     fn create(screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<Option<Self>> {
@@ -50,6 +54,7 @@ pub trait Field {
     fn item(&self) -> Item;
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool>;
     fn reset(&mut self);
+    fn restrict(&mut self, allowed: &dyn Fn(&str) -> bool);
 }
 
 pub type Fields<'a> = Vec<Box<dyn Field + 'a>>;
@@ -74,6 +79,7 @@ struct Binding<'a, T, E> {
     value: &'a mut T,
     default: T,
     preview: Option<String>,
+    choices: Option<Vec<(&'static str, &'static str, T)>>,
     edit: E,
 }
 
@@ -100,6 +106,7 @@ pub fn control<'a, T: Value>(
         value,
         default,
         preview,
+        choices: None,
         edit,
     })
 }
@@ -118,11 +125,38 @@ impl<T: Value, E: FnMut(&mut T, &mut Screen, &Menu<'_>, usize) -> Result<bool>> 
     }
 
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
+        if let Some(choices) = &self.choices {
+            let current = choices
+                .iter()
+                .position(|(_, _, v)| v.text() == self.value.text())
+                .unwrap_or_default();
+            return choose(
+                self.value,
+                screen,
+                &format!("{} / {}", menu.title, self.label),
+                choices,
+                current,
+            );
+        }
         (self.edit)(self.value, screen, menu, selected)
     }
 
     fn reset(&mut self) {
         *self.value = self.default.clone();
+    }
+
+    fn restrict(&mut self, allowed: &dyn Fn(&str) -> bool) {
+        let mut choices = T::alternatives();
+        choices.retain(|(key, _, _)| allowed(key));
+        if let Some((_, _, first)) = choices.first() {
+            if !choices
+                .iter()
+                .any(|(_, _, v)| v.text() == self.value.text())
+            {
+                self.preview = Some(first.text());
+            }
+            self.choices = Some(choices);
+        }
     }
 }
 
@@ -171,7 +205,20 @@ pub fn subset<T: Form>(
     value: &mut T,
     allowed: impl Fn(&str) -> bool,
 ) -> Result<bool> {
-    edit_group(screen, title, value, None, None, None, &allowed)
+    scoped(screen, title, value, |v| {
+        let mut fields = v.fields(T::default());
+        fields.retain(|field| allowed(field.key()));
+        fields
+    })
+}
+
+pub fn scoped<T: Form>(
+    screen: &mut Screen,
+    title: &str,
+    value: &mut T,
+    fields: impl Fn(&mut T) -> Fields<'_>,
+) -> Result<bool> {
+    edit_group(screen, title, value, None, None, None, &fields)
 }
 
 pub fn retain<T: Form>(value: &mut T, allowed: impl Fn(&str) -> bool) {
@@ -198,7 +245,7 @@ pub fn page<T: Form + PartialEq>(
         None,
         Some((&|draft| draft != value, &save)),
         None,
-        &|_| true,
+        &|v| v.fields(T::default()),
     )
     .map(|_| ())
 }
@@ -219,7 +266,7 @@ pub fn optional<T: Form>(
         None,
         None,
         Some(&mut enabled),
-        &|_| true,
+        &|v| v.fields(T::default()),
     )?;
     if changed {
         *slot = enabled.then_some(value);
@@ -234,7 +281,7 @@ fn edit_group<T: Form>(
     group: Option<&Group>,
     submit: Option<Confirm<'_, T>>,
     mut enabled: Option<&mut bool>,
-    allowed: &dyn Fn(&str) -> bool,
+    bindings: &dyn Fn(&mut T) -> Fields<'_>,
 ) -> Result<bool> {
     let mut selected = 0;
     let mut notice = String::new();
@@ -247,12 +294,7 @@ fn edit_group<T: Form>(
         } else {
             Vec::new()
         };
-        let mut fields = if active {
-            value.fields(T::default())
-        } else {
-            Vec::new()
-        };
-        fields.retain(|field| allowed(field.key()));
+        let mut fields = if active { bindings(value) } else { Vec::new() };
         groups.retain(|group| {
             fields
                 .iter()
@@ -313,7 +355,7 @@ fn edit_group<T: Form>(
                     Some(group),
                     None,
                     None,
-                    allowed,
+                    bindings,
                 )
             }
             Action::Select => fields[selected].edit(screen, &menu, selected),
@@ -388,6 +430,19 @@ impl Value for bool {
 }
 
 impl<T: Value> Value for Option<T> {
+    fn alternatives() -> Vec<(&'static str, &'static str, Self)> {
+        let values = T::alternatives();
+        if values.is_empty() {
+            return Vec::new();
+        }
+        std::iter::once(("default", "默认", None))
+            .chain(
+                values
+                    .into_iter()
+                    .map(|(key, label, v)| (key, label, Some(v))),
+            )
+            .collect()
+    }
     fn text(&self) -> String {
         self.as_ref().map_or_else(
             || "默认".to_owned(),

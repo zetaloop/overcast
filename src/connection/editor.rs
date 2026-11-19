@@ -4,11 +4,17 @@ use crate::{
     transport::Transport,
 };
 
-use super::{Connection, Core, Security, Tls};
+use super::{AddressStrategy, Connection, Core, FastOpen, Network, Security, Tls};
+use crate::inbound::Core as Engine;
 
 impl Connection {
     pub(crate) fn fit(&mut self) {
         let choices = Choices::new(self);
+        if self.core() != Core::Auto
+            && let Some(core) = self.core().candidates(None).next()
+        {
+            self.network_mut().fit(core);
+        }
         let (security, transport) = match self {
             Self::Vless(v) => (&mut v.security, &mut v.transport),
             Self::Vmess(v) => (&mut v.security, &mut v.transport),
@@ -39,6 +45,8 @@ pub(crate) struct Choices {
     modes: Vec<usize>,
     mode: usize,
     transports: Vec<(&'static str, Transport)>,
+    network_cores: Vec<Engine>,
+    requested: Core,
 }
 
 impl Choices {
@@ -57,6 +65,20 @@ impl Choices {
         } else {
             modes.first().copied().unwrap_or(mode)
         };
+        let current = connection.transport().unwrap_or(&Transport::Default);
+        let current = if requested == Core::Auto
+            || requested
+                .candidates(None)
+                .any(|core| stack.transport(core, mode, current))
+        {
+            current
+        } else {
+            &Transport::Default
+        };
+        let network_cores = requested
+            .candidates(None)
+            .filter(|&core| stack.transport(core, mode, current))
+            .collect();
         let transports = Transport::variants()
             .into_iter()
             .filter(|(_, t)| {
@@ -70,7 +92,82 @@ impl Choices {
             modes,
             mode,
             transports,
+            network_cores,
+            requested,
         }
+    }
+
+    pub(crate) fn network<'a>(
+        &self,
+        value: &'a mut Network,
+        default: Network,
+    ) -> Box<dyn Field + 'a> {
+        let candidates = self.network_cores.clone();
+        let requested = self.requested;
+        form::control(
+            "network",
+            "网络",
+            value,
+            default,
+            None,
+            move |net, screen, menu, _| {
+                form::scoped(screen, &format!("{} / 网络", menu.title), net, |raw| {
+                    let mut active = raw.clone();
+                    if requested != Core::Auto
+                        && let Some(core) = requested.candidates(None).next()
+                    {
+                        active.fit(core);
+                    }
+                    let available: Vec<_> = candidates
+                        .iter()
+                        .copied()
+                        .filter(|core| core.network(&active).is_ok())
+                        .collect();
+                    let mut fields = available
+                        .iter()
+                        .flat_map(|core| core.network_fields())
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let selected = crate::native::options::Options::new(&active)
+                        .expect("network options serialize");
+                    for core in &candidates {
+                        let declared = core.network_fields();
+                        fields.extend(
+                            selected
+                                .keys()
+                                .filter(|key| declared.contains(*key))
+                                .map(str::to_owned),
+                        );
+                    }
+                    let mut choices = AddressStrategy::choices();
+                    choices.retain(|(_, _, s)| {
+                        active.address_strategy = Some(*s);
+                        candidates.iter().any(|core| core.network(&active).is_ok())
+                    });
+                    let sources = (raw.source_ipv4.is_some(), raw.source_ipv6.is_some());
+                    let mut bindings = form::Form::fields(raw, Network::default());
+                    for field in &mut bindings {
+                        match field.key() {
+                            "address_strategy" => field.restrict(&|key| {
+                                key == "default" || choices.iter().any(|(k, _, _)| *k == key)
+                            }),
+                            "tcp_fast_open" if !available.contains(&Engine::Xray) => {
+                                field.restrict(&|_| true)
+                            }
+                            _ => {}
+                        }
+                    }
+                    bindings.retain(|f| {
+                        fields.contains(f.key())
+                            && match (requested, f.key()) {
+                                (Core::Xray, "source_ipv6") => !sources.0,
+                                (Core::Xray, "source_ipv4") => sources.0 || !sources.1,
+                                _ => true,
+                            }
+                    });
+                    bindings
+                })
+            },
+        )
     }
 
     pub(crate) fn core<'a>(&self, value: &'a mut Core, default: Core) -> Box<dyn Field + 'a> {
@@ -185,9 +282,35 @@ macro_rules! client_fields {
     (@push $f:ident, $c:ident, $s:ident, $d:ident, transport, $label:literal) => {
         $f.extend($c.carrier($label, &mut $s.transport, $d.transport));
     };
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, network, $label:literal) => {
+        $f.push($c.network(&mut $s.network, $d.network));
+    };
     (@push $f:ident, $c:ident, $s:ident, $d:ident, $key:ident, $label:literal) => {
         $f.push($crate::form::field(stringify!($key), $label, &mut $s.$key, $d.$key));
     };
 }
 
 pub(crate) use client_fields;
+
+impl Network {
+    fn fit(&mut self, core: Engine) {
+        let fields = core.network_fields();
+        form::retain(self, |key| fields.contains(key));
+        if core == Engine::Xray && self.source_ipv4.is_some() {
+            self.source_ipv6 = None;
+        }
+        if core != Engine::Xray && matches!(self.tcp_fast_open, Some(FastOpen::Queue(_))) {
+            self.tcp_fast_open = None;
+        }
+        if self.address_strategy.is_some()
+            && core
+                .network(&Self {
+                    address_strategy: self.address_strategy,
+                    ..Self::default()
+                })
+                .is_err()
+        {
+            self.address_strategy = None;
+        }
+    }
+}
