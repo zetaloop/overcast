@@ -39,13 +39,14 @@ pub struct Inbound {
 
 impl Inbound {
     fn new(kind: Kind) -> Self {
+        let protocol = kind.protocol();
         Self {
             uuid: Uuid::new_v4(),
             name: String::new(),
             core: kind.core(),
-            users: !matches!(kind, Kind::Forward),
+            users: protocol.supports_users(kind.core()),
             credentials: None,
-            protocol: kind.protocol(),
+            protocol,
             transport: Transport::default(),
             security: if matches!(kind, Kind::Mixed | Kind::Shadowsocks | Kind::Forward) {
                 Security::None
@@ -96,8 +97,25 @@ impl Inbound {
             )
             .into());
         }
+        let credential = self.protocol.credential();
+        if self.users && !self.protocol.supports_users(self.core) {
+            return Err(format!("入站 {} 的协议设置不支持系统用户认证", self.name).into());
+        }
+        if credential.is_none() && self.credentials.is_some() {
+            return Err(format!("入站 {} 的协议设置没有凭据认证", self.name).into());
+        }
         if let Some(credentials) = &self.credentials {
-            user::password(&credentials.password)?;
+            if self.users {
+                return Err(
+                    format!("入站 {} 已使用系统用户，不能同时指定入口凭据", self.name).into(),
+                );
+            }
+            if credential != Some(CredentialKind::Uuid) {
+                user::password(&credentials.password)?;
+            }
+        }
+        if let Protocol::Shadowsocks(server) = &self.protocol {
+            server.validate(self.core)?;
         }
         if let Protocol::Hysteria2(server) = &self.protocol
             && let Some(obfs) = &server.obfs
@@ -165,19 +183,40 @@ impl Inbound {
         if let Protocol::Hysteria2(server) = &mut value.protocol {
             server.fit(value.core);
         }
+        if let Protocol::Shadowsocks(server) = &mut value.protocol {
+            server.fit(value.core);
+        }
         if let Security::Reality(reality) = &mut value.security {
             reality.use_names();
             let allowed = reality.fields_for(value.core);
             form::retain(reality.as_mut(), allowed);
         }
-        value.users &= value.protocol.users();
-        if value.users
-            || !value.protocol.users()
-            || matches!(&value.protocol, Protocol::Shadowsocks(ss) if ss.cipher == crate::shadowsocks::Cipher::None)
-        {
+        value.users = value.system_users();
+        if value.users || value.protocol.credential().is_none() {
             value.credentials = None;
         }
         value
+    }
+
+    pub fn system_users(&self) -> bool {
+        self.users && self.protocol.supports_users(self.core)
+    }
+
+    pub fn response_only(&self) -> bool {
+        !self.system_users()
+            && self.credentials.is_none()
+            && (self.protocol.responds() || !self.protocol.fallbacks().is_empty())
+    }
+
+    pub fn account<'a>(&'a self, user: Option<&'a user::User>) -> Option<(Uuid, &'a str)> {
+        self.protocol.credential()?;
+        if self.system_users() {
+            user.map(|user| (user.uuid, user.password.as_str()))
+        } else {
+            self.credentials
+                .as_ref()
+                .map(|entry| (entry.uuid, entry.password.as_str()))
+        }
     }
 
     pub fn quic(&self) -> bool {
@@ -289,6 +328,13 @@ pub enum Protocol {
     Forward(crate::forward::Server),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    Account,
+    Uuid,
+    Password,
+}
+
 impl Protocol {
     pub fn responds(&self) -> bool {
         matches!(self, Self::Hysteria2(value) if value.masquerade.is_some())
@@ -314,16 +360,31 @@ impl Protocol {
         self.destination().is_none()
     }
 
-    pub fn users(&self) -> bool {
-        !matches!(self, Self::Forward(_))
+    pub fn credential(&self) -> Option<CredentialKind> {
+        match self {
+            Self::Forward(_) => None,
+            Self::Shadowsocks(ss) if ss.cipher == crate::shadowsocks::Cipher::None => None,
+            Self::Mixed(_) => Some(CredentialKind::Account),
+            Self::Vless(_) | Self::Vmess(_) => Some(CredentialKind::Uuid),
+            Self::Trojan(_) | Self::Shadowsocks(_) | Self::Hysteria2(_) | Self::AnyTls(_) => {
+                Some(CredentialKind::Password)
+            }
+        }
     }
 
     pub fn needs_credentials(&self) -> bool {
-        self.users()
-            && !matches!(self, Self::Mixed(_))
-            && !matches!(self, Self::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
-            && self.fallbacks().is_empty()
+        matches!(
+            self.credential(),
+            Some(CredentialKind::Uuid | CredentialKind::Password)
+        ) && self.fallbacks().is_empty()
             && !self.responds()
+    }
+
+    fn supports_users(&self, core: Core) -> bool {
+        match self {
+            Self::Shadowsocks(ss) => ss.cipher.authentication(core).named(),
+            _ => self.credential().is_some(),
+        }
     }
 
     pub fn destination(&self) -> Option<crate::route::Destination> {
@@ -353,7 +414,7 @@ impl Protocol {
             Self::Vless(value) => form::edit(screen, &title, value),
             Self::Vmess(value) => form::edit(screen, &title, value),
             Self::Trojan(value) => form::edit(screen, &title, value),
-            Self::Shadowsocks(value) => form::edit(screen, &title, value),
+            Self::Shadowsocks(value) => value.edit(screen, &title, core),
             Self::Forward(value) => form::edit(screen, &title, value),
             Self::Hysteria2(value) => value.edit(screen, &title, core),
             Self::AnyTls(value) => form::edit(screen, &title, value),
@@ -648,34 +709,35 @@ fn edit(
             item.value = destination.text();
             items.push(item);
         }
-        if inbound.protocol.users() {
+        let credential = active.protocol.credential();
+        if active.protocol.supports_users(active.core) {
             let mut users = Item::new("users", "用户支持".stylized());
             users.marker = inbound.users.marker();
             items.push(users);
-            if !inbound.users
-                && !matches!(&inbound.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
-            {
-                let (label, value) = match &inbound.protocol {
-                    Protocol::Mixed(_) => (
-                        "入口凭据",
-                        inbound.credentials.as_ref().map(|c| c.uuid.to_string()),
-                    ),
-                    Protocol::Vless(_) | Protocol::Vmess(_) => (
-                        "入口 UUID",
-                        inbound.credentials.as_ref().map(|c| c.uuid.to_string()),
-                    ),
-                    _ => (
-                        "入口密码",
-                        inbound.credentials.as_ref().map(|c| c.password.clone()),
-                    ),
-                };
-                let mut credentials = Item::new("credentials", label.stylized());
-                credentials.value = value.unwrap_or_else(|| "无".to_owned());
-                if inbound.credentials.is_some() && !inbound.protocol.needs_credentials() {
-                    credentials.detail = "Del 清除凭据".to_owned();
-                }
-                items.push(credentials);
+        }
+        if let Some(kind) = credential
+            && !active.system_users()
+        {
+            let (label, value) = match kind {
+                CredentialKind::Account => (
+                    "入口凭据",
+                    inbound.credentials.as_ref().map(|c| c.uuid.to_string()),
+                ),
+                CredentialKind::Uuid => (
+                    "入口 UUID",
+                    inbound.credentials.as_ref().map(|c| c.uuid.to_string()),
+                ),
+                CredentialKind::Password => (
+                    "入口密码",
+                    inbound.credentials.as_ref().map(|c| c.password.clone()),
+                ),
+            };
+            let mut credentials = Item::new("credentials", label.stylized());
+            credentials.value = value.unwrap_or_else(|| "无".to_owned());
+            if inbound.credentials.is_some() && !active.protocol.needs_credentials() {
+                credentials.detail = "Del 清除凭据".to_owned();
             }
+            items.push(credentials);
         }
         let mut security = Item::new("security", "加密".stylized());
         security.value = active.security.text();
@@ -750,7 +812,7 @@ fn edit(
             Action::Key(key)
                 if key.code == KeyCode::Delete
                     && items[selected].key == "credentials"
-                    && !inbound.protocol.needs_credentials() =>
+                    && !active.protocol.needs_credentials() =>
             {
                 inbound.credentials = None;
                 Ok(())
@@ -774,7 +836,7 @@ fn edit(
                 "users" => {
                     if inbound.users
                         && inbound.credentials.is_none()
-                        && inbound.protocol.needs_credentials()
+                        && active.protocol.needs_credentials()
                     {
                         inbound.credentials = Some(Credentials::new()?);
                     }
@@ -821,15 +883,17 @@ fn edit(
                         None => Credentials::new(),
                     };
                     credentials.and_then(|mut credentials| {
-                        let changed = match inbound.protocol {
-                            Protocol::Mixed(_) => {
+                        let changed = match credential.expect("missing credential field") {
+                            CredentialKind::Account => {
                                 form::edit(screen, "入口凭据", &mut credentials)?
                                     || inbound.credentials.is_none()
                             }
-                            Protocol::Vless(_) | Protocol::Vmess(_) => {
+                            CredentialKind::Uuid => {
                                 credentials.uuid.edit(screen, &menu, selected)?
                             }
-                            _ => credentials.password.edit(screen, &menu, selected)?,
+                            CredentialKind::Password => {
+                                credentials.password.edit(screen, &menu, selected)?
+                            }
                         };
                         if changed {
                             inbound.credentials = Some(credentials);

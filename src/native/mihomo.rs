@@ -596,6 +596,10 @@ pub fn listeners(
         );
         output.insert("udp".to_owned(), json!(value.udp));
         super::shadowsocks::authentication(source, users, &mut options, &mut output)?;
+        if value.cipher == crate::shadowsocks::Cipher::None {
+            // Named listeners require a password field even though the none service ignores it.
+            output.insert("password".to_owned(), json!("unused"));
+        }
         if let Some(multiplex) = &value.multiplex {
             output.insert(
                 "mux-option".to_owned(),

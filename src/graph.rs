@@ -31,7 +31,6 @@ pub struct Graph<'a> {
 
 pub struct Entry<'a> {
     pub inbound: &'a Inbound,
-    pub users: Vec<&'a User>,
     pub accounts: Vec<Account<'a>>,
 }
 
@@ -64,17 +63,10 @@ impl From<&Protocol> for Payload {
 
 impl Account<'_> {
     pub fn identity(&self, inbound: &Inbound) -> Option<Uuid> {
-        self.user.map(|user| user.uuid).or_else(|| {
-            self.network
-                .identity(inbound)
-                .then(|| {
-                    inbound
-                        .credentials
-                        .as_ref()
-                        .map(|credentials| credentials.uuid)
-                })
-                .flatten()
-        })
+        inbound
+            .account(self.user)
+            .filter(|_| self.network.identity(inbound))
+            .map(|(id, _)| id)
     }
 }
 
@@ -233,8 +225,7 @@ impl Network {
         !(self == Self::Udp
             && inbound.core == Core::Mihomo
             && matches!(inbound.protocol, Protocol::Mixed(_)))
-            && !matches!(&inbound.protocol, Protocol::Shadowsocks(value) if value.cipher == crate::shadowsocks::Cipher::None)
-            && inbound.protocol.users()
+            && inbound.protocol.credential().is_some()
     }
 
     pub fn enabled(self, inbound: &Inbound) -> bool {
@@ -271,8 +262,7 @@ pub fn build<'a>(
     if config.inbounds.is_empty()
         || config.users.is_empty()
             && config.inbounds.iter().all(|inbound| {
-                inbound.users
-                    && inbound.protocol.users()
+                inbound.system_users()
                     && !inbound.protocol.responds()
                     && inbound
                         .protocol
@@ -287,7 +277,8 @@ pub fn build<'a>(
     let mut seen = HashSet::new();
     let mut pending: Vec<_> = if config.inbounds.iter().any(|inbound| {
         Payload::from(&inbound.protocol) == Payload::Proxy
-            && (!inbound.users || !config.users.is_empty())
+            && !inbound.response_only()
+            && (!inbound.system_users() || !config.users.is_empty())
     }) {
         config.rules.iter().collect()
     } else {
@@ -312,12 +303,11 @@ pub fn build<'a>(
             .filter(|_| inbound.protocol.routing())
             .map(|coverage| coverage.entry(inbound.uuid).or_default());
         let mut accounts = Vec::new();
-        let mut users = HashSet::new();
         for network in [Network::Tcp, Network::Udp] {
-            if !network.enabled(inbound) {
+            if inbound.response_only() || !network.enabled(inbound) {
                 continue;
             }
-            if inbound.users && inbound.protocol.users() {
+            if inbound.system_users() {
                 for user in &config.users {
                     let routes = graph.routes(
                         inbound,
@@ -340,7 +330,6 @@ pub fn build<'a>(
                             )
                             .into());
                         }
-                        users.insert(user.uuid);
                         accounts.push(Account {
                             user: Some(user),
                             network,
@@ -351,8 +340,7 @@ pub fn build<'a>(
             } else {
                 let anonymous =
                     graph.routes(inbound, None, network, &mut reachable, scope.as_deref_mut())?;
-                if inbound.credentials.is_some()
-                    && inbound.protocol.users()
+                if inbound.account(None).is_some()
                     && !network.identity(inbound)
                     && anonymous
                         .iter()
@@ -412,15 +400,7 @@ pub fn build<'a>(
             }
         }
         if !accounts.is_empty() || graph.fallbacks(inbound, &mut reachable)? {
-            entries.push(Entry {
-                inbound,
-                users: config
-                    .users
-                    .iter()
-                    .filter(|user| users.contains(&user.uuid))
-                    .collect(),
-                accounts,
-            });
+            entries.push(Entry { inbound, accounts });
         }
     }
     step.finish(format!("{} 个入口", entries.len()));
@@ -768,12 +748,14 @@ impl<'a> Analysis<'a> {
             if !self.enabled(inbound, reachable)? {
                 continue;
             }
-            let users: Vec<_> = if inbound.users && inbound.protocol.users() {
+            let users: Vec<_> = if inbound.system_users() {
                 self.config
                     .users
                     .iter()
                     .map(|user| Some(user.uuid))
                     .collect()
+            } else if inbound.response_only() {
+                Vec::new()
             } else {
                 vec![None]
             };

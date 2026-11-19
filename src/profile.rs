@@ -108,7 +108,7 @@ impl Builder<'_> {
         }
         let entry = &self.graph.entries[index];
         let source = entry.inbound;
-        let authenticated = source.users && source.protocol.users();
+        let authenticated = source.system_users();
         if authenticated && user.is_none() {
             visiting.remove(&index);
             return Ok(Vec::new());
@@ -169,7 +169,7 @@ impl Builder<'_> {
                                 account.network == Network::Udp
                                     && account.user.map(|user| user.uuid)
                                         == user
-                                            .filter(|_| receiver.users && receiver.protocol.users())
+                                            .filter(|_| receiver.system_users())
                                             .map(|user| user.uuid)
                             })
                             && crate::native::listener::accepts(
@@ -216,14 +216,7 @@ impl Builder<'_> {
     }
 
     fn clients(&self, source: &Inbound, user: Option<&User>) -> Result<Vec<Connection>> {
-        let credentials = user
-            .map(|user| (user.uuid, user.password.as_str()))
-            .or_else(|| {
-                source
-                    .credentials
-                    .as_ref()
-                    .map(|value| (value.uuid, value.password.as_str()))
-            });
+        let credentials = source.account(user);
         let uuid = credentials
             .map(|(uuid, _)| uuid.to_string())
             .unwrap_or_default();
@@ -347,19 +340,14 @@ impl Builder<'_> {
                     }
                     Protocol::Shadowsocks(value) => {
                         let credential = value.cipher.credential(password);
-                        let password = if crate::native::shadowsocks::shared(
-                            &source,
-                            usize::from(credentials.is_some()),
-                        ) {
-                            format!(
-                                "{}:{credential}",
-                                value
-                                    .password
-                                    .as_deref()
-                                    .ok_or("缺少已保存的 Shadowsocks 入口密钥")?
-                            )
-                        } else {
-                            credential
+                        let password = match self
+                            .config
+                            .keys
+                            .get(&source.uuid)
+                            .and_then(|k| k.shadowsocks.as_ref())
+                        {
+                            Some(keys) => format!("{}:{credential}", keys.password),
+                            None => credential,
                         };
                         clients.push(Connection::Shadowsocks(crate::shadowsocks::Client {
                             server,

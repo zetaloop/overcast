@@ -5,9 +5,10 @@ use sha2::{Digest, Sha256};
 use crate::{
     Result,
     connection::{Core, Network, Security},
-    form::{choices, fields},
+    form::{self, Form, Value, choices, fields},
     inbound::Core as ServerCore,
     transport::Transport,
+    tui::Screen,
 };
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -167,6 +168,30 @@ pub enum Cipher {
 }
 
 impl Cipher {
+    pub fn supported(self, core: ServerCore, inbound: bool) -> bool {
+        let aead = self.aead(core) || self.identity_key(core) || self == Self::Chacha20Poly13052022;
+        match core {
+            ServerCore::Xray => aead,
+            ServerCore::SingBox => {
+                aead || self == Self::None
+                    || !inbound
+                        && matches!(
+                            self,
+                            Self::Aes128Ctr
+                                | Self::Aes192Ctr
+                                | Self::Aes256Ctr
+                                | Self::Aes128Cfb
+                                | Self::Aes192Cfb
+                                | Self::Aes256Cfb
+                                | Self::Rc4Md5
+                                | Self::Chacha20Ietf
+                                | Self::Xchacha20
+                        )
+            }
+            ServerCore::Mihomo => true,
+        }
+    }
+
     pub fn key_size(self) -> Option<usize> {
         match self {
             Self::Aes128Gcm2022 | Self::Aes128Ccm2022 => Some(16),
@@ -183,10 +208,22 @@ impl Cipher {
         }
     }
 
+    pub fn authentication(self, core: ServerCore) -> Authentication {
+        if self == Self::None {
+            Authentication::None
+        } else if self.identity_key(core) {
+            Authentication::IdentityKey
+        } else if self.aead(core) {
+            Authentication::Users
+        } else {
+            Authentication::Single
+        }
+    }
+
     pub fn aead(self, core: ServerCore) -> bool {
         match self {
+            Self::Aes192Gcm => core != ServerCore::Xray,
             Self::Aes128Gcm
-            | Self::Aes192Gcm
             | Self::Aes256Gcm
             | Self::Chacha20Poly1305
             | Self::Xchacha20Poly1305 => true,
@@ -265,14 +302,10 @@ impl Keys {
         }
     }
 
-    pub fn resolve(source: &Server, previous: Option<&Self>) -> Result<Self> {
+    pub fn resolve(source: &Server) -> Result<Self> {
         let size = source.cipher.key_size().ok_or("当前算法使用用户密码")?;
         let password = if let Some(password) = &source.password {
             source.cipher.password(password)?
-        } else if let Some(previous) =
-            previous.filter(|previous| previous.cipher.key_size() == Some(size))
-        {
-            source.cipher.password(&previous.password)?
         } else {
             let mut bytes = vec![0; size];
             getrandom::fill(&mut bytes)
@@ -312,14 +345,128 @@ fields!(ClientOptions {
     user_label: "用户标识",
 });
 
-fields!(Server {
-    cipher: "算法",
-    tcp: "TCP 接收",
-    udp: "UDP 接收",
-    password: "入口共享密钥",
-    user_level: "用户等级",
-    multiplex: "S-Mux",
-});
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Authentication {
+    None,
+    Single,
+    Users,
+    IdentityKey,
+}
+
+impl Authentication {
+    pub fn named(self) -> bool {
+        matches!(self, Self::Users | Self::IdentityKey)
+    }
+}
+
+impl Server {
+    pub fn authentication(
+        &self,
+        core: ServerCore,
+        system_users: bool,
+        accounts: usize,
+    ) -> Authentication {
+        let mode = self.cipher.authentication(core);
+        match mode {
+            Authentication::IdentityKey if self.password.is_some() => mode,
+            _ if mode.named() && !system_users && accounts <= 1 => Authentication::Single,
+            _ => mode,
+        }
+    }
+
+    fn fields_for(&self, core: ServerCore) -> impl Fn(&str) -> bool + use<> {
+        let cipher = if self.cipher.supported(core, true) {
+            self.cipher
+        } else {
+            Cipher::default()
+        };
+        move |key| match key {
+            "tcp" => core != ServerCore::Mihomo,
+            "password" => cipher.identity_key(core),
+            "user_level" => core == ServerCore::Xray,
+            "multiplex" => core != ServerCore::Xray,
+            _ => true,
+        }
+    }
+
+    fn fields(&mut self, core: ServerCore) -> form::Fields<'_> {
+        let d = Self::default();
+        vec![
+            form::choice_field("cipher", "算法", &mut self.cipher, d.cipher, move |v| {
+                v.supported(core, true)
+            }),
+            form::field("tcp", "TCP 接收", &mut self.tcp, d.tcp),
+            form::field("udp", "UDP 接收", &mut self.udp, d.udp),
+            form::field("password", "入口共享密钥", &mut self.password, d.password),
+            form::field("user_level", "用户等级", &mut self.user_level, d.user_level),
+            form::field("multiplex", "S-Mux", &mut self.multiplex, d.multiplex),
+        ]
+    }
+
+    pub fn fit(&mut self, core: ServerCore) {
+        if !self.cipher.supported(core, true) {
+            self.cipher = Cipher::default();
+        }
+        let allowed = self.fields_for(core);
+        for mut field in self.fields(core) {
+            if !allowed(field.key()) {
+                field.reset();
+            }
+        }
+    }
+
+    pub fn validate(&self, core: ServerCore) -> Result<()> {
+        if !self.cipher.supported(core, true) {
+            return Err(format!(
+                "{} 的 Shadowsocks 入站不支持 {}",
+                core.text(),
+                self.cipher.text()
+            )
+            .into());
+        }
+        let allowed = self.fields_for(core);
+        for (key, label, set) in [
+            ("tcp", "关闭 TCP 接收", !self.tcp),
+            ("password", "入口共享密钥", self.password.is_some()),
+            ("user_level", "用户等级", self.user_level.is_some()),
+            ("multiplex", "S-Mux", self.multiplex.is_some()),
+        ] {
+            if set && !allowed(key) {
+                return Err(format!(
+                    "{} 的 {} 入站不支持{label}",
+                    core.text(),
+                    self.cipher.text()
+                )
+                .into());
+            }
+        }
+        if let Some(password) = &self.password {
+            let key = self.cipher.password(password)?;
+            if key.contains(':') {
+                return Err("Shadowsocks 入口共享密钥需要单个密钥".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn edit(&mut self, screen: &mut Screen, title: &str, core: ServerCore) -> Result<bool> {
+        let mut page = (std::mem::take(self), core);
+        let result = form::edit(screen, title, &mut page);
+        *self = page.0;
+        result
+    }
+}
+
+impl Form for (Server, ServerCore) {
+    fn fields(&mut self, _: Self) -> form::Fields<'_> {
+        let allowed = self.0.fields_for(self.1);
+        self.0
+            .fields(self.1)
+            .into_iter()
+            .filter(|field| allowed(field.key()))
+            .collect()
+    }
+}
 
 fields!(Plugin {
     name: "名称",

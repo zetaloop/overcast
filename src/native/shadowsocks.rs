@@ -9,7 +9,7 @@ use crate::{
     graph::Graph,
     inbound::{Core, Inbound, Protocol},
     progress::Progress,
-    shadowsocks::{Cipher, Keys, Plugin},
+    shadowsocks::{Authentication, Cipher, Keys, Plugin},
 };
 
 use super::{
@@ -19,26 +19,7 @@ use super::{
 };
 
 pub fn cipher(value: Cipher, core: Core, inbound: bool) -> Result<Value> {
-    let supported_aead =
-        value.aead(core) || value.identity_key(core) || value == Cipher::Chacha20Poly13052022;
-    let stream = matches!(
-        value,
-        Cipher::Aes128Ctr
-            | Cipher::Aes192Ctr
-            | Cipher::Aes256Ctr
-            | Cipher::Aes128Cfb
-            | Cipher::Aes192Cfb
-            | Cipher::Aes256Cfb
-            | Cipher::Rc4Md5
-            | Cipher::Chacha20Ietf
-            | Cipher::Xchacha20
-    );
-    let supported = match core {
-        Core::Xray => supported_aead && value != Cipher::Aes192Gcm,
-        Core::SingBox => supported_aead || value == Cipher::None || !inbound && stream,
-        Core::Mihomo => true,
-    };
-    if !supported {
+    if !value.supported(core, inbound) {
         return unsupported(format!(
             "当前核心的 Shadowsocks {}不支持算法 {}",
             if inbound { "入站" } else { "出站" },
@@ -52,12 +33,9 @@ pub fn multi(source: &Inbound, users: usize) -> bool {
     let Protocol::Shadowsocks(value) = &source.protocol else {
         return false;
     };
-    value.cipher.aead(source.core) && (source.users || users > 1) || shared(source, users)
-}
-
-pub fn shared(source: &Inbound, users: usize) -> bool {
-    matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher.identity_key(source.core)
-        && (source.users || users > 1 || value.password.is_some()))
+    value
+        .authentication(source.core, source.system_users(), users)
+        .named()
 }
 
 pub fn authentication(
@@ -66,22 +44,28 @@ pub fn authentication(
     options: &mut Options,
     output: &mut Map<String, Value>,
 ) -> Result<()> {
-    if shared(source, users.len()) {
-        output.insert(
-            "password".to_owned(),
-            options
-                .take("password")
-                .ok_or("缺少 Shadowsocks 入口共享密钥")?,
-        );
-    } else if !multi(source, users.len()) {
-        output.remove("users");
-        match users {
-            [(_, credential)] => {
-                output.insert("password".to_owned(), json!(credential.password));
-            }
-            [] if matches!(&source.protocol, Protocol::Shadowsocks(v) if v.cipher == Cipher::None) =>
-                {}
-            _ => return unsupported("当前 Shadowsocks 算法的入站需要单个认证密钥"),
+    let Protocol::Shadowsocks(ss) = &source.protocol else {
+        unreachable!()
+    };
+    match ss.authentication(source.core, source.system_users(), users.len()) {
+        Authentication::IdentityKey => {
+            output.insert(
+                "password".to_owned(),
+                options
+                    .take("password")
+                    .ok_or("缺少 Shadowsocks 入口共享密钥")?,
+            );
+        }
+        Authentication::Users => {}
+        Authentication::None => {
+            output.remove("users");
+        }
+        Authentication::Single => {
+            output.remove("users");
+            let [(_, credential)] = users else {
+                return unsupported("当前 Shadowsocks 算法的入站需要单个认证密钥");
+            };
+            output.insert("password".to_owned(), json!(credential.password));
         }
     }
     Ok(())
@@ -99,24 +83,24 @@ pub fn prepare(
             .filter(|listener| matches!(&listener.source.protocol, Protocol::Shadowsocks(v) if v.cipher.identity_key(listener.source.core))),
         progress,
     )? {
-        if !group.listeners.iter().any(|listener| shared(&listener.source, listener.users.len())) {
+        if !group.listeners.iter().any(|l| multi(&l.source, l.users.len())) {
             continue;
         }
         let sources: Vec<_> = group
-            .listeners
+            .entries
             .iter()
-            .filter_map(|listener| {
-                if let Protocol::Shadowsocks(value) = &listener.source.protocol {
-                    Some(value)
-                } else {
-                    None
-                }
+            .map(|index| {
+                let inbound = graph.entries[*index].inbound;
+                let Protocol::Shadowsocks(value) = &inbound.protocol else { unreachable!() };
+                let cached = graph.config().keys.get(&inbound.uuid).and_then(|keys| keys.shadowsocks.as_ref())
+                    .filter(|keys| keys.cipher.key_size() == value.cipher.key_size());
+                (value, value.password.as_ref().or_else(|| cached.map(|keys| &keys.password)))
             })
             .collect();
         let passwords: BTreeSet<_> = sources
             .iter()
-            .filter_map(|source| source.password.clone())
-            .collect();
+            .filter_map(|(source, key)| key.map(|password| source.cipher.password(password)))
+            .collect::<Result<_>>()?;
         if passwords.len() > 1 {
             return Err(format!(
                 "入站 {} 关联的 Shadowsocks 监听要求不同的入口密钥",
@@ -129,13 +113,9 @@ pub fn prepare(
             )
             .into());
         }
-        let mut source = sources[0].clone();
+        let mut source = sources[0].0.clone();
         source.password = passwords.into_iter().next();
-        let previous = group.entries.iter().find_map(|entry| {
-            graph.config().keys.get(&graph.entries[*entry].inbound.uuid)
-                .and_then(|keys| keys.shadowsocks.as_ref())
-        });
-        let material = Keys::resolve(&source, previous)?;
+        let material = Keys::resolve(&source)?;
         for entry in group.entries {
             keys.entry(graph.entries[entry].inbound.uuid)
                 .or_default()

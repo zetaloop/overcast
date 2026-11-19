@@ -133,18 +133,23 @@ pub fn choice_field<'a, T: Value + PartialEq>(
     default: T,
     allowed: impl Fn(&T) -> bool + 'a,
 ) -> Box<dyn Field + 'a> {
+    let fallback = (!allowed(value)).then(|| default.clone());
+    let preview = fallback.as_ref().map(Value::text);
     control(
         key,
         label,
         value,
         default,
-        None,
+        preview,
         move |value, screen, menu, _| {
             let choices: Vec<_> = T::choices()
                 .into_iter()
                 .filter(|(_, _, v)| allowed(v))
                 .collect();
-            let current = choices.iter().position(|(_, _, v)| v == value).unwrap_or(0);
+            let current = choices
+                .iter()
+                .position(|(_, _, v)| v == fallback.as_ref().unwrap_or(value))
+                .unwrap_or(0);
             choose(
                 value,
                 screen,

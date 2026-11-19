@@ -548,13 +548,9 @@ pub fn prepare(
                                 || shadowsocks::multi(inbound, listener.users.len())
                         })
                         .map(|user| {
-                            if matches!(
-                                inbound.protocol,
-                                Protocol::Trojan(_)
-                                    | Protocol::Shadowsocks(_)
-                                    | Protocol::Hysteria2(_)
-                                    | Protocol::AnyTls(_)
-                            ) {
+                            if inbound.protocol.credential()
+                                == Some(crate::inbound::CredentialKind::Password)
+                            {
                                 listener
                                     .users
                                     .iter()

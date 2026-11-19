@@ -11,7 +11,7 @@ use crate::{
     Result,
     config::Store,
     graph::{Entry, Graph, Layer, Network},
-    inbound::{Core, HttpVersion, Inbound, Protocol},
+    inbound::{Core, CredentialKind, HttpVersion, Inbound, Protocol},
     progress::Progress,
 };
 
@@ -387,17 +387,10 @@ pub fn build(
         {
             encryption.private_keys = keys.private_keys.clone();
         }
-        if let Protocol::Shadowsocks(value) = &mut source.protocol {
-            if value.password.is_none()
-                && let Some(material) = keys
-                    .get(&source.uuid)
-                    .and_then(|keys| keys.shadowsocks.as_ref())
-            {
-                material.apply(value, source.core);
-            }
-            if let Some(password) = &value.password {
-                value.password = Some(value.cipher.password(password)?);
-            }
+        if let Protocol::Shadowsocks(value) = &mut source.protocol
+            && let Some(password) = &value.password
+        {
+            value.password = Some(value.cipher.password(password)?);
         }
         step.detail(&source.name);
         if source.listen.address == "localhost" {
@@ -582,7 +575,7 @@ fn merge(
             return Err(conflict(&members, "认证与无凭据连接无法共用原生认证表").into());
         }
         for (&user, credential) in member.users.iter() {
-            if matches!(source.protocol, Protocol::Mixed(_))
+            if source.protocol.credential() == Some(CredentialKind::Account)
                 && users.get(&user).is_some_and(|other| other != credential)
             {
                 return Err(conflict(&members, &format!("凭据 {user} 对应不同密码")).into());
@@ -773,13 +766,7 @@ fn merge(
     }
     configure(&mut source, &modes);
     validate(&source, &modes, &users)?;
-    let password_identity = matches!(
-        source.protocol,
-        Protocol::Trojan(_)
-            | Protocol::Shadowsocks(_)
-            | Protocol::Hysteria2(_)
-            | Protocol::AnyTls(_)
-    );
+    let password_identity = source.protocol.credential() == Some(CredentialKind::Password);
     let credentials: BTreeSet<_> = members
         .iter()
         .flat_map(|member| {
@@ -842,7 +829,7 @@ fn merge(
     }
     for (position, left) in members.iter().enumerate() {
         for right in &members[position + 1..] {
-            if !source.protocol.users() {
+            if source.protocol.destination().is_some() {
                 continue;
             }
             for network in [Network::Tcp, Network::Udp] {
@@ -881,7 +868,9 @@ fn merge(
                         .collect()
                 };
                 for (left_identity, right_identity) in identities {
-                    if left_identity.is_some() && left.source.users != right.source.users {
+                    if left_identity.is_some()
+                        && left.source.system_users() != right.source.system_users()
+                    {
                         return Err(conflict(&members, "相同凭据对应不同的系统用户归属").into());
                     }
                     if !graph.equivalent(
@@ -904,7 +893,7 @@ fn merge(
             }
         }
     }
-    if password_identity && source.protocol.users() {
+    if password_identity {
         let mut identities: BTreeMap<_, (Uuid, bool, Credential)> = BTreeMap::new();
         for member in &members {
             for (&uuid, credential) in member.users.iter() {
@@ -917,14 +906,14 @@ fn merge(
                 identities
                     .entry(identity)
                     .and_modify(|(current, system, _)| {
-                        if member.source.users {
+                        if member.source.system_users() {
                             *current = uuid;
                             *system = true;
                         } else if !*system {
                             *current = (*current).min(uuid);
                         }
                     })
-                    .or_insert((uuid, member.source.users, credential.clone()));
+                    .or_insert((uuid, member.source.system_users(), credential.clone()));
             }
         }
         users = identities
@@ -950,18 +939,6 @@ fn merge(
 }
 
 fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, Credential> {
-    if entry.accounts.is_empty() {
-        return BTreeMap::new();
-    }
-    if !entry.inbound.protocol.users() {
-        return BTreeMap::new();
-    }
-    if matches!(
-        &entry.inbound.protocol,
-        Protocol::Shadowsocks(source) if source.cipher == crate::shadowsocks::Cipher::None
-    ) {
-        return BTreeMap::new();
-    }
     let credential = |password: &str| {
         if let Protocol::Shadowsocks(source) = &entry.inbound.protocol {
             Credential {
@@ -976,20 +953,12 @@ fn credentials(entry: &Entry<'_>) -> BTreeMap<Uuid, Credential> {
             }
         }
     };
-    if entry.inbound.users {
-        entry
-            .users
-            .iter()
-            .map(|user| (user.uuid, credential(&user.password)))
-            .collect()
-    } else {
-        entry
-            .inbound
-            .credentials
-            .iter()
-            .map(|value| (value.uuid, credential(&value.password)))
-            .collect()
-    }
+    entry
+        .accounts
+        .iter()
+        .filter_map(|account| entry.inbound.account(account.user))
+        .map(|(id, secret)| (id, credential(secret)))
+        .collect()
 }
 
 fn versions(modes: &BTreeSet<Mode>) -> Vec<HttpVersion> {
