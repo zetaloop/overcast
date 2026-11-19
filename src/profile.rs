@@ -376,28 +376,6 @@ impl Builder<'_> {
                         let Some((_, password)) = credentials else {
                             continue;
                         };
-                        if value.ignore_client_bandwidth {
-                            let server = value
-                                .quic
-                                .download_bandwidth
-                                .as_deref()
-                                .map(crate::native::transport::mbps)
-                                .transpose()?
-                                .unwrap_or_default();
-                            let client = value
-                                .client
-                                .download_bandwidth
-                                .as_deref()
-                                .map(crate::native::transport::mbps)
-                                .transpose()?
-                                .unwrap_or_default();
-                            if server > 0.0 && client == 0.0 {
-                                return Err(
-                                    "此 HY2 入口要求客户端下载带宽，请填写客户端 QUIC 的下载带宽"
-                                        .into(),
-                                );
-                            }
-                        }
                         clients.push(Connection::Hysteria2(crate::hysteria::Client {
                             server,
                             port,

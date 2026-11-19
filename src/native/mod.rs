@@ -2,7 +2,7 @@ mod binding;
 pub(crate) mod carrier;
 pub(crate) mod encryption;
 pub(crate) mod forward;
-mod hysteria;
+pub(crate) mod hysteria;
 pub(crate) mod listener;
 mod mihomo;
 mod multiplex;

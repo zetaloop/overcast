@@ -382,34 +382,62 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Hysteria2(value) => {
-            let mut options = Options::new(&value.hysteria)?;
-            options.take("obfs");
-            options.take("ports");
-            if value.hysteria.tcp == Some(true) {
-                options.take("tcp");
-            }
-            if value.hysteria.udp == Some(true) {
-                options.take("udp");
-            }
-            options.finish("Hysteria 2 分享链接")?;
             tls(&Security::Tls(value.tls.clone()), &mut query, store)?;
             query.remove("security");
             if let Some(value) = query.remove("allowInsecure") {
                 query.insert("insecure".to_owned(), value);
             }
-            if let Some(value) = query.remove("pcs") {
-                if value.as_str().unwrap().contains(',') {
-                    return Err("Hysteria 2 分享链接使用一个证书指纹".into());
+            if let Some(pins) = query.remove("pcs") {
+                let pins = pins.as_str().unwrap();
+                if let Some((first, _)) = pins.split_once(',') {
+                    query.insert("pcs".to_owned(), json!(pins));
+                    query.insert("pinSHA256".to_owned(), json!(first));
+                } else {
+                    query.insert("pinSHA256".to_owned(), json!(pins));
                 }
-                query.insert("pinSHA256".to_owned(), value);
             }
-            if let Some(obfs) = &value.hysteria.obfs {
-                let mut options = Options::new(obfs)?;
-                options.take("kind");
-                options.take("password");
-                options.finish("Hysteria 2 混淆分享链接")?;
+            let options = &value.hysteria;
+            if let Some(obfs) = &options.obfs {
                 query.insert("obfs".to_owned(), json!(obfs.kind));
                 query.insert("obfs-password".to_owned(), json!(obfs.password));
+                if obfs.kind == crate::hysteria::ObfsKind::Gecko {
+                    let (min, max) = obfs.packet_sizes();
+                    for (field, alias, size, explicit) in [
+                        (
+                            "minPacketSize",
+                            "min_packet_size",
+                            min,
+                            obfs.min_packet_size,
+                        ),
+                        (
+                            "maxPacketSize",
+                            "max_packet_size",
+                            max,
+                            obfs.max_packet_size,
+                        ),
+                    ] {
+                        if explicit.is_some_and(|size| size != 0) {
+                            query.insert(field.to_owned(), json!(size));
+                            query.insert(alias.to_owned(), json!(size));
+                        }
+                    }
+                }
+            }
+            if !options.ports.is_empty() {
+                query.insert("mport".to_owned(), json!(options.ports));
+                Options::new(options)?.copy(&mut query, &["hop_interval", "hop_interval_max"]);
+            }
+            for (key, bandwidth) in [
+                ("up", &options.quic.upload_bandwidth),
+                ("down", &options.quic.download_bandwidth),
+            ] {
+                if let Some(bandwidth) = bandwidth {
+                    query.insert(key.to_owned(), json!(bandwidth));
+                }
+            }
+            let mask = crate::native::hysteria::share_mask(options)?;
+            if !mask.is_empty() {
+                query.insert("fm".to_owned(), json!(mask));
             }
             (
                 "hysteria2",
@@ -444,14 +472,7 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             ("ss", user)
         }
     };
-    let address = if let Connection::Hysteria2(source) = source
-        && !source.hysteria.ports.is_empty()
-    {
-        crate::connection::ports(&source.hysteria.ports)?;
-        connection::address(&server, &source.hysteria.ports)
-    } else {
-        connection::address(&server, port)
-    };
+    let address = connection::address(&server, port);
     let mut value = format!("{scheme}://{user}{address}");
     if matches!(scheme, "http" | "https") {
         value.push('/');

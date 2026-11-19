@@ -1039,12 +1039,25 @@ fn pool(source: &Pool) -> Result<Map<String, Value>> {
 }
 
 pub(super) fn quic(source: &Quic, inbound: bool) -> Result<Map<String, Value>> {
+    let mut options = Options::new(source)?;
     if source.congestion == crate::transport::Congestion::Cubic {
         return unsupported("Xray QUIC 使用 BBR、Brutal 或 Reno");
     }
-    let mut options = Options::new(source)?;
+    let output = quic_params(source, inbound, &mut options);
+    options.finish("QUIC")?;
+    Ok(output)
+}
+
+pub(super) fn quic_params(
+    source: &Quic,
+    inbound: bool,
+    options: &mut Options,
+) -> Map<String, Value> {
     let mut output = Map::new();
-    options.copy(&mut output, &["congestion", "debug"]);
+    if source.congestion != crate::transport::Congestion::Cubic {
+        options.copy(&mut output, &["congestion"]);
+    }
+    options.copy(&mut output, &["debug"]);
     options.rename(
         &mut output,
         &[
@@ -1072,19 +1085,14 @@ pub(super) fn quic(source: &Quic, inbound: bool) -> Result<Map<String, Value>> {
     } else {
         options.take("stateless_reset");
         options.invert(&mut output, "chrome_fingerprint", "disableChromeParrot");
-        options.durations(
-            &mut output,
-            &[("keep_alive", "keepAlivePeriod")],
-            Some(Duration::from_secs(1)),
-        )?;
+        if let Some(seconds) = options.seconds("keep_alive") {
+            output.insert("keepAlivePeriod".to_owned(), json!(seconds));
+        }
     }
-    options.durations(
-        &mut output,
-        &[("idle_timeout", "maxIdleTimeout")],
-        Some(Duration::from_secs(1)),
-    )?;
-    options.finish("QUIC")?;
-    Ok(output)
+    if let Some(seconds) = options.seconds("idle_timeout") {
+        output.insert("maxIdleTimeout".to_owned(), json!(seconds));
+    }
+    output
 }
 
 fn ranges(

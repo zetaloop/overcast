@@ -211,6 +211,8 @@ pub fn anytls(url: &Url) -> Result<crate::anytls::Client> {
 }
 
 pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
+    use crate::hysteria::{Obfs, ObfsKind};
+
     let source = text.split_once("://").ok_or("链接缺少协议")?.1;
     let end = source.find(['/', '?', '#']).unwrap_or(source.len());
     let (authority, suffix) = source.split_at(end);
@@ -245,22 +247,60 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
         return Err("Hysteria 2 连接使用 TLS".into());
     };
     if let Some(pin) = pin {
-        if !tls.certificate_sha256.is_empty() && tls.certificate_sha256 != [pin.clone()] {
+        if tls.certificate_sha256.is_empty() {
+            tls.certificate_sha256.push(pin);
+        } else if !crate::native::hex_hashes(&tls.certificate_sha256)?
+            .contains(&crate::native::hex_hashes(&[pin])?[0])
+        {
             return Err("链接中的证书指纹参数相互冲突".into());
         }
-        tls.certificate_sha256 = vec![pin];
     }
-    let obfs = query
-        .remove("obfs")
-        .filter(|value| !value.is_empty())
-        .map(|value| -> Result<_> {
-            Ok(crate::hysteria::Obfs {
-                kind: serde_json::from_value(json!(value))?,
-                password: query.remove("obfs-password").unwrap_or_default(),
-                ..crate::hysteria::Obfs::default()
-            })
-        })
-        .transpose()?;
+    let mut hysteria = crate::hysteria::ClientOptions {
+        ports: query.remove("mport").unwrap_or_default().replace(':', "-"),
+        hop_interval: query.remove("hop_interval"),
+        hop_interval_max: query.remove("hop_interval_max"),
+        ..Default::default()
+    };
+    if ports.contains([',', '-']) {
+        merge_ports(&mut hysteria.ports, ports)?;
+    }
+    let size = |query: &mut BTreeMap<String, String>, key, alias| -> Result<Option<u16>> {
+        let a = query.remove(key).map(|s| s.parse()).transpose()?;
+        let b = query.remove(alias).map(|s| s.parse()).transpose()?;
+        if a.is_some() && b.is_some() && a != b {
+            return Err(format!("Gecko 链接中的 {key} 与 {alias} 不一致").into());
+        }
+        Ok(a.or(b))
+    };
+    let min = size(&mut query, "minPacketSize", "min_packet_size")?;
+    let max = size(&mut query, "maxPacketSize", "max_packet_size")?;
+    let password = query.remove("obfs-password").unwrap_or_default();
+    let kind = match query.remove("obfs").as_deref() {
+        Some("none" | "plain") => None,
+        None | Some("") if min.is_some() || max.is_some() => Some(ObfsKind::Gecko),
+        None | Some("") => (!password.is_empty()).then_some(ObfsKind::Salamander),
+        Some(kind) => Some(serde_json::from_value(json!(kind))?),
+    };
+    if (min.is_some() || max.is_some()) && kind != Some(ObfsKind::Gecko) {
+        return Err("数据包大小需要使用 Gecko 混淆".into());
+    }
+    hysteria.obfs = kind.map(|kind| Obfs {
+        kind,
+        password,
+        min_packet_size: min,
+        max_packet_size: max,
+    });
+    if let Some(mask) = query.remove("fm") {
+        hysteria_mask(&mut hysteria, serde_json::from_str(&mask)?)?;
+    }
+    for (key, bandwidth) in [
+        ("up", &mut hysteria.quic.upload_bandwidth),
+        ("down", &mut hysteria.quic.download_bandwidth),
+    ] {
+        if let Some(value) = query.remove(key) {
+            bandwidth.get_or_insert(value);
+        }
+    }
     remaining(query.keys(), "链接参数")?;
     Ok(crate::hysteria::Client {
         name: percent_decode_str(url.fragment().unwrap_or_default())
@@ -270,17 +310,106 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
         port,
         password: credentials(&url)?,
         tls,
-        hysteria: crate::hysteria::ClientOptions {
-            obfs,
-            ports: if ports.contains([',', '-']) {
-                ports.to_owned()
-            } else {
-                String::new()
-            },
-            ..crate::hysteria::ClientOptions::default()
-        },
+        hysteria,
         ..crate::hysteria::Client::default()
     })
+}
+
+fn merge_ports(current: &mut String, ports: &str) -> Result<()> {
+    if current.is_empty() {
+        *current = ports.to_owned();
+    } else if current != ports
+        && crate::connection::ports(current)? != crate::connection::ports(ports)?
+    {
+        return Err("链接中的跳跃端口不一致".into());
+    }
+    Ok(())
+}
+
+fn hysteria_mask(
+    options: &mut crate::hysteria::ClientOptions,
+    mut mask: Map<String, Value>,
+) -> Result<()> {
+    use crate::hysteria::{Obfs, ObfsKind};
+
+    if let Some(params) = mask.remove("quicParams") {
+        options.quic = quic(serde_json::from_value(params)?)?;
+    }
+    if let Some(udp) = mask.remove("udp") {
+        let mut have_obfs = false;
+        let mut have_hop = false;
+        for mut item in serde_json::from_value::<Vec<Map<String, Value>>>(udp)? {
+            let mut settings: Map<String, Value> =
+                serde_json::from_value(item.remove("settings").unwrap_or(json!({})))?;
+            match item.remove("type").as_ref().and_then(Value::as_str) {
+                Some("salamander") if !have_obfs => {
+                    have_obfs = true;
+                    let mut obfs = Obfs {
+                        password: serde_json::from_value(
+                            settings.remove("password").ok_or("混淆参数缺少密码")?,
+                        )?,
+                        ..Default::default()
+                    };
+                    if let Some(size) = settings.remove("packetSize") {
+                        let size = range(size, "")?;
+                        let (min, max) = size.split_once('-').unwrap_or((&size, &size));
+                        let (min, max) = (min.parse::<u16>()?, max.parse::<u16>()?);
+                        if max > 0 {
+                            if min == 0 {
+                                return Err("Gecko FinalMask 的最小数据包大小必须大于零".into());
+                            }
+                            obfs.kind = ObfsKind::Gecko;
+                            obfs.min_packet_size = Some(min);
+                            obfs.max_packet_size = Some(max);
+                        }
+                    }
+                    if let Some(fields) = &options.obfs {
+                        let (min, max) = fields.packet_sizes();
+                        let sizes = obfs.packet_sizes();
+                        if fields.kind != obfs.kind
+                            || !fields.password.is_empty() && fields.password != obfs.password
+                            || fields.min_packet_size.is_some() && min != sizes.0
+                            || fields.max_packet_size.is_some() && max != sizes.1
+                        {
+                            return Err("链接与 FinalMask 中的 Hysteria 2 混淆参数不一致".into());
+                        }
+                    }
+                    options.obfs = Some(obfs);
+                }
+                Some("udphop")
+                    if !have_hop
+                        && settings
+                            .remove("mode")
+                            .as_ref()
+                            .and_then(Value::as_str)
+                            .is_some_and(|mode| mode.eq_ignore_ascii_case("intervalRemote")) =>
+                {
+                    have_hop = true;
+                    let ports: String = serde_json::from_value(
+                        settings.remove("remotePorts").ok_or("跳跃端口不能为空")?,
+                    )?;
+                    merge_ports(&mut options.ports, &ports)?;
+                    if let Some(value) = settings.remove("interval") {
+                        let seconds = range(value, "")?;
+                        let (min, max) = seconds.split_once('-').unwrap_or((&seconds, &seconds));
+                        let (min, max) = (min.parse::<u32>()?, max.parse::<u32>()?);
+                        options
+                            .hop_interval
+                            .get_or_insert_with(|| format!("{min}s"));
+                        if min != max {
+                            options
+                                .hop_interval_max
+                                .get_or_insert_with(|| format!("{max}s"));
+                        }
+                    }
+                }
+                _ => return Err("此 FinalMask 无法转换为 Hysteria 2 连接".into()),
+            }
+            remaining(settings.keys(), "Hysteria 2 FinalMask")?;
+            remaining(item.keys(), "Hysteria 2 FinalMask")?;
+        }
+    }
+    remaining(mask.keys(), "Hysteria 2 FinalMask")
 }
 
 pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {

@@ -6,12 +6,70 @@ use url::Url;
 use crate::{
     Result,
     config::Store,
-    hysteria::{Client, Masquerade, MasqueradeKind, Obfs, ObfsKind, Server},
+    hysteria::{Client, ClientOptions, Masquerade, MasqueradeKind, Obfs, ObfsKind, Server},
     inbound::Core,
     transport::{Congestion, Quic},
 };
 
 use super::{options::Options, path, single_headers, unsupported};
+
+fn obfs_mask(source: &Obfs) -> Value {
+    let mut settings = json!({"password": source.password});
+    if source.kind == ObfsKind::Gecko {
+        let (min, max) = source.packet_sizes();
+        settings["packetSize"] = json!(format!("{min}-{max}"));
+    }
+    json!({"type": "salamander", "settings": settings})
+}
+
+fn port_mask(ports: &str, interval: Option<(u64, u64)>) -> Value {
+    let mut settings = json!({"mode": "intervalRemote", "remotePorts": ports});
+    if let Some((min, max)) = interval {
+        settings["interval"] = json!(format!("{min}-{max}"));
+    }
+    json!({"type": "udphop", "settings": settings})
+}
+
+pub fn share_mask(value: &ClientOptions) -> Result<Map<String, Value>> {
+    let params = super::transport::quic_params(&value.quic, false, &mut Options::new(&value.quic)?);
+    let mut mask = Map::new();
+    if !params.is_empty() {
+        mask.insert("quicParams".to_owned(), json!(params));
+    }
+    if mask.is_empty()
+        && value.ports.is_empty()
+        && !value
+            .obfs
+            .as_ref()
+            .is_some_and(|o| o.kind == ObfsKind::Gecko)
+    {
+        return Ok(mask);
+    }
+    let mut udp: Vec<_> = value.obfs.iter().map(obfs_mask).collect();
+    if !value.ports.is_empty() {
+        let mut options = Options::new(value)?;
+        let min = options.seconds("hop_interval");
+        let max = options.seconds("hop_interval_max");
+        let interval = match (min, max) {
+            (None, None) => None,
+            (None, _) if value.hop_interval.is_some() => None,
+            (_, None) if value.hop_interval_max.is_some() => None,
+            _ => {
+                let min = min.unwrap_or(30);
+                let max = max.unwrap_or(min);
+                (5..=i32::MAX as u64)
+                    .contains(&min)
+                    .then_some((min, max))
+                    .filter(|(_, max)| (min..=i32::MAX as u64).contains(max))
+            }
+        };
+        udp.push(port_mask(&value.ports, interval));
+    }
+    if !udp.is_empty() {
+        mask.insert("udp".to_owned(), json!(udp));
+    }
+    Ok(mask)
+}
 
 pub fn client(source: &Client, core: Core) -> Result<Map<String, Value>> {
     let value = &source.hysteria;
@@ -88,14 +146,7 @@ pub fn client(source: &Client, core: Core) -> Result<Map<String, Value>> {
                         .or_insert(json!([]))
                         .as_array_mut()
                         .unwrap();
-                    masks.push(json!({
-                        "type": "udphop",
-                        "settings": {
-                            "mode": "intervalRemote",
-                            "remotePorts": value.ports,
-                            "interval": format!("{min}-{max}"),
-                        },
-                    }));
+                    masks.push(port_mask(&value.ports, Some((min, max))));
                 }
             }
         }
@@ -231,8 +282,6 @@ fn parameters(
             if core == Core::Xray {
                 options.take("min_packet_size");
                 options.take("max_packet_size");
-                let (min, max) = source.packet_sizes();
-                value.insert("packetSize".to_owned(), json!(format!("{min}-{max}")));
             } else {
                 options.copy(&mut value, &["min_packet_size", "max_packet_size"]);
             }
@@ -251,7 +300,7 @@ fn parameters(
             }
             Core::Xray => {
                 let mask = output.entry("finalmask").or_insert(json!({}));
-                mask["udp"] = json!([{"type": "salamander", "settings": value}]);
+                mask["udp"] = json!([obfs_mask(source)]);
             }
         }
     }

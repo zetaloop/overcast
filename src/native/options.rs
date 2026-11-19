@@ -22,6 +22,15 @@ impl Options {
         self.0.remove(name)
     }
 
+    pub fn seconds(&mut self, name: &str) -> Option<u64> {
+        let duration = humantime::parse_duration(self.0.get(name)?.as_str()?).ok()?;
+        if duration.subsec_nanos() != 0 {
+            return None;
+        }
+        self.take(name);
+        Some(duration.as_secs())
+    }
+
     pub fn copy(&mut self, output: &mut Map<String, Value>, names: &[&str]) {
         for &name in names {
             if let Some(value) = self.take(name) {
