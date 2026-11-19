@@ -72,9 +72,15 @@ struct Status {
 
 enum Event {
     Reload,
+    Restart,
     Stop,
     Exited(String, u64),
-    Maintained(Result<()>),
+    Maintained(Result<Option<crate::update::Installed>>),
+}
+
+enum Exit {
+    Stop,
+    Restart,
 }
 
 impl Deployment {
@@ -240,7 +246,9 @@ impl Unit {
     fn arguments(&self, check: bool) -> Vec<OsString> {
         let directory = self.config.parent().unwrap();
         match self.component {
-            Component::Usque => unreachable!("registration tool in deployment"),
+            Component::Usque | Component::Overcast => {
+                unreachable!("maintenance program in deployment")
+            }
             Component::Xray => {
                 let mut args = vec![
                     "run".into(),
@@ -428,6 +436,15 @@ fn switch(
     Ok(())
 }
 
+pub fn restart(store: &Store, id: Uuid, progress: &Progress) -> Result<()> {
+    let step = progress.activity("重启 Overcast 服务");
+    report(store, id, Some("启动新版 Overcast".to_owned()), None)?;
+    platform::restart()?;
+    wait(store, id, progress, &step)?;
+    step.finish("已启动");
+    Ok(())
+}
+
 fn wait(store: &Store, id: Uuid, progress: &Progress, step: &Step) -> Result<()> {
     let path = store.directory.join("status.json");
     let changed = progress.clone();
@@ -441,7 +458,7 @@ fn wait(store: &Store, id: Uuid, progress: &Progress, step: &Step) -> Result<()>
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        if status.id != id {
+        if status.id != id && !(status.id.is_nil() && status.error.is_some()) {
             return Ok(false);
         }
         if let Some(activity) = status.activity {
@@ -460,9 +477,16 @@ pub fn run(store: Store) -> Result<()> {
     #[cfg(unix)]
     {
         use nix::sys::signal::{SigSet, Signal};
+        use std::os::unix::process::CommandExt;
 
+        let program = std::env::current_exe()?;
         let mut signals = SigSet::empty();
-        for signal in [Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT] {
+        for signal in [
+            Signal::SIGHUP,
+            Signal::SIGUSR1,
+            Signal::SIGTERM,
+            Signal::SIGINT,
+        ] {
             signals.add(signal);
         }
         signals.thread_block()?;
@@ -471,18 +495,31 @@ pub fn run(store: Store) -> Result<()> {
         let (notify, cancel) = (sender.clone(), progress.clone());
         thread::spawn(move || {
             while let Ok(signal) = signals.wait() {
-                if signal != Signal::SIGHUP {
-                    cancel.cancel();
-                    let _ = notify.send(Event::Stop);
-                    return;
-                }
-                if notify.send(Event::Reload).is_err() {
+                let event = match signal {
+                    Signal::SIGHUP => Event::Reload,
+                    Signal::SIGUSR1 => Event::Restart,
+                    _ => {
+                        cancel.cancel();
+                        let _ = notify.send(Event::Stop);
+                        return;
+                    }
+                };
+                if notify.send(event).is_err() {
                     return;
                 }
                 cancel.notify();
             }
         });
-        finish(&store, orchestrate(&store, sender, events, &progress))
+        let result = match orchestrate(&store, sender, events, &progress) {
+            Ok(Exit::Restart) => Err(Command::new(program)
+                .arg("--run")
+                .arg(&store.directory)
+                .exec()
+                .into()),
+            Ok(Exit::Stop) => Ok(()),
+            Err(error) => Err(error),
+        };
+        finish(&store, result)
     }
     #[cfg(windows)]
     {
@@ -515,7 +552,7 @@ fn orchestrate(
     sender: Sender<Event>,
     events: Receiver<Event>,
     progress: &Progress,
-) -> Result<()> {
+) -> Result<Exit> {
     let mut orchestrator = Orchestrator {
         store,
         sender,
@@ -528,7 +565,7 @@ fn orchestrate(
     let mut delays: BTreeMap<String, Duration> = BTreeMap::new();
     let mut maintenance = None;
     let mut pending = true;
-    loop {
+    let exit = loop {
         if pending {
             pending = false;
             let target = Deployment::load(store)?;
@@ -561,7 +598,8 @@ fn orchestrate(
         };
         match event {
             Ok(Event::Reload) => pending = true,
-            Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+            Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => break Exit::Stop,
+            Ok(Event::Restart) => break Exit::Restart,
             Ok(Event::Exited(name, generation)) => {
                 if orchestrator
                     .running
@@ -587,11 +625,12 @@ fn orchestrate(
                     retries.insert(name, Instant::now() + delay);
                 }
             }
-            Ok(Event::Maintained(result)) => {
-                if let Err(error) = result {
-                    log(store, &format!("定时维护失败：{error}"));
-                }
+            Ok(Event::Maintained(Ok(Some(update)))) => {
+                log(store, &format!("Overcast 已更新至 {}", update.version));
+                break Exit::Restart;
             }
+            Ok(Event::Maintained(Ok(None))) => {}
+            Ok(Event::Maintained(Err(error))) => log(store, &format!("定时维护失败：{error}")),
             Err(RecvTimeoutError::Timeout) => {
                 let now = Instant::now();
                 let due: Vec<_> = retries
@@ -626,7 +665,7 @@ fn orchestrate(
                 }
             }
         }
-    }
+    };
     let names: Vec<_> = orchestrator
         .running
         .values()
@@ -642,7 +681,7 @@ fn orchestrate(
     for name in names {
         orchestrator.stop(&name);
     }
-    Ok(())
+    Ok(exit)
 }
 
 impl Orchestrator<'_> {

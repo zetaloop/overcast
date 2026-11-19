@@ -27,7 +27,7 @@ use windows_service::{
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST,
-        ERROR_SERVICE_NOT_ACTIVE, ERROR_SUCCESS,
+        ERROR_SERVICE_NOT_ACTIVE, ERROR_SUCCESS, ERROR_SUCCESS_RESTART_REQUIRED,
     },
     System::{
         Console::{
@@ -46,11 +46,12 @@ use windows_sys::Win32::{
     },
 };
 
-use super::{Event, orchestrate};
+use super::{Event, Exit, orchestrate};
 use crate::{Result, config::Store, progress::Progress};
 
 const NAME: &str = "overcast";
 const RELOAD: UserEventCode = unsafe { UserEventCode::from_unchecked(128) };
+const RESTART: UserEventCode = unsafe { UserEventCode::from_unchecked(129) };
 
 // Winsvcp.h service subscriptions are outside the SDK bindings.
 #[cfg_attr(
@@ -190,6 +191,12 @@ pub(super) fn reload() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn restart() -> Result<()> {
+    let service = open(ServiceAccess::USER_DEFINED_CONTROL)?.ok_or("Overcast 服务未注册")?;
+    service.notify(RESTART)?;
+    Ok(())
+}
+
 pub(super) fn remove() -> Result<()> {
     let Some(service) =
         open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)?
@@ -247,8 +254,12 @@ fn service(_: Vec<OsString>) {
             let _ = notify.send(Event::Stop);
             ServiceControlHandlerResult::NoError
         }
-        ServiceControl::UserEvent(code) if code == RELOAD => {
-            let _ = notify.send(Event::Reload);
+        ServiceControl::UserEvent(code) if code == RELOAD || code == RESTART => {
+            let _ = notify.send(if code == RELOAD {
+                Event::Reload
+            } else {
+                Event::Restart
+            });
             cancel.notify();
             ServiceControlHandlerResult::NoError
         }
@@ -259,20 +270,20 @@ fn service(_: Vec<OsString>) {
     };
     let result = contain().and_then(|_job| {
         report(&handle, ServiceState::Running, ServiceExitCode::Win32(0))?;
-        super::finish(store, orchestrate(store, sender, events, &progress))
+        orchestrate(store, sender, events, &progress)
     });
-    if let Err(error) = &result {
-        super::log(store, &error.to_string());
-    }
-    let _ = report(
-        &handle,
-        ServiceState::Stopped,
-        if result.is_ok() {
-            ServiceExitCode::Win32(0)
-        } else {
-            ServiceExitCode::ServiceSpecific(1)
+    let code = match result {
+        // SCM starts the installed image after this service releases its job.
+        Ok(Exit::Restart) => ServiceExitCode::Win32(ERROR_SUCCESS_RESTART_REQUIRED),
+        result => match super::finish(store, result.map(|_| ())) {
+            Ok(()) => ServiceExitCode::Win32(0),
+            Err(error) => {
+                super::log(store, &error.to_string());
+                ServiceExitCode::ServiceSpecific(1)
+            }
         },
-    );
+    };
+    let _ = report(&handle, ServiceState::Stopped, code);
 }
 
 // Cores share this console so CTRL_BREAK reaches their process groups, and the job ends them with the service.

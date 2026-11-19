@@ -49,6 +49,16 @@ pub(super) fn reload() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn restart() -> Result<()> {
+    execute(Command::new("systemctl").args([
+        "kill",
+        "--kill-whom=main",
+        "--signal=USR1",
+        "overcast.service",
+    ]))?;
+    Ok(())
+}
+
 pub(super) fn remove() -> Result<()> {
     if external()? {
         execute(Command::new("systemctl").args(["stop", "overcast.service"]))?;

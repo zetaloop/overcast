@@ -912,6 +912,7 @@ dependencies = [
  "prost",
  "regex-automata",
  "regex-syntax",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

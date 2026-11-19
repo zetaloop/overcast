@@ -60,7 +60,12 @@ impl Catalog {
             progress,
             &step,
         )?;
-        step.finish(&release.published_at);
+        step.finish(
+            release
+                .published_at
+                .as_deref()
+                .ok_or("规则数据版本尚未发布")?,
+        );
         let root = store.directory.join("geodata");
         let directory = root.join(release.id.to_string());
         store.create_dir(&directory)?;

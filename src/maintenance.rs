@@ -243,10 +243,10 @@ choices!(Day {
     Sunday: "sunday" => "周日",
 });
 
-pub fn update(store: &Store, progress: &Progress) -> Result<()> {
+pub fn update(store: &Store, progress: &Progress) -> Result<Option<crate::update::Installed>> {
     let config = store.load()?;
     let mut prepared = Resources::load(store)?;
-    component::update(store, &config, &mut prepared, progress)?;
+    let update = component::update(store, &config, &mut prepared, progress)?;
     if prepared.geodata.is_some() {
         prepared.geodata = Some(Catalog::update(store, progress)?.release);
     }
@@ -256,7 +256,10 @@ pub fn update(store: &Store, progress: &Progress) -> Result<()> {
             resources.geodata = Some(release);
         }
         Ok(())
-    })
+    })?;
+    update
+        .map(|update| update.install(store, progress))
+        .transpose()
 }
 
 pub fn rules(store: &Store, progress: &Progress) -> Result<()> {
@@ -267,7 +270,7 @@ pub fn rules(store: &Store, progress: &Progress) -> Result<()> {
     })
 }
 
-pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
+pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::Installed>> {
     let client = resource::client();
     let mut selected = 0;
     let mut notice = String::new();
@@ -294,10 +297,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
         let versions = items.len();
         items.extend(Component::ALL.iter().map(|component| {
             let mut item = Item::new(component.key(), component.name().stylized());
-            item.value = resources.components.get(component).map_or_else(
-                || "未安装".to_owned(),
-                |installed| installed.version.clone(),
-            );
+            item.value = component.version(&resources).unwrap_or("未安装").to_owned();
             item
         }));
         items[versions].gap = true;
@@ -309,7 +309,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             help: "方向键 选择\n回车键 确定\nEsc 返回",
         };
         match screen.select(&menu, &mut selected, &notice)? {
-            Action::Back => return Ok(()),
+            Action::Back => return Ok(None),
             Action::Select => {}
             _ => continue,
         }
@@ -320,22 +320,26 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             component::edit(screen, store, &client, *component)
         } else {
             match items[selected].key.as_str() {
-                "running" => screen.work(
-                    if config.running {
-                        "停止服务"
-                    } else {
-                        "启动服务"
-                    },
-                    "",
-                    |progress| {
-                        store.update(progress, |config, _| {
-                            config.running = !config.running;
-                            Ok(())
-                        })
-                    },
-                ),
-                "logs" => crate::service::logs(screen, store),
-                "rules" => screen.work("更新规则数据", "", |progress| rules(store, progress)),
+                "running" => screen
+                    .work(
+                        if config.running {
+                            "停止服务"
+                        } else {
+                            "启动服务"
+                        },
+                        "",
+                        |progress| {
+                            store.update(progress, |config, _| {
+                                config.running = !config.running;
+                                Ok(())
+                            })
+                        },
+                    )
+                    .map(|()| None),
+                "logs" => crate::service::logs(screen, store).map(|()| None),
+                "rules" => screen
+                    .work("更新规则数据", "", |progress| rules(store, progress))
+                    .map(|()| None),
                 "update" => screen.work("更新资源", "", |progress| update(store, progress)),
                 "schedule" => form::page(
                     screen,
@@ -349,12 +353,15 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
                             })
                         })
                     },
-                ),
-                _ => return Ok(()),
+                )
+                .map(|()| None),
+                _ => return Ok(None),
             }
         };
-        notice = result
-            .err()
-            .map_or_else(String::new, |error| error.to_string());
+        match result {
+            Ok(Some(update)) => return Ok(Some(update)),
+            Ok(None) => notice.clear(),
+            Err(error) => notice = error.to_string(),
+        }
     }
 }

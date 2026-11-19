@@ -34,6 +34,7 @@ mod target;
 mod transport;
 mod trojan;
 pub mod tui;
+mod update;
 mod user;
 mod vless;
 mod vmess;
@@ -48,6 +49,8 @@ use tui::{Action, Item, Menu, Screen};
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 fn run() -> Result<()> {
+    #[cfg(windows)]
+    update::cleanup()?;
     let mut args = std::env::args().skip(1).peekable();
     match args.peek().map(String::as_str) {
         Some("--run") => {
@@ -56,10 +59,12 @@ fn run() -> Result<()> {
         }
         Some("--update") => {
             args.next();
-            return maintenance::update(
-                &Store::open(args.next().map(Into::into))?,
-                &progress::Progress::default(),
-            );
+            let store = Store::open(args.next().map(Into::into))?;
+            let progress = progress::Progress::default();
+            if let Some(update) = maintenance::update(&store, &progress)? {
+                println!("Overcast 已更新至 {}", update.activate(&store, &progress)?);
+            }
+            return Ok(());
         }
         _ => {}
     }
@@ -98,7 +103,17 @@ fn run() -> Result<()> {
             1 => outbound::run(&mut screen, &store),
             2 => user::run(&mut screen, &store),
             3 => route::run(&mut screen, &store),
-            4 => maintenance::run(&mut screen, &store),
+            4 => match maintenance::run(&mut screen, &store) {
+                Ok(Some(update)) => {
+                    let version = screen.work("应用更新", "", |progress| {
+                        update.activate(&store, progress)
+                    });
+                    drop(screen);
+                    println!("Overcast 已更新至 {}", version?);
+                    return Ok(());
+                }
+                result => result.map(|_| ()),
+            },
             5 => screen.about(),
             _ => break,
         };

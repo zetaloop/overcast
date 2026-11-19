@@ -56,6 +56,11 @@ pub(super) fn reload() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn restart() -> Result<()> {
+    execute(Command::new("launchctl").args(["kill", "SIGUSR1", TARGET]))?;
+    Ok(())
+}
+
 pub(super) fn remove() -> Result<()> {
     unload()?;
     match fs::remove_file(PLIST) {

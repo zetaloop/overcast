@@ -124,7 +124,9 @@ impl Startup {
                         .collect(),
                 }
             }
-            Component::Usque => unreachable!("registration tool in deployment"),
+            Component::Usque | Component::Overcast => {
+                unreachable!("maintenance program in deployment")
+            }
         };
         Ok(Self {
             signal,

@@ -47,7 +47,7 @@ pub struct Release {
     pub id: u64,
     pub tag_name: String,
     pub draft: bool,
-    pub published_at: String,
+    pub published_at: Option<String>,
     pub assets: Vec<Asset>,
 }
 
@@ -56,8 +56,32 @@ pub struct Asset {
     pub id: u64,
     pub name: String,
     pub size: u64,
+    pub digest: Option<String>,
     pub updated_at: String,
     pub browser_download_url: String,
+}
+
+impl Asset {
+    pub fn download(&self, client: &Agent, file: &mut File, progress: &Progress) -> Result<()> {
+        let step = progress.start("下载程序", self.size, "字节");
+        retry(progress, &step, || {
+            step.set(0);
+            step.detail(&self.name);
+            file.set_len(0)?;
+            file.rewind()?;
+            let mut response = request(client, &self.browser_download_url)?;
+            copy(&mut response.body_mut().as_reader(), file, progress, &step)?;
+            if file.stream_position()? != self.size {
+                return Err(
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "下载大小与发布文件不符").into(),
+                );
+            }
+            file.rewind()?;
+            Ok(())
+        })?;
+        step.finish(&self.name);
+        Ok(())
+    }
 }
 
 pub fn client() -> Agent {
