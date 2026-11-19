@@ -246,14 +246,10 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             if value.vless.flow == crate::vless::Flow::Vision {
                 query.insert("flow".to_owned(), json!("xtls-rprx-vision"));
             }
-            if let Some(value) = value
-                .vless
-                .encryption
-                .as_ref()
-                .filter(|value| value.as_str() != "none")
-            {
-                query.insert("encryption".to_owned(), json!(value));
-            }
+            query.insert(
+                "encryption".to_owned(),
+                json!(value.vless.encryption.as_deref().unwrap_or("none")),
+            );
             tls(&value.security, &mut query, store)?;
             transport(&value.transport, &value.security, &mut query, store)?;
             (
