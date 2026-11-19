@@ -62,15 +62,29 @@ impl Binding {
         let socket = &source.listen.socket;
         let namespace = Namespace::new(socket.namespace.as_deref())?;
         let text = &source.listen.address;
-        let Value::Object(mut settings) = serde_json::to_value(socket)? else {
-            unreachable!()
+        let mut settings = if source.core == Core::SingBox {
+            super::singbox::socket(&crate::inbound::Socket {
+                namespace: None,
+                ipv6_only: None,
+                interface: if cfg!(any(target_os = "linux", target_os = "android")) {
+                    None
+                } else {
+                    socket.interface.clone()
+                },
+                ..socket.clone()
+            })?
+        } else {
+            let Value::Object(mut settings) = serde_json::to_value(socket)? else {
+                unreachable!()
+            };
+            for name in ["namespace", "ipv6_only"] {
+                settings.remove(name);
+            }
+            if cfg!(any(target_os = "linux", target_os = "android")) {
+                settings.remove("interface");
+            }
+            settings
         };
-        for name in ["namespace", "ipv6_only"] {
-            settings.remove(name);
-        }
-        if cfg!(any(target_os = "linux", target_os = "android")) {
-            settings.remove("interface");
-        }
         let mut zone = None;
         let mut interface = None;
         let mut address = if let Some(name) = text.strip_prefix('@') {

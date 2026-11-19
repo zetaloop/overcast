@@ -395,6 +395,51 @@ pub fn outbound(
     Ok(output)
 }
 
+pub(super) fn socket(source: &inbound::Socket) -> Result<Map<String, Value>> {
+    let mut output = Map::new();
+    let mut options = Options::new(source)?;
+    options.rename(
+        &mut output,
+        &[
+            ("interface", "bind_interface"),
+            ("reuse_address", "reuse_addr"),
+            ("namespace", "netns"),
+        ],
+    );
+    options.copy(
+        &mut output,
+        &["routing_mark", "tcp_multi_path", "udp_fragment"],
+    );
+    options.invert(&mut output, "tcp_keep_alive", "disable_tcp_keep_alive");
+    options.durations(
+        &mut output,
+        &[
+            ("tcp_keep_alive_idle", "tcp_keep_alive"),
+            ("tcp_keep_alive_interval", "tcp_keep_alive_interval"),
+            ("udp_timeout", "udp_timeout"),
+        ],
+        None,
+    )?;
+    if let Some(FastOpen::Enabled(value)) = source.tcp_fast_open {
+        options.take("tcp_fast_open");
+        output.insert("tcp_fast_open".to_owned(), json!(value));
+    }
+    options.finish("sing-box 监听")?;
+    // udp_fragment is a *bool; the other boolean listen options have a false zero value.
+    output.retain(|key, value| match key.as_str() {
+        "tcp_fast_open" | "tcp_multi_path" | "reuse_addr" | "disable_tcp_keep_alive" => {
+            value != false
+        }
+        "routing_mark" => value != 0,
+        "tcp_keep_alive" | "tcp_keep_alive_interval" => {
+            source.tcp_keep_alive != Some(false) && value != "0ns"
+        }
+        "udp_timeout" => value != "0ns",
+        _ => true,
+    });
+    Ok(output)
+}
+
 pub fn listeners(
     source: &Inbound,
     users: &[(String, Credential)],
@@ -445,39 +490,7 @@ pub fn listeners(
             ),
         ),
     ]);
-    let mut options = Options::new(&source.listen.socket)?;
-    options.rename(
-        &mut output,
-        &[
-            ("interface", "bind_interface"),
-            ("reuse_address", "reuse_addr"),
-            ("namespace", "netns"),
-        ],
-    );
-    options.copy(
-        &mut output,
-        &["routing_mark", "tcp_multi_path", "udp_fragment"],
-    );
-    options.invert(&mut output, "tcp_keep_alive", "disable_tcp_keep_alive");
-    options.durations(
-        &mut output,
-        &[
-            ("tcp_keep_alive_idle", "tcp_keep_alive"),
-            ("tcp_keep_alive_interval", "tcp_keep_alive_interval"),
-            ("udp_timeout", "udp_timeout"),
-        ],
-        None,
-    )?;
-    if let Some(value) = &source.listen.socket.tcp_fast_open {
-        match value {
-            FastOpen::Enabled(value) => {
-                output.insert("tcp_fast_open".to_owned(), json!(value));
-                options.take("tcp_fast_open");
-            }
-            FastOpen::Queue(_) => {}
-        }
-    }
-    options.finish("sing-box 监听")?;
+    output.extend(socket(&source.listen.socket)?);
     if let Protocol::AnyTls(value) = &source.protocol {
         let mut options = Options::new(value)?;
         options.copy(&mut output, &["padding_scheme"]);
