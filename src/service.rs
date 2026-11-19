@@ -101,6 +101,14 @@ impl Deployment {
         if self.config.runtime()? != config.runtime()? || self.geodata != resources.geodata {
             return Ok(None);
         }
+        if !self.config.keys.iter().all(|(id, used)| {
+            config
+                .keys
+                .get(id)
+                .is_some_and(|cached| used.with_cache(cached) == *cached)
+        }) {
+            return Ok(None);
+        }
         for unit in &self.units {
             let Some(installed) = resources.components.get(&unit.component) else {
                 return Ok(None);
@@ -111,7 +119,10 @@ impl Deployment {
         }
         Ok(Some(Self {
             id: Uuid::new_v4(),
-            config: config.clone(),
+            config: Config {
+                keys: self.config.keys.clone(),
+                ..config.clone()
+            },
             ..self.clone()
         }))
     }
@@ -127,7 +138,10 @@ impl Deployment {
     ) -> Result<Self> {
         let mut deployment = Self {
             id: Uuid::new_v4(),
-            config: config.clone(),
+            config: Config {
+                keys: prepared.map(|p| p.keys.clone()).unwrap_or_default(),
+                ..config.clone()
+            },
             geodata: resources.geodata,
             coverage,
             ..Self::default()

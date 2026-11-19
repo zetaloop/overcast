@@ -607,6 +607,19 @@ fn edit(
     let mut protocols = BTreeMap::new();
     let saved = serde_json::to_vec(&inbound)?;
     let initial = serde_json::to_vec(&inbound.effective())?;
+    let deployed = if existing {
+        Some(crate::service::Deployment::load(store)?)
+    } else {
+        None
+    };
+    let handshake = deployed.as_ref().and_then(|deployment| {
+        let source = deployment
+            .config
+            .inbounds
+            .iter()
+            .find(|source| source.uuid == inbound.uuid)?;
+        Some((source, deployment.config.keys.get(&inbound.uuid)?))
+    });
     let mut selected = 0;
     let mut opening = !existing;
     let mut notice = String::new();
@@ -696,7 +709,7 @@ fn edit(
         if !changed && inbound.listen.enabled {
             items.push(Item::new("export", "连接资料".stylized()));
         }
-        if !changed && crate::keys::Keys::needed(&inbound) {
+        if !changed && handshake.is_some() {
             items.push(Item::new("handshake", "握手资料".stylized()));
         }
         items.push(if existing && changed {
@@ -868,38 +881,10 @@ fn edit(
                         })
                 }
                 "listen" => edit!(listen),
-                "handshake" => store.load().and_then(|config| {
-                    let source = config
-                        .inbounds
-                        .iter()
-                        .find(|source| source.uuid == inbound.uuid)
-                        .ok_or("入站已被删除")?;
-                    let keys = crate::keys::Keys::resolve(source, config.keys.get(&inbound.uuid))?;
-                    let keys = if config.keys.get(&inbound.uuid) == Some(&keys) {
-                        keys
-                    } else {
-                        screen.work(
-                            "生成握手资料",
-                            &format!(" -- {}", inbound.name),
-                            |progress| {
-                                store.update(progress, |config, _| {
-                                    let source = config
-                                        .inbounds
-                                        .iter()
-                                        .find(|source| source.uuid == inbound.uuid)
-                                        .ok_or("入站已被删除")?;
-                                    let keys = crate::keys::Keys::resolve(
-                                        source,
-                                        config.keys.get(&inbound.uuid),
-                                    )?;
-                                    config.keys.insert(inbound.uuid, keys.clone());
-                                    Ok(keys)
-                                })
-                            },
-                        )?
-                    };
+                "handshake" => {
+                    let (source, keys) = handshake.expect("missing deployed material");
                     keys.show(source, screen)
-                }),
+                }
                 "create" | "apply" => {
                     let result = screen.work("保存入站", &inbound.name, |progress| {
                         store.update(progress, |config, _| {

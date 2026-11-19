@@ -132,7 +132,7 @@ pub fn prepare(
         let mut source = sources[0].clone();
         source.password = passwords.into_iter().next();
         let previous = group.entries.iter().find_map(|entry| {
-            keys.get(&graph.entries[*entry].inbound.uuid)
+            graph.config().keys.get(&graph.entries[*entry].inbound.uuid)
                 .and_then(|keys| keys.shadowsocks.as_ref())
         });
         let material = Keys::resolve(&source, previous)?;

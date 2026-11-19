@@ -19,37 +19,28 @@ pub struct Keys {
 }
 
 impl Keys {
-    pub fn needed(source: &Inbound) -> bool {
-        source.security.reality().is_some()
-            || matches!(&source.protocol, Protocol::Vless(value) if value.encryption.is_some())
-            || crate::native::shadowsocks::shared(source, usize::from(source.credentials.is_some()))
-    }
-
-    pub fn resolve(source: &Inbound, previous: Option<&Self>) -> Result<Self> {
-        let mut keys = previous.cloned().unwrap_or_default();
-        if let Some(reality) = source.security.reality() {
-            keys.reality = Some(crate::reality::Keys::resolve(
-                reality,
-                keys.reality.as_ref(),
-            )?);
-        }
-        if let Protocol::Vless(value) = &source.protocol
-            && let Some(encryption) = &value.encryption
+    pub fn with_cache(&self, cached: &Self) -> Self {
+        let mut reality = self.reality.as_ref().or(cached.reality.as_ref()).cloned();
+        if let Some(keys) = &mut reality
+            && keys.signature_seed.is_none()
+            && let Some(previous) = &cached.reality
         {
-            keys.encryption = Some(crate::encryption::Keys::resolve(
-                encryption,
-                keys.encryption.as_ref(),
-            )?);
+            keys.signature_seed.clone_from(&previous.signature_seed);
+            keys.signature_key.clone_from(&previous.signature_key);
         }
-        if crate::native::shadowsocks::shared(source, usize::from(source.credentials.is_some()))
-            && let Protocol::Shadowsocks(value) = &source.protocol
-        {
-            keys.shadowsocks = Some(crate::shadowsocks::Keys::resolve(
-                value,
-                keys.shadowsocks.as_ref(),
-            )?);
+        Self {
+            reality,
+            encryption: self
+                .encryption
+                .as_ref()
+                .or(cached.encryption.as_ref())
+                .cloned(),
+            shadowsocks: self
+                .shadowsocks
+                .as_ref()
+                .or(cached.shadowsocks.as_ref())
+                .cloned(),
         }
-        Ok(keys)
     }
 
     pub fn apply(&self, source: &mut Inbound) {
@@ -73,14 +64,10 @@ impl Keys {
 
     pub fn show(&self, source: &Inbound, screen: &mut Screen) -> Result<()> {
         let mut values = Vec::new();
-        if matches!(&source.protocol, Protocol::Shadowsocks(value) if value.cipher.identity_key(source.core))
-            && let Some(keys) = &self.shadowsocks
-        {
+        if let Some(keys) = &self.shadowsocks {
             values.push(("password", "入口共享密钥", keys.password.clone()));
         }
-        if source.security.reality().is_some()
-            && let Some(keys) = &self.reality
-        {
+        if let Some(keys) = &self.reality {
             values.extend(keys.values());
         }
         if let Protocol::Vless(value) = &source.protocol

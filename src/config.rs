@@ -130,7 +130,7 @@ impl Config {
     pub(crate) fn runtime(&self) -> Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
         let fields = value.as_object_mut().unwrap();
-        for field in ["components", "maintenance", "running"] {
+        for field in ["components", "maintenance", "running", "keys"] {
             fields.remove(field);
         }
         for field in ["users", "inbounds", "outbounds"] {
@@ -295,9 +295,6 @@ impl Store {
                 &previous.ports,
                 progress,
             )?;
-            if let Some(prepared) = &prepared {
-                config.keys = prepared.keys.clone();
-            }
             let target = service::Deployment::prepare(
                 self,
                 &config,
@@ -307,6 +304,10 @@ impl Store {
                 &previous,
                 progress,
             )?;
+            for (&uuid, used) in &target.config.keys {
+                let cached = config.keys.entry(uuid).or_default();
+                *cached = used.with_cache(cached);
+            }
             Ok((result, prepared, target))
         })();
         resources.save(self)?;

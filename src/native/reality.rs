@@ -67,24 +67,16 @@ pub fn prepare(
         source.short_ids = short_ids.into_iter().next().unwrap_or_default();
         source.signature_seed = seeds.into_iter().next();
         let cached = group.entries.iter().find_map(|entry| {
-            keys.get(&graph.entries[*entry].inbound.uuid)
+            graph
+                .config()
+                .keys
+                .get(&graph.entries[*entry].inbound.uuid)
                 .and_then(|keys| keys.reality.as_ref())
         });
         let material = Keys::resolve(&source, cached)?;
         for entry in group.entries {
             let uuid = graph.entries[entry].inbound.uuid;
-            let mut material = material.clone();
-            if !source.signature {
-                material.signature_seed = keys
-                    .get(&uuid)
-                    .and_then(|keys| keys.reality.as_ref())
-                    .and_then(|keys| keys.signature_seed.clone());
-                material.signature_key = keys
-                    .get(&uuid)
-                    .and_then(|keys| keys.reality.as_ref())
-                    .and_then(|keys| keys.signature_key.clone());
-            }
-            keys.entry(uuid).or_default().reality = Some(material);
+            keys.entry(uuid).or_default().reality = Some(material.clone());
         }
     }
     Ok(())

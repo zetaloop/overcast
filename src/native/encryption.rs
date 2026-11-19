@@ -62,7 +62,10 @@ pub fn prepare(
         source.private_keys = private.into_iter().next().unwrap_or_default();
         source.authentication = authentication.into_iter().next();
         let previous = group.entries.iter().find_map(|entry| {
-            keys.get(&graph.entries[*entry].inbound.uuid)
+            graph
+                .config()
+                .keys
+                .get(&graph.entries[*entry].inbound.uuid)
                 .and_then(|keys| keys.encryption.as_ref())
         });
         let material = Keys::resolve(&source, previous)?;

@@ -99,10 +99,12 @@ impl Keys {
         for value in &short_ids {
             short_id(value)?;
         }
-        let mut signature_seed = previous.and_then(|keys| keys.signature_seed.clone());
-        let mut signature_key = previous.and_then(|keys| keys.signature_key.clone());
-        if source.signature {
-            let seed = match source.signature_seed.as_ref().or(signature_seed.as_ref()) {
+        let (signature_seed, signature_key) = if source.signature {
+            let seed = match source
+                .signature_seed
+                .as_ref()
+                .or_else(|| previous.and_then(|keys| keys.signature_seed.as_ref()))
+            {
                 Some(value) => value.clone(),
                 None => URL_SAFE_NO_PAD.encode(random::<32>()?),
             };
@@ -111,9 +113,10 @@ impl Keys {
             }
             let signing = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&key(&seed)?.into());
             let verifying: &ml_dsa::VerifyingKey<ml_dsa::MlDsa65> = signing.as_ref();
-            signature_key = Some(URL_SAFE_NO_PAD.encode(verifying.encode()));
-            signature_seed = Some(seed);
-        }
+            (Some(seed), Some(URL_SAFE_NO_PAD.encode(verifying.encode())))
+        } else {
+            (None, None)
+        };
         Ok(Self {
             private_key,
             public_key,

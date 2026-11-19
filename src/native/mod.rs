@@ -309,7 +309,7 @@ pub fn prepare(
         }
         current += 1;
     }
-    let mut keys = config.keys.clone();
+    let mut keys = BTreeMap::new();
     reality::prepare(&listeners, &graph, &mut keys, progress)?;
     encryption::prepare(&listeners, &graph, &mut keys, progress)?;
     shadowsocks::prepare(&listeners, &graph, &mut keys, progress)?;
