@@ -7,7 +7,7 @@ use base64::{
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Map, Value, json};
 use termina::style::StyleExt;
-use url::{Host, Url};
+use url::Host;
 
 use crate::{
     Result,
@@ -58,17 +58,12 @@ pub fn copy(
 }
 
 pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<String> {
-    let mut values = Vec::new();
-    for connection in connections {
-        if let Connection::Direct(value) = connection {
-            Options::new(&value.network)?.finish("分享链接")?;
-        } else {
-            values.push(connection.clone());
-        }
-    }
-    let mut inner = values.pop().ok_or("直连没有远端分享链接")?;
-    while let Some(outer) = values.pop() {
-        Options::new(outer.network())?.finish("分享链接")?;
+    let mut values = connections
+        .iter()
+        .rev()
+        .filter(|c| !matches!(c, Connection::Direct(_)));
+    let mut inner = values.next().ok_or("直连没有远端分享链接")?.clone();
+    for outer in values {
         let Connection::Forward(value) = outer else {
             return Err("多段代理连接使用连接路径 JSON 分享".into());
         };
@@ -114,9 +109,10 @@ pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<Str
                 return Err("WARP 连接使用连接路径 JSON 分享".into());
             }
             Connection::Hysteria2(value) => {
-                if !value.hysteria.ports.is_empty() {
-                    return Err("多段跳跃端口连接使用连接路径 JSON 分享".into());
-                }
+                // The forwarded client dials the outer port, not the backend's hopping ports.
+                value.hysteria.ports.clear();
+                value.hysteria.hop_interval = None;
+                value.hysteria.hop_interval_max = None;
                 (&mut value.port, None, None)
             }
             Connection::AnyTls(value) => (&mut value.port, Some(&mut value.security), None),
@@ -133,13 +129,13 @@ pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<Str
         if let Some(security) = security
             && !matches!(value.security, Security::None)
         {
-            *security = value.security;
+            *security = value.security.clone();
         }
         if !value.transport.is_default() {
             let Some(transport) = transport.filter(|transport| transport.is_default()) else {
                 return Err("嵌套传输连接使用连接路径 JSON 分享".into());
             };
-            *transport = value.transport;
+            *transport = value.transport.clone();
         }
         *port = value.port;
     }
@@ -160,26 +156,41 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             return Err("此连接使用连接路径 JSON 分享".into());
         }
         Connection::Http(value) => {
-            if !value.transport.is_default()
-                || !matches!(value.http.version, HttpVersion::Auto | HttpVersion::Http1)
-            {
-                return Err("HTTP 分享链接使用标准 HTTP/HTTPS 代理连接".into());
-            }
-            match &value.security {
-                Security::None => {}
-                Security::Tls(tls) => {
-                    let mut tls = tls.clone();
-                    if tls.server_name.as_deref() == Some(value.proxy.server.as_str()) {
-                        tls.server_name = None;
+            tls(&value.security, &mut query, store)?;
+            transport(&value.transport, &value.security, &mut query, store)?;
+            if matches!(value.security, Security::Tls(_)) {
+                query.remove("security");
+                if value.http.fixed_version && !query.contains_key("alpn") {
+                    let alpn = match value.http.version {
+                        HttpVersion::Auto => None,
+                        HttpVersion::Http1 => Some("http/1.1"),
+                        HttpVersion::Http2 => Some("h2"),
+                        HttpVersion::Http3 => Some("h3"),
+                    };
+                    if let Some(alpn) = alpn {
+                        query.insert("alpn".to_owned(), json!(alpn));
                     }
-                    Options::new(&tls)?.finish("HTTP 分享链接")?;
-                }
-                Security::Reality(_) => {
-                    return Err("HTTP 分享链接使用标准 HTTP/HTTPS 代理连接".into());
                 }
             }
-            if !value.http.headers.is_empty() {
-                return Err("HTTP 代理分享链接没有自定义请求头字段".into());
+            if let Some(path) = &value.http.path {
+                query.entry("path").or_insert(json!(path));
+            }
+            let headers: Vec<_> = value
+                .http
+                .headers
+                .iter()
+                .flat_map(|(key, values)| {
+                    values
+                        .iter()
+                        .filter(|v| !v.contains(',') && !key.contains(','))
+                        .flat_map(|value| [key.as_str(), value.as_str()])
+                })
+                .collect();
+            if !headers.is_empty() {
+                query.insert("headers".to_owned(), json!(headers.join(",")));
+            }
+            if let Some(insecure) = query.remove("allowInsecure") {
+                query.insert("insecure".to_owned(), insecure);
             }
             let user = credentials(
                 value.proxy.username.as_deref(),
@@ -195,10 +206,16 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Socks(value) => {
-            if !matches!(value.security, Security::None) || !value.transport.is_default() {
-                return Err("SOCKS 分享链接使用原生 SOCKS 连接".into());
+            tls(&value.security, &mut query, store)?;
+            transport(&value.transport, &value.security, &mut query, store)?;
+            let socks_tls = value.socks.version == SocksVersion::V5
+                && matches!(value.security, Security::Tls(_));
+            if socks_tls {
+                query.remove("security");
             }
+            uot(&mut query, value.socks.udp_over_tcp)?;
             let user = if value.socks.version == SocksVersion::V5
+                && !socks_tls
                 && (value.proxy.username.is_some() || value.proxy.password.is_some())
             {
                 format!(
@@ -219,6 +236,7 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
                 match value.socks.version {
                     SocksVersion::V4 => "socks4",
                     SocksVersion::V4a => "socks4a",
+                    SocksVersion::V5 if socks_tls => "socks5+tls",
                     SocksVersion::V5 => "socks",
                 },
                 user,
@@ -246,26 +264,28 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
         Connection::Vmess(value) => {
             tls(&value.security, &mut query, store)?;
             transport(&value.transport, &value.security, &mut query, store)?;
-            if query.keys().all(|key| {
-                matches!(
-                    key.as_str(),
-                    "type"
-                        | "host"
-                        | "path"
-                        | "headerType"
-                        | "seed"
-                        | "serviceName"
-                        | "authority"
-                        | "mode"
-                        | "security"
-                        | "sni"
-                        | "alpn"
-                        | "fp"
-                        | "allowInsecure"
-                        | "vcn"
-                        | "pcs"
-                )
-            }) {
+            if value.vmess.alter_id.is_some_and(|id| id != 0)
+                || query.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "type"
+                            | "host"
+                            | "path"
+                            | "headerType"
+                            | "seed"
+                            | "serviceName"
+                            | "authority"
+                            | "mode"
+                            | "security"
+                            | "sni"
+                            | "alpn"
+                            | "fp"
+                            | "allowInsecure"
+                            | "vcn"
+                            | "pcs"
+                    )
+                })
+            {
                 let network = query.remove("type").unwrap_or(json!("tcp"));
                 let header = if network == "grpc" || network == "xhttp" {
                     query.remove("mode")
@@ -311,9 +331,6 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
                     STANDARD.encode(serde_json::to_vec(&values)?)
                 ));
             }
-            if value.vmess.alter_id.is_some_and(|value| value != 0) {
-                return Err("此传输参数使用 VMess AEAD 分享链接".into());
-            }
             if value.vmess.cipher != crate::vmess::Cipher::Auto {
                 query.insert("encryption".to_owned(), json!(value.vmess.cipher));
             }
@@ -340,17 +357,14 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::AnyTls(value) => {
-            let mut options = Options::new(&value.anytls)?;
-            if value.anytls.tcp == Some(true) {
-                options.take("tcp");
-            }
-            if value.anytls.udp == Some(true) {
-                options.take("udp");
-            }
-            if value.anytls.reuse == Some(true) {
-                options.take("reuse");
-            }
-            options.finish("AnyTLS 分享链接")?;
+            Options::new(&value.anytls)?.copy(
+                &mut query,
+                &[
+                    "idle_session_check_interval",
+                    "idle_session_timeout",
+                    "min_idle_session",
+                ],
+            );
             match value.security {
                 Security::None => return Err("AnyTLS 分享链接使用 TLS".into()),
                 Security::Tls(_) => {
@@ -403,9 +417,9 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Shadowsocks(value) => {
-            if !matches!(value.security, Security::None) || !value.transport.is_default() {
-                return Err("Shadowsocks 分享链接通过 SIP003 插件描述传输封装".into());
-            }
+            tls(&value.security, &mut query, store)?;
+            transport(&value.transport, &value.security, &mut query, store)?;
+            uot(&mut query, value.shadowsocks.udp_over_tcp)?;
             let cipher = serde_json::to_value(value.shadowsocks.cipher)?;
             let cipher = cipher.as_str().unwrap();
             let password = value.shadowsocks.cipher.password(&value.password)?;
@@ -430,26 +444,18 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             ("ss", user)
         }
     };
-    let mut url = Url::parse(&format!(
-        "{scheme}://{user}{}",
-        connection::address(&server, port)
-    ))?;
-    if let Connection::Http(value) = source
-        && let Some(path) = &value.http.path
-    {
-        url.set_path(path);
-    }
-    let mut value = if let Connection::Hysteria2(source) = source
+    let address = if let Connection::Hysteria2(source) = source
         && !source.hysteria.ports.is_empty()
     {
         crate::connection::ports(&source.hysteria.ports)?;
-        format!(
-            "{scheme}://{user}{}",
-            connection::address(&server, &source.hysteria.ports)
-        )
+        connection::address(&server, &source.hysteria.ports)
     } else {
-        url.to_string()
+        connection::address(&server, port)
     };
+    let mut value = format!("{scheme}://{user}{address}");
+    if matches!(scheme, "http" | "https") {
+        value.push('/');
+    }
     if !query.is_empty() {
         if scheme == "ss" && !value.ends_with('/') {
             value.push('/');
@@ -479,6 +485,17 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
     Ok(value)
 }
 
+fn uot(query: &mut Map<String, Value>, version: Option<u8>) -> Result<()> {
+    let field = match version {
+        None => return Ok(()),
+        Some(0 | 2) => "uot",
+        Some(1) => "udp-over-tcp",
+        Some(_) => return Err("UDP over TCP 使用版本 1 或 2".into()),
+    };
+    query.insert(field.to_owned(), json!(true));
+    Ok(())
+}
+
 fn credentials(username: Option<&str>, password: Option<&str>) -> String {
     if username.is_none() && password.is_none() {
         return String::new();
@@ -503,48 +520,50 @@ fn tls(security: &Security, query: &mut Map<String, Value>, store: &Store) -> Re
         json!(if reality.is_some() { "reality" } else { "tls" }),
     );
     let mut options = Options::new(source)?;
-    for name in [
-        "ech",
-        "key_log",
-        "handshake_timeout",
-        "session_resumption",
-        "kernel_tx",
-        "kernel_rx",
+    options.rename(
+        query,
+        &[
+            ("server_name", "sni"),
+            ("fingerprint", "fp"),
+            ("min_version", "tls_min_version"),
+            ("max_version", "tls_max_version"),
+            ("fragment", "tls_fragment"),
+            ("fragment_delay", "tls_fragment_fallback_delay"),
+            ("record_fragment", "tls_record_fragment"),
+            ("client_certificate", "tls_client_certificate"),
+            ("client_key", "tls_client_key"),
+        ],
+    );
+    for (destination, separator, values) in [
+        ("alpn", ",", &source.alpn),
+        ("vcn", ",", &source.verify_names),
+        ("cs", ":", &source.cipher_suites),
+        ("tls_curve_preferences", ",", &source.curves),
+        ("tls_certificate", ",", &source.certificates),
+        (
+            "tls_certificate_public_key_sha256",
+            ",",
+            &source.public_key_sha256,
+        ),
     ] {
-        options.take(name);
-    }
-    options.rename(query, &[("server_name", "sni"), ("fingerprint", "fp")]);
-    for (name, destination, values) in [
-        ("alpn", "alpn", &source.alpn),
-        ("verify_names", "vcn", &source.verify_names),
-    ] {
-        options.take(name);
         if !values.is_empty() {
-            query.insert(destination.to_owned(), json!(values.join(",")));
+            query.insert(destination.to_owned(), json!(values.join(separator)));
         }
     }
-    options.take("certificate_sha256");
     if !source.certificate_sha256.is_empty() {
         query.insert(
             "pcs".to_owned(),
             json!(crate::native::hex_hashes(&source.certificate_sha256)?.join(",")),
         );
     }
-    options.take("verify_certificate");
     if source.verify_certificate == Some(false) {
         query.insert("allowInsecure".to_owned(), json!(1));
     }
-    if source.send_sni == Some(true) {
-        options.take("send_sni");
+    if source.send_sni == Some(false) {
+        query.insert("disable_sni".to_owned(), json!(true));
     }
-    if source.system_roots == Some(true) {
-        options.take("system_roots");
-    }
-    options.finish("TLS 分享链接")?;
     if let Some(reality) = reality {
         let mut options = Options::new(reality)?;
-        options.take("tls");
-        options.take("debug");
         options.rename(
             query,
             &[
@@ -554,7 +573,6 @@ fn tls(security: &Security, query: &mut Map<String, Value>, store: &Store) -> Re
                 ("signature_key", "pqv"),
             ],
         );
-        options.finish("REALITY 分享链接")?;
         query.entry("fp").or_insert(json!("chrome"));
     }
     if let Some(ech) = &source.ech {
@@ -583,15 +601,11 @@ fn transport(
         Transport::Default => {}
         Transport::WebSocket(value) => {
             query.insert("type".to_owned(), json!("ws"));
-            headers(&value.headers, value.host.as_deref(), query)?;
+            host(&value.headers, value.host.as_deref(), query);
             let mut path = value.path.clone().unwrap_or_else(|| "/".to_owned());
             if let Some(size) = value.early_data {
-                if value
-                    .early_data_header
-                    .as_deref()
-                    .is_some_and(|header| !header.eq_ignore_ascii_case("Sec-WebSocket-Protocol"))
-                {
-                    return Err("WebSocket 分享链接的握手数据使用 Sec-WebSocket-Protocol".into());
+                if let Some(header) = &value.early_data_header {
+                    query.insert("early_data_header_name".to_owned(), json!(header));
                 }
                 path = crate::native::transport::early_data(&path, size);
             }
@@ -599,7 +613,7 @@ fn transport(
         }
         Transport::HttpUpgrade(value) => {
             query.insert("type".to_owned(), json!("httpupgrade"));
-            headers(&value.headers, value.host.as_deref(), query)?;
+            host(&value.headers, value.host.as_deref(), query);
             let mut path = value.path.clone().unwrap_or_else(|| "/".to_owned());
             if let Some(enabled) = value.early_data {
                 path = crate::native::transport::early_data(&path, u32::from(enabled));
@@ -624,24 +638,20 @@ fn transport(
                     query.insert("type".to_owned(), json!("tcp"));
                     query.insert("headerType".to_owned(), json!("http"));
                 }
-                HttpVersion::Http2 => {
+                HttpVersion::Http2 | HttpVersion::Http3 => {
                     query.insert("type".to_owned(), json!("http"));
+                    if secure && value.version(true) == HttpVersion::Http3 {
+                        query.entry("alpn").or_insert(json!("h3"));
+                    }
                 }
-                _ => return Err("当前 HTTP 传输没有对应的分享链接形式".into()),
+                HttpVersion::Auto => unreachable!(),
             }
-            headers(&value.headers, None, query)?;
+            host(&value.headers, None, query);
             if !value.host.is_empty() {
                 query.insert("host".to_owned(), json!(value.host.join(",")));
             }
             if let Some(value) = &value.path {
                 query.insert("path".to_owned(), json!(value));
-            }
-            if value
-                .method
-                .as_deref()
-                .is_some_and(|method| method != "GET")
-            {
-                return Err("HTTP 传输分享链接使用默认请求方法".into());
             }
         }
         Transport::Kcp(value) => {
@@ -651,10 +661,9 @@ fn transport(
             }
             if let Some(value) = &value.interval {
                 let duration = humantime::parse_duration(value)?;
-                if duration.subsec_nanos() % 1_000_000 != 0 {
-                    return Err("KCP 分享链接的时间间隔使用整数毫秒".into());
+                if duration.subsec_nanos() % 1_000_000 == 0 {
+                    query.insert("tti".to_owned(), json!(duration.as_millis()));
                 }
-                query.insert("tti".to_owned(), json!(duration.as_millis()));
             }
             if value.header != Header::None {
                 query.insert("headerType".to_owned(), json!(value.header));
@@ -722,27 +731,18 @@ fn transport(
     Ok(())
 }
 
-fn headers(
+fn host(
     values: &BTreeMap<String, Vec<String>>,
     host: Option<&str>,
     query: &mut Map<String, Value>,
-) -> Result<()> {
-    for (name, values) in values {
-        if !name.eq_ignore_ascii_case("host") || values.len() != 1 {
-            return Err(format!("分享链接没有自定义请求头 {name} 的通用表达方式").into());
-        }
-        if host.is_none() {
-            if query
-                .get("host")
-                .is_some_and(|value| value != &json!(values[0]))
-            {
-                return Err("分享链接使用单个 Host 请求头".into());
-            }
-            query.insert("host".to_owned(), json!(values[0]));
-        }
-    }
-    if let Some(host) = host {
+) {
+    if let Some(host) = host.or_else(|| {
+        values
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .and_then(|(_, hosts)| hosts.first())
+            .map(String::as_str)
+    }) {
         query.insert("host".to_owned(), json!(host));
     }
-    Ok(())
 }

@@ -6,7 +6,7 @@ use std::{
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
-use url::{Host, Url};
+use url::Url;
 
 use crate::{
     Result,
@@ -157,19 +157,12 @@ impl Connection {
             value.validate()?;
             return Ok(value);
         }
-        if url.query().is_some() {
-            return Err("不支持此链接的查询参数".into());
-        }
-        let server = match Host::parse(url.host_str().ok_or("链接缺少服务器地址")?)? {
-            Host::Domain(value) => value,
-            Host::Ipv4(value) => value.to_string(),
-            Host::Ipv6(value) => value.to_string(),
-        };
+        let mut query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
         let mut proxy = Proxy {
             name: percent_decode_str(url.fragment().unwrap_or_default())
                 .decode_utf8()?
                 .into_owned(),
-            server,
+            server: crate::link::host(&url)?,
             port: url.port_or_known_default().unwrap_or(1080),
             ..Proxy::default()
         };
@@ -201,23 +194,39 @@ impl Connection {
             }
         }
         let connection = match url.scheme() {
-            "http" | "https" => Self::Http(Http {
-                proxy,
-                security: if url.scheme() == "https" {
-                    Security::Tls(Tls::default())
-                } else {
-                    Security::None
-                },
-                http: HttpOptions {
+            "http" | "https" => {
+                let mut http = HttpOptions {
                     path: (!url.path().is_empty() && url.path() != "/")
                         .then(|| url.path().to_owned()),
                     ..HttpOptions::default()
-                },
-                network: Network::default(),
-                transport: Transport::default(),
-                multiplex: None,
-            }),
-            "socks" | "socks4" | "socks4a" | "socks5" => {
+                };
+                if !query.contains_key("type")
+                    && let Some(path) = query.remove("path")
+                {
+                    http.path = Some(path);
+                }
+                if let Some(headers) = query.remove("headers") {
+                    let fields: Vec<_> = headers.split(',').collect();
+                    let (pairs, tail) = fields.as_chunks::<2>();
+                    if !tail.is_empty() {
+                        return Err("HTTP 请求头需要成对的名称和值".into());
+                    }
+                    for &[key, value] in pairs {
+                        http.headers
+                            .entry(key.to_owned())
+                            .or_default()
+                            .push(value.to_owned());
+                    }
+                }
+                Self::Http(Http {
+                    proxy,
+                    http,
+                    security: crate::link::security(&mut query, url.scheme() == "https")?,
+                    transport: crate::link::transport(&mut query)?,
+                    ..Http::default()
+                })
+            }
+            "socks" | "socks4" | "socks4a" | "socks5" | "socks5+tls" => {
                 if !url.path().is_empty() && url.path() != "/" {
                     return Err("SOCKS 链接中包含路径".into());
                 }
@@ -229,16 +238,19 @@ impl Connection {
                             "socks4a" => SocksVersion::V4a,
                             _ => SocksVersion::V5,
                         },
+                        udp_over_tcp: crate::link::uot(&mut query)?,
                         ..SocksOptions::default()
                     },
-                    security: Security::None,
+                    security: crate::link::security(&mut query, url.scheme() == "socks5+tls")?,
                     network: Network::default(),
-                    transport: Transport::default(),
+                    transport: crate::link::transport(&mut query)?,
                     multiplex: None,
                 })
             }
             protocol => return Err(format!("不支持的连接链接：{protocol}").into()),
         };
+        crate::link::remaining(query.keys(), "链接参数")?;
+        connection.validate()?;
         Ok(connection)
     }
 

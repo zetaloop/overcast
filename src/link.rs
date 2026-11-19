@@ -195,6 +195,15 @@ pub fn anytls(url: &Url) -> Result<crate::anytls::Client> {
         port: url.port().unwrap_or(443),
         password: credentials(url)?,
         security: security(&mut query, true)?,
+        anytls: crate::anytls::ClientOptions {
+            idle_session_check_interval: query.remove("idle_session_check_interval"),
+            idle_session_timeout: query.remove("idle_session_timeout"),
+            min_idle_session: query
+                .remove("min_idle_session")
+                .map(|v| v.parse())
+                .transpose()?,
+            ..Default::default()
+        },
         ..crate::anytls::Client::default()
     };
     remaining(query.keys(), "链接参数")?;
@@ -334,13 +343,31 @@ pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {
         password: password.to_owned(),
         shadowsocks: crate::shadowsocks::ClientOptions {
             cipher: serde_json::from_value(json!(cipher))?,
+            udp_over_tcp: uot(&mut query)?,
             plugin,
             ..crate::shadowsocks::ClientOptions::default()
         },
+        security: security(&mut query, false)?,
+        transport: transport(&mut query)?,
         ..crate::shadowsocks::Client::default()
     };
     remaining(query.keys(), "链接参数")?;
     Ok(client)
+}
+
+pub fn uot(query: &mut BTreeMap<String, String>) -> Result<Option<u8>> {
+    let legacy = query.remove("udp-over-tcp");
+    let enabled = query.remove("uot");
+    match (enabled.as_deref(), legacy.as_deref()) {
+        (None | Some("false" | "0"), None | Some("false" | "0")) => Ok(None),
+        (None, Some("true")) => Ok(Some(1)),
+        (Some("true"), None) => Ok(Some(2)),
+        (Some("1"), _) => Err(
+            "uot=1 只表示启用；Mihomo 默认使用 v1，Throne 默认使用 v2。请在连接参数中指定版本"
+                .into(),
+        ),
+        _ => Err("无法确定链接中的 UDP over TCP 版本".into()),
+    }
 }
 
 fn credentials(url: &Url) -> Result<String> {
@@ -374,20 +401,44 @@ pub fn security(query: &mut BTreeMap<String, String>, default: bool) -> Result<S
     let mut tls = Tls {
         server_name: query.remove("sni"),
         fingerprint: query.remove("fp"),
+        min_version: query.remove("tls_min_version"),
+        max_version: query.remove("tls_max_version"),
+        client_certificate: query.remove("tls_client_certificate"),
+        client_key: query.remove("tls_client_key"),
+        fragment_delay: query.remove("tls_fragment_fallback_delay"),
         ..Tls::default()
     };
-    if let Some(value) = query.remove("alpn") {
-        tls.alpn = value
-            .split(',')
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .collect();
+    for (key, separator, target) in [
+        ("alpn", ',', &mut tls.alpn),
+        ("vcn", ',', &mut tls.verify_names),
+        ("pcs", ',', &mut tls.certificate_sha256),
+        ("cs", ':', &mut tls.cipher_suites),
+        ("tls_curve_preferences", ',', &mut tls.curves),
+        ("tls_certificate", ',', &mut tls.certificates),
+        (
+            "tls_certificate_public_key_sha256",
+            ',',
+            &mut tls.public_key_sha256,
+        ),
+    ] {
+        if let Some(value) = query.remove(key) {
+            *target = value
+                .split(separator)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
     }
-    if let Some(value) = query.remove("vcn") {
-        tls.verify_names = value.split(',').map(str::to_owned).collect();
+    for (key, target) in [
+        ("tls_fragment", &mut tls.fragment),
+        ("tls_record_fragment", &mut tls.record_fragment),
+    ] {
+        if let Some(value) = query.remove(key) {
+            *target = Some(value.parse()?);
+        }
     }
-    if let Some(value) = query.remove("pcs") {
-        tls.certificate_sha256 = value.split(',').map(str::to_owned).collect();
+    if let Some(value) = query.remove("disable_sni") {
+        tls.send_sni = Some(!value.parse::<bool>()?);
     }
     for key in ["allowInsecure", "insecure"] {
         if let Some(value) = query.remove(key) {
@@ -493,6 +544,7 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
             let mut value = WebSocket {
                 host: query.remove("host"),
                 path: query.remove("path"),
+                early_data_header: query.remove("early_data_header_name"),
                 ..WebSocket::default()
             };
             value.early_data = early_data(&mut value.path)?;
@@ -976,7 +1028,7 @@ fn rename(
     }
 }
 
-fn remaining<'a>(keys: impl Iterator<Item = &'a String>, context: &str) -> Result<()> {
+pub fn remaining<'a>(keys: impl Iterator<Item = &'a String>, context: &str) -> Result<()> {
     let fields: Vec<_> = keys.map(String::as_str).collect();
     if fields.is_empty() {
         Ok(())
