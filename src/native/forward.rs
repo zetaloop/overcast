@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use crate::{
     Result,
     config::{Config, Store},
-    connection::{self, Connection, HttpVersion, SocksVersion},
+    connection::{self, Connection},
     inbound::Core,
     route::Destination,
 };
@@ -37,52 +37,4 @@ pub fn outbound(
         Core::SingBox => super::singbox::outbound(&direct, store, globals),
         Core::Mihomo => super::mihomo::outbound(&direct, store, globals),
     }
-}
-
-pub fn networks(source: &Connection) -> Result<[bool; 2]> {
-    let (security, datagrams) = match source {
-        Connection::Direct(_) => return Ok([false, false]),
-        Connection::Hysteria2(_) => return Ok([false, true]),
-        Connection::AnyTls(_) => return Ok([true, false]),
-        Connection::Warp(value) => {
-            return Ok(match value.warp.mode {
-                crate::warp::Mode::Http2 => [true, false],
-                crate::warp::Mode::Http3 => [false, true],
-            });
-        }
-        Connection::Http(value) => {
-            if value.http.version == HttpVersion::Http3 {
-                if value.security.reality().is_some() {
-                    return Ok([!value.http.fixed_version, false]);
-                }
-                return Ok([!value.http.fixed_version, true]);
-            }
-            (&value.security, false)
-        }
-        Connection::Socks(value) => (
-            &value.security,
-            value.socks.version == SocksVersion::V5
-                && value.socks.udp_over_tcp.is_none()
-                && value.multiplex.as_ref().is_none_or(|mux| mux.tcp_only),
-        ),
-        Connection::Vless(value) => (&value.security, false),
-        Connection::Vmess(value) => (&value.security, false),
-        Connection::Trojan(value) => (&value.security, false),
-        Connection::Shadowsocks(value) => {
-            let datagrams = value.shadowsocks.udp_over_tcp.is_none()
-                && value.multiplex.as_ref().is_none_or(|mux| mux.tcp_only);
-            if let Some(plugin) = &value.shadowsocks.plugin {
-                let udp = plugin.name == "kcptun"
-                    || plugin.name == "v2ray-plugin"
-                        && super::shadowsocks::arguments(&plugin.options)?
-                            .get("mode")
-                            .is_some_and(|mode| mode == "quic");
-                return Ok([!udp, udp || datagrams]);
-            }
-            (&value.security, datagrams)
-        }
-        Connection::Forward(value) => (&value.security, true),
-    };
-    let udp = source.transport().unwrap().quic(security);
-    Ok([!udp, udp || datagrams])
 }

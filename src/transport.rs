@@ -340,18 +340,6 @@ impl Transport {
         }
     }
 
-    pub fn supported(&self, security: &Security, networks: [bool; 2]) -> bool {
-        networks[usize::from(self.quic(security))]
-            && match self {
-                Self::XHttp(value) => value.download.as_ref().is_none_or(|download| {
-                    networks[usize::from(
-                        matches!(&download.security, Security::Tls(tls) if tls.alpn == ["h3"]),
-                    )]
-                }),
-                _ => true,
-            }
-    }
-
     pub fn xray_reality(&self) -> bool {
         matches!(
             self,

@@ -157,7 +157,9 @@ impl Builder<'_> {
                     };
                     let paths = self.paths(next, user, visiting)?;
                     for (child_user, mut path) in paths {
-                        if !crate::native::forward::networks(&path[0])?[network as usize] {
+                        if !crate::native::carrier::Carrier::new(&path[0])?.wires()
+                            [network as usize]
+                        {
                             continue;
                         }
                         let (server, _) = path[0].server().unwrap();

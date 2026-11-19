@@ -1,4 +1,5 @@
 mod binding;
+pub(crate) mod carrier;
 pub(crate) mod encryption;
 pub(crate) mod forward;
 mod hysteria;
@@ -148,15 +149,24 @@ pub fn available(
     destination: Destination,
     progress: &Progress,
 ) -> Result<bool> {
-    let payload = Payload::from(&source.protocol);
-    Ok(match destination {
-        Destination::Block => true,
-        Destination::Inbound(_) => false,
-        Destination::Outbound(uuid) => Builder::new(store, config, progress)
-            .chains(uuid, source.core, payload)?
-            .iter()
-            .any(|chain| chain.networks != [false, false]),
-    })
+    if destination == Destination::Block {
+        return Ok(true);
+    }
+    let modes = listener::modes(source);
+    let mut builder = Builder::new(store, config, progress);
+    for network in [graph::Network::Tcp, graph::Network::Udp] {
+        if modes.iter().any(|mode| mode.carries(source, network))
+            && builder.available(
+                source.core,
+                destination,
+                network,
+                Payload::from(&source.protocol),
+            )?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn prepare(
@@ -1041,17 +1051,18 @@ impl<'a> Builder<'a> {
                 )
                 .into());
             }
+            let carrier = carrier::Carrier::new(connection)?;
             let mut next: Vec<Chain> = Vec::new();
             for chain in &chains {
                 for node in &nodes {
                     let available = if forward {
-                        let supported = forward::networks(connection)?;
+                        let supported = carrier.wires();
                         [
                             chain.networks[0] && supported[0],
                             chain.networks[1] && supported[1],
                         ]
                     } else {
-                        networks(connection, node.core, chain.networks)?
+                        carrier.requests(node.core, chain.networks)
                     };
                     if available == [false, false]
                         || next.iter().any(|chain| chain.networks == available)
@@ -1350,108 +1361,6 @@ fn key(core: Core) -> &'static str {
         Core::SingBox => "sing-box",
         Core::Mihomo => "mihomo",
     }
-}
-
-fn networks(source: &Connection, core: Core, parent: [bool; 2]) -> Result<[bool; 2]> {
-    let multiplex = source.multiplex().is_some_and(|mux| !mux.tcp_only);
-    Ok(match source {
-        Connection::Direct(_) => parent,
-        Connection::Forward(value) => [
-            value.transport.supported(&value.security, parent),
-            parent[1],
-        ],
-        Connection::Hysteria2(value) => [
-            parent[1] && value.hysteria.tcp.unwrap_or(true),
-            parent[1] && value.hysteria.udp.unwrap_or(true),
-        ],
-        Connection::AnyTls(value) => [
-            parent[0] && value.anytls.tcp.unwrap_or(true),
-            parent[0] && value.anytls.udp.unwrap_or(true),
-        ],
-        Connection::Warp(value) => {
-            let available = parent[usize::from(value.warp.mode == crate::warp::Mode::Http3)];
-            [
-                available && value.warp.tcp.unwrap_or(true),
-                available && value.warp.udp.unwrap_or(true),
-            ]
-        }
-        Connection::Http(value) => {
-            let transport =
-                if core == Core::SingBox && value.http.version == connection::HttpVersion::Http3 {
-                    if value.security.reality().is_some() {
-                        !value.http.fixed_version && parent[0]
-                    } else {
-                        parent[1] || !value.http.fixed_version && parent[0]
-                    }
-                } else if core == Core::Xray {
-                    value.transport.supported(&value.security, parent)
-                } else {
-                    parent[0]
-                };
-            [transport, transport && (core == Core::SingBox || multiplex)]
-        }
-        Connection::Socks(value) => {
-            let transport = if core == Core::Xray {
-                value.transport.supported(&value.security, parent)
-            } else {
-                parent[0]
-            };
-            [
-                transport && value.socks.tcp.unwrap_or(true),
-                transport
-                    && (parent[1] || value.socks.udp_over_tcp.is_some() || multiplex)
-                    && (value.socks.version == connection::SocksVersion::V5 || multiplex)
-                    && value.socks.udp.unwrap_or(true),
-            ]
-        }
-        Connection::Vless(value) => {
-            let transport = value.transport.supported(&value.security, parent);
-            [
-                transport && value.vless.tcp.unwrap_or(true),
-                transport && value.vless.udp.unwrap_or(true),
-            ]
-        }
-        Connection::Vmess(value) => {
-            let transport = value.transport.supported(&value.security, parent);
-            [
-                transport && value.vmess.tcp.unwrap_or(true),
-                transport && value.vmess.udp.unwrap_or(true),
-            ]
-        }
-        Connection::Trojan(value) => {
-            let transport = value.transport.supported(&value.security, parent);
-            [
-                transport && value.trojan.tcp.unwrap_or(true),
-                transport && value.trojan.udp.unwrap_or(true),
-            ]
-        }
-        Connection::Shadowsocks(value) => {
-            let transport = if let Some(plugin) = &value.shadowsocks.plugin {
-                let udp = plugin.name == "kcptun"
-                    || plugin.name == "v2ray-plugin"
-                        && shadowsocks::arguments(&plugin.options)?
-                            .get("mode")
-                            .is_some_and(|mode| mode == "quic");
-                parent[usize::from(udp)]
-            } else {
-                value.transport.supported(&value.security, parent)
-            };
-            let uot = value.shadowsocks.udp_over_tcp.is_some()
-                || value
-                    .shadowsocks
-                    .plugin
-                    .as_ref()
-                    .is_some_and(|plugin| plugin.name == "kcptun");
-            [
-                transport && value.shadowsocks.tcp.unwrap_or(true),
-                (if uot || multiplex {
-                    transport
-                } else {
-                    parent[1]
-                }) && value.shadowsocks.udp.unwrap_or(true),
-            ]
-        }
-    })
 }
 
 #[derive(Debug)]
