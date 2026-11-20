@@ -1,4 +1,4 @@
-use crate::language::{message, text as tr};
+use crate::language::text as tr;
 use std::borrow::Cow;
 use std::time::Duration;
 
@@ -770,7 +770,7 @@ pub fn listeners(
             }));
         }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        return unsupported(message!(
+        return unsupported(crate::language::message!(
             "Xray cannot bind an inbound interface on this platform: {interface}",
             "Xray 在此平台无法绑定入站接口：{interface}"
         ));
