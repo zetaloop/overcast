@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
@@ -92,7 +93,7 @@ impl Targets {
         } else {
             None
         };
-        let step = progress.activity("读取规则数据");
+        let step = progress.activity(tr("Reading routing data", "读取规则数据"));
         let sites = if needs_sites {
             step.detail("geosite.dat");
             Sites::decode(fs::read(directory.as_ref().unwrap().join("geosite.dat"))?.as_slice())?
@@ -142,7 +143,9 @@ impl Targets {
                     let data = geoips
                         .iter()
                         .find(|data| data.name.eq_ignore_ascii_case(name))
-                        .ok_or_else(|| format!("找不到 GeoIP 规则：{name}"))?;
+                        .ok_or_else(|| {
+                            message!("Unknown GeoIP rule: {name}", "找不到 GeoIP 规则：{name}")
+                        })?;
                     let mut prefixes = data
                         .networks
                         .iter()
@@ -152,7 +155,13 @@ impl Targets {
                                 bytes if bytes.len() == 16 => {
                                     IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes)?))
                                 }
-                                _ => return Err(format!("GeoIP 地址长度不正确：{name}").into()),
+                                _ => {
+                                    return Err(message!(
+                                        "Invalid GeoIP address length: {name}",
+                                        "GeoIP 地址长度不正确：{name}"
+                                    )
+                                    .into());
+                                }
                             };
                             Ok(IpNetwork::new(address, cidr.prefix.try_into()?)?)
                         })
@@ -170,7 +179,12 @@ impl Targets {
                     let site = sites
                         .iter()
                         .find(|site| site.name.eq_ignore_ascii_case(tag))
-                        .ok_or_else(|| format!("找不到 GeoSite 规则：{name}"))?;
+                        .ok_or_else(|| {
+                            message!(
+                                "Unknown GeoSite rule: {name}",
+                                "找不到 GeoSite 规则：{name}"
+                            )
+                        })?;
                     let mut entries = Vec::new();
                     for entry in &site.domains {
                         progress.check()?;
@@ -196,7 +210,13 @@ impl Targets {
                         Condition::Suffix(value) => (DomainType::Suffix, value),
                         Condition::Keyword(value) => (DomainType::Keyword, value),
                         Condition::Regex(value) => (DomainType::Regex, value),
-                        _ => return Err("目标条件的类型不正确".into()),
+                        _ => {
+                            return Err(tr(
+                                "Invalid target condition type",
+                                "目标条件的类型不正确",
+                            )
+                            .into());
+                        }
                     };
                     let entry = Domain {
                         kind: kind as i32,
@@ -211,7 +231,8 @@ impl Targets {
                 }
             }
         }
-        step.finish(format!(
+        step.finish(message!(
+            "Domain conditions: {}; IP conditions: {}",
             "{} 项域名条件，{} 项 IP 条件",
             domains.len(),
             ips.len()
@@ -224,7 +245,7 @@ impl Targets {
     }
 
     pub fn domain_classes(&self, progress: &Progress) -> Result<BTreeMap<Vec<bool>, String>> {
-        let step = progress.activity("分析域名条件");
+        let step = progress.activity(tr("Analyzing domain conditions", "分析域名条件"));
         let mut patterns = vec![Hir::concat(vec![
             Hir::look(Look::Start),
             Hir::repetition(Repetition {
@@ -302,19 +323,24 @@ impl Targets {
             }
             cursor += 1;
             if step.sample() {
-                step.detail(format!(
+                step.detail(message!(
+                    "States: {}; match combinations: {}",
                     "{} 个状态，{} 种匹配组合",
                     visited.len(),
                     classes.len()
                 ));
             }
         }
-        step.finish(format!("{} 种匹配组合", classes.len()));
+        step.finish(message!(
+            "Match combinations: {}",
+            "{} 种匹配组合",
+            classes.len()
+        ));
         Ok(classes)
     }
 
     pub fn ip_classes(&self, progress: &Progress) -> Result<BTreeMap<Vec<bool>, IpAddr>> {
-        let step = progress.activity("分析 IP 条件");
+        let step = progress.activity(tr("Analyzing IP conditions", "分析 IP 条件"));
         let mut classes = BTreeMap::new();
         for ipv6 in [false, true] {
             let maximum = if ipv6 {
@@ -365,7 +391,11 @@ impl Targets {
                     });
             }
         }
-        step.finish(format!("{} 种匹配组合", classes.len()));
+        step.finish(message!(
+            "Match combinations: {}",
+            "{} 种匹配组合",
+            classes.len()
+        ));
         Ok(classes)
     }
 }

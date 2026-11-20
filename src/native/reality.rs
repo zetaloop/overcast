@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -55,9 +56,10 @@ pub fn prepare(
                 .iter()
                 .map(|entry| graph.entries[*entry].inbound.name.as_str())
                 .collect();
-            return Err(format!(
+            return Err(message!(
+                "REALITY listeners associated with inbound {} require different handshake material",
                 "入站 {} 关联的 REALITY 监听要求不同的握手材料",
-                names.join("、")
+                names.join(tr(", ", "、"))
             )
             .into());
         }
@@ -102,7 +104,7 @@ pub fn xray(source: &Client, input: super::parameters::Input<'_>) -> Result<Valu
             ("debug", "show"),
         ],
     );
-    options.finish("Xray REALITY 客户端")?;
+    options.finish(tr("Xray REALITY client", "Xray REALITY 客户端"))?;
     Ok(json!(output))
 }
 
@@ -151,7 +153,7 @@ pub fn singbox(reality: &Client, input: super::parameters::Input<'_>) -> Result<
     }
     let mut reality = Map::from_iter([("enabled".to_owned(), json!(true))]);
     params.copy(&mut reality, &["public_key", "short_id"]);
-    params.finish("sing-box REALITY 客户端")?;
+    params.finish(tr("sing-box REALITY client", "sing-box REALITY 客户端"))?;
     output.insert("reality".to_owned(), json!(reality));
     Ok(json!(output))
 }
@@ -185,7 +187,7 @@ pub fn server(source: &Inbound, value: &Server) -> Result<Value> {
         }
         Core::Mihomo => {}
     }
-    tls.finish("REALITY 握手")?;
+    tls.finish(tr("REALITY handshake", "REALITY 握手"))?;
     let names = value.names(value.tls.server_name.as_deref())?;
     let mut options = Options::new(value)?;
     for name in [
@@ -210,7 +212,10 @@ pub fn server(source: &Inbound, value: &Server) -> Result<Value> {
             output.insert("serverNames".to_owned(), json!(names));
             output.insert(
                 "privateKey".to_owned(),
-                json!(value.private_key.as_ref().ok_or("REALITY 私钥尚未生成")?),
+                json!(value.private_key.as_ref().ok_or(tr(
+                    "REALITY private key has not been generated",
+                    "REALITY 私钥尚未生成"
+                ))?),
             );
             output.insert("shortIds".to_owned(), json!(value.short_ids));
             options.rename(
@@ -242,16 +247,23 @@ pub fn server(source: &Inbound, value: &Server) -> Result<Value> {
         }
         Core::SingBox => {
             if value.signature {
-                return unsupported("sing-box REALITY 没有 ML-DSA-65 签名配置");
+                return unsupported(tr(
+                    "sing-box REALITY does not support ML-DSA-65 signatures",
+                    "sing-box REALITY 没有 ML-DSA-65 签名配置",
+                ));
             }
             let [name] = names.as_slice() else {
-                return unsupported("sing-box REALITY 使用一个服务名");
+                return unsupported(tr(
+                    "sing-box REALITY accepts one server name",
+                    "sing-box REALITY 使用一个服务名",
+                ));
             };
             output.insert("enabled".to_owned(), json!(true));
             output.insert("server_name".to_owned(), json!(name));
-            let (server, port) = value
-                .endpoint()?
-                .ok_or("sing-box REALITY 握手目标使用 TCP 地址")?;
+            let (server, port) = value.endpoint()?.ok_or(tr(
+                "sing-box REALITY requires a TCP handshake target",
+                "sing-box REALITY 握手目标使用 TCP 地址",
+            ))?;
             let mut handshake = Map::from_iter([
                 ("server".to_owned(), json!(server)),
                 ("server_port".to_owned(), json!(port)),
@@ -267,7 +279,10 @@ pub fn server(source: &Inbound, value: &Server) -> Result<Value> {
                 ("handshake".to_owned(), json!(handshake)),
                 (
                     "private_key".to_owned(),
-                    json!(value.private_key.as_ref().ok_or("REALITY 私钥尚未生成")?),
+                    json!(value.private_key.as_ref().ok_or(tr(
+                        "REALITY private key has not been generated",
+                        "REALITY 私钥尚未生成"
+                    ))?),
                 ),
                 ("short_id".to_owned(), json!(value.short_ids)),
             ]);
@@ -280,11 +295,15 @@ pub fn server(source: &Inbound, value: &Server) -> Result<Value> {
         }
         Core::Mihomo => {
             if value.signature {
-                return unsupported("Mihomo REALITY 没有 ML-DSA-65 签名配置");
+                return unsupported(tr(
+                    "Mihomo REALITY does not support ML-DSA-65 signatures",
+                    "Mihomo REALITY 没有 ML-DSA-65 签名配置",
+                ));
             }
-            value
-                .endpoint()?
-                .ok_or("Mihomo REALITY 握手目标使用 TCP 地址")?;
+            value.endpoint()?.ok_or(tr(
+                "Mihomo REALITY requires a TCP handshake target",
+                "Mihomo REALITY 握手目标使用 TCP 地址",
+            ))?;
             if value.target_network.as_deref() == Some("tcp") {
                 options.take("target_network");
             }
@@ -294,7 +313,10 @@ pub fn server(source: &Inbound, value: &Server) -> Result<Value> {
             output.insert("server-names".to_owned(), json!(names));
             output.insert(
                 "private-key".to_owned(),
-                json!(value.private_key.as_ref().ok_or("REALITY 私钥尚未生成")?),
+                json!(value.private_key.as_ref().ok_or(tr(
+                    "REALITY private key has not been generated",
+                    "REALITY 私钥尚未生成"
+                ))?),
             );
             output.insert("short-id".to_owned(), json!(value.short_ids));
             options.durations(
@@ -314,7 +336,7 @@ pub fn server(source: &Inbound, value: &Server) -> Result<Value> {
             }
         }
     }
-    options.finish("REALITY 服务端")?;
+    options.finish(tr("REALITY server", "REALITY 服务端"))?;
     Ok(json!(output))
 }
 
@@ -336,6 +358,6 @@ fn limits(source: &Limit, core: Core) -> Result<Map<String, Value>> {
             ],
         },
     );
-    options.finish("REALITY 回落速率")?;
+    options.finish(tr("REALITY fallback rate", "REALITY 回落速率"))?;
     Ok(output)
 }

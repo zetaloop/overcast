@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{collections::BTreeMap, time::Duration};
 
 use percent_encoding::percent_decode_str;
@@ -99,19 +100,30 @@ pub fn xray(
         Transport::XHttp(value) => return xhttp(value, inbound, input),
         Transport::Http(value) => ("raw", "rawSettings", Options::new(value)?),
         Transport::Kcp(value) => ("kcp", "kcpSettings", Options::new(value)?),
-        Transport::Quic => return unsupported("Xray 没有独立 QUIC 传输配置"),
+        Transport::Quic => {
+            return unsupported(tr(
+                "Xray does not support standalone QUIC transport",
+                "Xray 没有独立 QUIC 传输配置",
+            ));
+        }
     };
     let mut settings = Map::new();
     match source {
         Transport::Default | Transport::XHttp(_) | Transport::Quic => unreachable!(),
         Transport::Http(value) => {
             if value.version(tls) != HttpVersion::Http1 {
-                return unsupported("Xray 的 HTTP 伪装使用 HTTP/1");
+                return unsupported(tr(
+                    "Xray HTTP camouflage requires HTTP/1",
+                    "Xray 的 HTTP 伪装使用 HTTP/1",
+                ));
             }
             options.take("version");
             options.take("random_headers");
             if !value.random_headers && value.headers.values().any(|values| values.len() > 1) {
-                return unsupported("Xray HTTP 伪装从多个标头值中随机选择");
+                return unsupported(tr(
+                    "Xray HTTP camouflage selects randomly among header values",
+                    "Xray HTTP 伪装从多个标头值中随机选择",
+                ));
             }
             let mut request = Map::new();
             let mut response = Map::new();
@@ -182,7 +194,10 @@ pub fn xray(
                 .as_deref()
                 .is_some_and(|header| !header.eq_ignore_ascii_case("Sec-WebSocket-Protocol"))
             {
-                return unsupported("Xray 的 WebSocket 握手数据使用 Sec-WebSocket-Protocol 请求头");
+                return unsupported(tr(
+                    "Xray WebSocket early data uses the Sec-WebSocket-Protocol header",
+                    "Xray 的 WebSocket 握手数据使用 Sec-WebSocket-Protocol 请求头",
+                ));
             }
             options.take("early_data_header");
             if let Some(size) = options.take("early_data")
@@ -218,7 +233,7 @@ pub fn xray(
         }
         Transport::Grpc(_) => settings = grpc(Core::Xray, inbound, &mut options)?,
     }
-    options.finish("Xray 传输")?;
+    options.finish(tr("Xray transport", "Xray 传输"))?;
     if let Some(Value::String(path)) = settings.get_mut("path") {
         if !path.starts_with('/') {
             path.insert(0, '/');
@@ -284,16 +299,25 @@ pub fn singbox(
         Transport::Http(value) => {
             let version = value.version(tls);
             if version == HttpVersion::Http3 {
-                return unsupported("sing-box HTTP 传输使用 HTTP/1 或 HTTP/2");
+                return unsupported(tr(
+                    "sing-box HTTP transport requires HTTP/1 or HTTP/2",
+                    "sing-box HTTP 传输使用 HTTP/1 或 HTTP/2",
+                ));
             }
             if !inbound && (version == HttpVersion::Http2) != tls {
-                return unsupported("sing-box HTTP 客户端通过 TLS 选择 HTTP/2，明文使用 HTTP/1");
+                return unsupported(tr(
+                    "sing-box HTTP clients use TLS for HTTP/2 and plaintext for HTTP/1",
+                    "sing-box HTTP 客户端通过 TLS 选择 HTTP/2，明文使用 HTTP/1",
+                ));
             }
             let mut options = Options::new(value)?;
             options.take("version");
             options.take("random_headers");
             if value.random_headers && value.headers.values().any(|values| values.len() > 1) {
-                return unsupported("sing-box HTTP 传输发送全部标头值");
+                return unsupported(tr(
+                    "sing-box HTTP transport sends all header values",
+                    "sing-box HTTP 传输发送全部标头值",
+                ));
             }
             options.copy(&mut output, &["host", "path", "method", "headers"]);
             if inbound && let Some(Value::String(path)) = output.get_mut("path") {
@@ -307,13 +331,18 @@ pub fn singbox(
                 ],
                 None,
             )?;
-            options.finish("sing-box HTTP 传输")?;
+            options.finish(tr("sing-box HTTP transport", "sing-box HTTP 传输"))?;
             output.insert("type".to_owned(), json!("http"));
         }
-        Transport::Kcp(_) => return unsupported("sing-box 没有 KCP 传输配置"),
+        Transport::Kcp(_) => {
+            return unsupported(tr(
+                "sing-box does not support KCP transport",
+                "sing-box 没有 KCP 传输配置",
+            ));
+        }
         Transport::Quic => {
             if !tls || reality {
-                return unsupported("QUIC 传输需要 TLS 握手");
+                return unsupported(tr("QUIC transport requires TLS", "QUIC 传输需要 TLS 握手"));
             }
             output.insert("type".to_owned(), json!("quic"));
         }
@@ -368,7 +397,12 @@ pub fn singbox(
             output.extend(grpc(Core::SingBox, inbound, &mut options)?);
             options.finish("sing-box gRPC")?;
         }
-        Transport::XHttp(_) => return unsupported("sing-box 没有 XHTTP 传输配置"),
+        Transport::XHttp(_) => {
+            return unsupported(tr(
+                "sing-box does not support XHTTP transport",
+                "sing-box 没有 XHTTP 传输配置",
+            ));
+        }
     }
     Ok(Some(json!(output)))
 }
@@ -391,7 +425,10 @@ pub fn mihomo_client(
             let path = if let Some(path) = options.take("path") {
                 let (path, query) = request_path(path.as_str().unwrap())?;
                 if !query.is_empty() {
-                    return unsupported("Mihomo HTTP 传输路径没有查询参数配置");
+                    return unsupported(tr(
+                        "Mihomo HTTP transport paths do not support query parameters",
+                        "Mihomo HTTP 传输路径没有查询参数配置",
+                    ));
                 }
                 Some(path)
             } else {
@@ -402,7 +439,10 @@ pub fn mihomo_client(
                     if !value.random_headers
                         && value.headers.values().any(|values| values.len() > 1)
                     {
-                        return unsupported("Mihomo HTTP 伪装从多个标头值中随机选择");
+                        return unsupported(tr(
+                            "Mihomo HTTP camouflage selects randomly among header values",
+                            "Mihomo HTTP 伪装从多个标头值中随机选择",
+                        ));
                     }
                     options.copy(&mut settings, &["method"]);
                     if let Some(path) = path {
@@ -431,15 +471,25 @@ pub fn mihomo_client(
                     output.insert("network".to_owned(), json!("h2"));
                     output.insert("h2-opts".to_owned(), json!(settings));
                 }
-                _ => return unsupported("Mihomo HTTP 传输使用 HTTP/1 或 HTTP/2"),
+                _ => {
+                    return unsupported(tr(
+                        "Mihomo HTTP transport requires HTTP/1 or HTTP/2",
+                        "Mihomo HTTP 传输使用 HTTP/1 或 HTTP/2",
+                    ));
+                }
             }
-            options.finish("Mihomo HTTP 传输")?;
+            options.finish(tr("Mihomo HTTP transport", "Mihomo HTTP 传输"))?;
         }
         Transport::Kcp(value) => {
             output.insert("network".to_owned(), json!("kcp"));
             output.insert("mkcp-opts".to_owned(), json!(mihomo_kcp(value)?));
         }
-        Transport::Quic => return unsupported("Mihomo 没有独立 QUIC 传输配置"),
+        Transport::Quic => {
+            return unsupported(tr(
+                "Mihomo does not support standalone QUIC transport",
+                "Mihomo 没有独立 QUIC 传输配置",
+            ));
+        }
         Transport::WebSocket(value) => {
             let mut options = Options::new(value)?;
             let mut ws = Map::new();
@@ -502,18 +552,32 @@ pub fn mihomo_client(
                     .reality()
                     .is_some_and(|reality| reality.tls.alpn == ["h3"])
                 {
-                    return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
+                    return unsupported(tr(
+                        "Mihomo XHTTP/3 does not support REALITY",
+                        "Mihomo XHTTP/3 不支持 REALITY 握手",
+                    ));
                 }
                 if value.http.mode == Mode::StreamOne {
-                    return unsupported("XHTTP 单流模式与独立下载连接无法同时使用");
+                    return unsupported(tr(
+                        "Single-stream XHTTP cannot use a separate download connection",
+                        "XHTTP 单流模式与独立下载连接无法同时使用",
+                    ));
                 }
                 if input.pending.is_none() && (download.server.is_empty() || download.port == 0) {
-                    return Err("请填写 XHTTP 下载连接的地址与端口".into());
+                    return Err(tr(
+                        "Enter a server address and port for XHTTP download",
+                        "请填写 XHTTP 下载连接的地址与端口",
+                    )
+                    .into());
                 }
                 if serde_json::to_value(&download.network)? != serde_json::to_value(network)? {
-                    Options::new(&download.network)?.finish("Mihomo XHTTP 下载连接")?;
+                    Options::new(&download.network)?.finish(tr(
+                        "Mihomo XHTTP download connection",
+                        "Mihomo XHTTP 下载连接",
+                    ))?;
                 }
-                Options::new(&download.quic)?.finish("Mihomo XHTTP 下载 QUIC")?;
+                Options::new(&download.quic)?
+                    .finish(tr("Mihomo XHTTP download QUIC", "Mihomo XHTTP 下载 QUIC"))?;
                 let mut options = Options::new(&download.http)?;
                 let mut settings = Map::from_iter([
                     ("server".to_owned(), json!(download.server)),
@@ -552,7 +616,10 @@ pub fn mihomo_client(
                         options.take(name);
                     }
                 }
-                options.finish("Mihomo XHTTP 下载参数")?;
+                options.finish(tr(
+                    "Mihomo XHTTP download settings",
+                    "Mihomo XHTTP 下载参数",
+                ))?;
                 if !matches!(download.security, Security::None) {
                     super::mihomo::client_tls(
                         &download.security,
@@ -575,13 +642,23 @@ pub fn mihomo_server(source: &Transport) -> Result<Map<String, Value>> {
     let mut output = Map::new();
     match source {
         Transport::Default => {}
-        Transport::Http(_) => return unsupported("Mihomo 没有 HTTP 服务端传输配置"),
+        Transport::Http(_) => {
+            return unsupported(tr(
+                "Mihomo does not support server-side HTTP transport",
+                "Mihomo 没有 HTTP 服务端传输配置",
+            ));
+        }
         Transport::Kcp(value) => {
             let mut settings = mihomo_kcp(value)?;
             settings.insert("enable".to_owned(), json!(true));
             output.insert("mkcp-config".to_owned(), json!(settings));
         }
-        Transport::Quic => return unsupported("Mihomo 没有独立 QUIC 传输配置"),
+        Transport::Quic => {
+            return unsupported(tr(
+                "Mihomo does not support standalone QUIC transport",
+                "Mihomo 没有独立 QUIC 传输配置",
+            ));
+        }
         Transport::WebSocket(value) => {
             let mut options = Options::new(value)?;
             options.take("path");
@@ -607,21 +684,28 @@ pub fn mihomo_server(source: &Transport) -> Result<Map<String, Value>> {
             {
                 options.take("early_data_header");
             }
-            options.finish("Mihomo WebSocket 入站")?;
+            options.finish(tr("Mihomo WebSocket inbound", "Mihomo WebSocket 入站"))?;
         }
         Transport::HttpUpgrade(_) => {
-            return unsupported("Mihomo 没有 HTTPUpgrade 服务端传输配置");
+            return unsupported(tr(
+                "Mihomo does not support server-side HTTPUpgrade",
+                "Mihomo 没有 HTTPUpgrade 服务端传输配置",
+            ));
         }
         Transport::Grpc(value) => {
             let mut options = Options::new(value)?;
             if value.service_name.as_deref().is_none_or(str::is_empty) {
-                return unsupported("Mihomo gRPC 入站通过非空服务名启用");
+                return unsupported(tr(
+                    "Mihomo gRPC inbounds require a nonempty service name",
+                    "Mihomo gRPC 入站通过非空服务名启用",
+                ));
             }
             output.extend(grpc(Core::Mihomo, true, &mut options)?);
-            options.finish("Mihomo gRPC 入站")?;
+            options.finish(tr("Mihomo gRPC inbound", "Mihomo gRPC 入站"))?;
         }
         Transport::XHttp(value) => {
-            Options::new(&value.quic)?.finish("Mihomo XHTTP 入站 QUIC")?;
+            Options::new(&value.quic)?
+                .finish(tr("Mihomo XHTTP inbound QUIC", "Mihomo XHTTP 入站 QUIC"))?;
             let mut http = mihomo_http(&value.http, true)?;
             http.entry("mode").or_insert(json!("auto"));
             output.insert("xhttp-config".to_owned(), json!(http));
@@ -639,7 +723,10 @@ fn request_path(value: &str) -> Result<(String, &str)> {
     let value = value.split('#').next().unwrap();
     let (path, query) = value.split_once('?').unwrap_or((value, ""));
     let Ok(path) = percent_decode_str(path).decode_utf8() else {
-        return unsupported("请求路径无法表示为 UTF-8");
+        return unsupported(tr(
+            "Request path is not valid UTF-8",
+            "请求路径无法表示为 UTF-8",
+        ));
     };
     let mut path = path.into_owned();
     if !path.starts_with('/') {
@@ -650,10 +737,16 @@ fn request_path(value: &str) -> Result<(String, &str)> {
 
 fn mihomo_kcp(source: &crate::transport::Kcp) -> Result<Map<String, Value>> {
     if !source.checksum && source.seed.as_ref().is_none_or(String::is_empty) {
-        return unsupported("Mihomo KCP 使用帧校验或加密种子");
+        return unsupported(tr(
+            "Mihomo KCP requires a frame checksum or an encryption seed",
+            "Mihomo KCP 使用帧校验或加密种子",
+        ));
     }
     if source.header == crate::transport::Header::Dns {
-        return unsupported("Mihomo KCP 没有 DNS 数据包伪装");
+        return unsupported(tr(
+            "Mihomo KCP does not support DNS packet camouflage",
+            "Mihomo KCP 没有 DNS 数据包伪装",
+        ));
     }
     let mut options = Options::new(source)?;
     let mut output = Map::new();
@@ -815,7 +908,7 @@ fn mihomo_pool(source: &Pool) -> Result<Map<String, Value>> {
             json!(duration(value.as_str().unwrap(), Duration::from_secs(1))?),
         );
     }
-    options.finish("Mihomo XHTTP 连接复用")?;
+    options.finish(tr("Mihomo XHTTP connection reuse", "Mihomo XHTTP 连接复用"))?;
     Ok(output)
 }
 
@@ -827,10 +920,17 @@ fn xhttp(
     let mut settings = xhttp_options(&source.http, inbound)?;
     if !inbound && let Some(download) = &source.download {
         if source.http.mode == Mode::StreamOne {
-            return unsupported("XHTTP 单流模式与独立下载连接无法同时使用");
+            return unsupported(tr(
+                "Single-stream XHTTP cannot use a separate download connection",
+                "XHTTP 单流模式与独立下载连接无法同时使用",
+            ));
         }
         if input.pending.is_none() && (download.server.is_empty() || download.port == 0) {
-            return Err("请填写 XHTTP 下载连接的地址与端口".into());
+            return Err(tr(
+                "Enter a server address and port for XHTTP download",
+                "请填写 XHTTP 下载连接的地址与端口",
+            )
+            .into());
         }
         let server = match download.server.parse::<std::net::IpAddr>() {
             Ok(address) => address.to_string(),
@@ -852,7 +952,7 @@ fn xhttp(
         ]);
         let mut options = Options::new(&download.network)?;
         let socket = super::xray::dialer(&download.network, &mut options)?;
-        options.finish("Xray 下载连接")?;
+        options.finish(tr("Xray download connection", "Xray 下载连接"))?;
         if !socket.is_empty() {
             stream.insert("sockopt".to_owned(), json!(socket));
         }
@@ -1030,14 +1130,17 @@ fn pool(source: &Pool) -> Result<Map<String, Value>> {
             json!(duration(value.as_str().unwrap(), Duration::from_secs(1))?),
         );
     }
-    options.finish("XHTTP 连接复用")?;
+    options.finish(tr("XHTTP connection reuse", "XHTTP 连接复用"))?;
     Ok(output)
 }
 
 pub(super) fn quic(source: &Quic, inbound: bool) -> Result<Map<String, Value>> {
     let mut options = Options::new(source)?;
     if source.congestion == crate::transport::Congestion::Cubic {
-        return unsupported("Xray QUIC 使用 BBR、Brutal 或 Reno");
+        return unsupported(tr(
+            "Xray QUIC requires BBR, Brutal or Reno",
+            "Xray QUIC 使用 BBR、Brutal 或 Reno",
+        ));
     }
     let output = quic_params(source, inbound, &mut options);
     options.finish("QUIC")?;
@@ -1138,7 +1241,8 @@ pub(super) fn duration(text: &str, unit: Duration) -> Result<i64> {
         .map_or((false, text), |value| (true, value));
     let value = humantime::parse_duration(value)?;
     if value.as_nanos() % unit.as_nanos() != 0 {
-        return unsupported(format!(
+        return unsupported(message!(
+            "Expected a multiple of {}: {text}",
             "时间精度需要为 {}：{text}",
             humantime::format_duration(unit)
         ));
@@ -1158,18 +1262,26 @@ pub(crate) fn mbps(text: &str) -> Result<f64> {
     let (amount, unit) = text.split_at(end);
     let amount: f64 = amount
         .parse()
-        .map_err(|error| format!("带宽格式不正确：{error}"))?;
+        .map_err(|error| message!("Invalid bandwidth: {error}", "带宽格式不正确：{error}"))?;
     let scale = match unit.trim() {
         "" | "b" | "bps" => 0.000001,
         "k" | "kb" | "kbps" => 0.001,
         "m" | "mb" | "mbps" => 1.0,
         "g" | "gb" | "gbps" => 1000.0,
         "t" | "tb" | "tbps" => 1000000.0,
-        unit => return Err(format!("无法识别带宽单位：{unit}").into()),
+        unit => {
+            return Err(
+                message!("Unknown bandwidth unit: {unit}", "无法识别带宽单位：{unit}").into(),
+            );
+        }
     };
     let rate = amount * scale;
     if !rate.is_finite() {
-        return Err("带宽数值超出支持范围".into());
+        return Err(tr(
+            "Bandwidth exceeds the supported range",
+            "带宽数值超出支持范围",
+        )
+        .into());
     }
     Ok(rate)
 }

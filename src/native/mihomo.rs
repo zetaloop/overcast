@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::borrow::Cow;
 use std::time::Duration;
 
@@ -36,7 +37,7 @@ pub fn outbound(
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
     let mut options = Options::new(network)?;
     dial_options(network, &mut options, &mut output, globals)?;
-    options.finish("Mihomo 连接")?;
+    options.finish(tr("Mihomo connection", "Mihomo 连接"))?;
     if let Some(proxy) = proxy {
         output.insert("server".to_owned(), json!(proxy.server));
         output.insert("port".to_owned(), json!(proxy.port));
@@ -111,7 +112,10 @@ pub fn outbound(
             }
             if let Some(version) = value.shadowsocks.udp_over_tcp {
                 if version > 2 {
-                    return unsupported("UDP over TCP 使用版本 1 或 2");
+                    return unsupported(tr(
+                        "UDP over TCP requires version 1 or 2",
+                        "UDP over TCP 使用版本 1 或 2",
+                    ));
                 }
                 output.insert("udp-over-tcp".to_owned(), json!(true));
                 output.insert(
@@ -220,7 +224,10 @@ pub fn outbound(
         }
         Connection::Socks(value) => {
             if value.socks.version != SocksVersion::V5 {
-                return unsupported("Mihomo SOCKS 出站使用 SOCKS5");
+                return unsupported(tr(
+                    "Mihomo requires SOCKS5 for SOCKS outbounds",
+                    "Mihomo SOCKS 出站使用 SOCKS5",
+                ));
             }
             if value
                 .security
@@ -230,7 +237,10 @@ pub fn outbound(
                     !name.is_empty() && !name.eq_ignore_ascii_case(&value.proxy.server)
                 })
             {
-                return unsupported("Mihomo 的 SOCKS TLS 使用服务器地址作为 SNI");
+                return unsupported(tr(
+                    "Mihomo uses the SOCKS server address for TLS SNI",
+                    "Mihomo 的 SOCKS TLS 使用服务器地址作为 SNI",
+                ));
             }
             let mut options = Options::new(&value.socks)?;
             options.take("udp");
@@ -249,7 +259,10 @@ pub fn outbound(
                 .is_some_and(|reality| reality.tls.alpn == ["h3"])
                 && matches!(value.transport, crate::transport::Transport::XHttp(_))
             {
-                return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
+                return unsupported(tr(
+                    "Mihomo XHTTP/3 does not support REALITY",
+                    "Mihomo XHTTP/3 不支持 REALITY 握手",
+                ));
             }
             let mut options = input.vless(&value.vless, inbound::Core::Mihomo)?;
             output.insert("server".to_owned(), json!(value.server));
@@ -270,7 +283,10 @@ pub fn outbound(
                 match value.vless.packet_encoding {
                     crate::connection::PacketEncoding::Default => {}
                     crate::connection::PacketEncoding::Packet => {
-                        return unsupported("Mihomo VLESS 的 UDP 编码使用 XUDP 或 PacketAddr");
+                        return unsupported(tr(
+                            "Mihomo VLESS requires XUDP or PacketAddr for UDP",
+                            "Mihomo VLESS 的 UDP 编码使用 XUDP 或 PacketAddr",
+                        ));
                     }
                     crate::connection::PacketEncoding::PacketAddr => {
                         output.insert("packet-encoding".to_owned(), json!("packetaddr"));
@@ -380,11 +396,11 @@ pub fn listeners(
     }
     options.rename(globals, &[("tcp_multi_path", "inbound-mptcp")]);
     keep_alive(&mut options, globals)?;
-    options.finish("Mihomo 监听")?;
+    options.finish(tr("Mihomo listener", "Mihomo 监听"))?;
     if let Protocol::AnyTls(value) = &source.protocol {
         let mut options = Options::new(value)?;
         options.take("padding_scheme");
-        options.finish("Mihomo AnyTLS 入站")?;
+        options.finish(tr("Mihomo AnyTLS inbound", "Mihomo AnyTLS 入站"))?;
         if !value.padding_scheme.is_empty() {
             output.insert(
                 "padding-scheme".to_owned(),
@@ -418,7 +434,10 @@ pub fn listeners(
     }
     if let Protocol::Vless(value) = &source.protocol {
         if users.is_empty() {
-            return unsupported("VLESS 入口需要认证用户");
+            return unsupported(tr(
+                "VLESS requires authenticated users",
+                "VLESS 入口需要认证用户",
+            ));
         }
         let mut options = Options::new(value)?;
         options.take("flow");
@@ -436,7 +455,7 @@ pub fn listeners(
                 json!(super::encryption::server(encryption)?),
             );
         }
-        options.finish("Mihomo VLESS 入站")?;
+        options.finish(tr("Mihomo VLESS inbound", "Mihomo VLESS 入站"))?;
         output.insert("type".to_owned(), json!("vless"));
         if !matches!(source.security, inbound::Security::None) {
             server_tls(source, store, &mut output)?;
@@ -448,12 +467,15 @@ pub fn listeners(
     }
     if let Protocol::Vmess(value) = &source.protocol {
         if users.is_empty() {
-            return unsupported("VMess 入口需要认证用户");
+            return unsupported(tr(
+                "VMess requires authenticated users",
+                "VMess 入口需要认证用户",
+            ));
         }
         let mut options = Options::new(value)?;
         options.take("alter_id");
         options.take("multiplex");
-        options.finish("Mihomo VMess 入站")?;
+        options.finish(tr("Mihomo VMess inbound", "Mihomo VMess 入站"))?;
         output.insert("type".to_owned(), json!("vmess"));
         if let Some(multiplex) = &value.multiplex {
             output.insert(
@@ -467,11 +489,14 @@ pub fn listeners(
     }
     if let Protocol::Trojan(value) = &source.protocol {
         if users.is_empty() {
-            return unsupported("Trojan 入口需要认证用户");
+            return unsupported(tr(
+                "Trojan requires authenticated users",
+                "Trojan 入口需要认证用户",
+            ));
         }
         let mut options = Options::new(value)?;
         options.take("multiplex");
-        options.finish("Mihomo Trojan 入站")?;
+        options.finish(tr("Mihomo Trojan inbound", "Mihomo Trojan 入站"))?;
         output.insert("type".to_owned(), json!("trojan"));
         if let Some(multiplex) = &value.multiplex {
             output.insert(
@@ -489,7 +514,10 @@ pub fn listeners(
     }
     if let Protocol::Shadowsocks(value) = &source.protocol {
         if !value.tcp {
-            return unsupported("Mihomo Shadowsocks 入站启用 TCP 监听");
+            return unsupported(tr(
+                "Mihomo Shadowsocks inbounds require a TCP listener",
+                "Mihomo Shadowsocks 入站启用 TCP 监听",
+            ));
         }
         let mut options = Options::new(value)?;
         for name in ["cipher", "tcp", "udp", "multiplex"] {
@@ -512,14 +540,20 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::Mihomo)?,
             );
         }
-        options.finish("Mihomo Shadowsocks 入站")?;
+        options.finish(tr("Mihomo Shadowsocks inbound", "Mihomo Shadowsocks 入站"))?;
         return Ok(vec![output]);
     }
     if let Protocol::Forward(value) = &source.protocol {
         if value.user_level.is_some() {
-            return unsupported("Mihomo 固定转发入口没有用户等级配置");
+            return unsupported(tr(
+                "Mihomo fixed forwarding does not support user levels",
+                "Mihomo 固定转发入口没有用户等级配置",
+            ));
         }
-        let (server, port) = target.ok_or("转发入口缺少后继连接")?;
+        let (server, port) = target.ok_or(tr(
+            "Forwarding inbound has no next connection",
+            "转发入口缺少后继连接",
+        ))?;
         output.insert("type".to_owned(), json!("tunnel"));
         output.insert(
             "target".to_owned(),
@@ -564,13 +598,13 @@ pub fn listeners(
         {
             options.take("versions");
         }
-        options.finish("Mihomo HTTP 入站")?;
+        options.finish(tr("Mihomo HTTP inbound", "Mihomo HTTP 入站"))?;
     }
     if value.socks.enabled {
         output.insert("udp".to_owned(), json!(value.udp));
         let mut options = Options::new(&value.socks)?;
         options.take("enabled");
-        options.finish("Mihomo SOCKS 入站")?;
+        options.finish(tr("Mihomo SOCKS inbound", "Mihomo SOCKS 入站"))?;
     }
     server_tls(source, store, &mut output)?;
     Ok(vec![output])
@@ -592,7 +626,10 @@ pub(super) fn dial_options(
     );
     if let Some(value) = options.take("tcp_fast_open") {
         if !value.is_boolean() {
-            return unsupported("Mihomo 的 TCP 快速打开使用开关");
+            return unsupported(tr(
+                "Mihomo expects a boolean for TCP Fast Open",
+                "Mihomo 的 TCP 快速打开使用开关",
+            ));
         }
         output.insert("tfo".to_owned(), value);
     }
@@ -606,7 +643,8 @@ pub(super) fn dial_options(
             AddressStrategy::PreferIpv4 => "ipv4-prefer",
             AddressStrategy::PreferIpv6 => "ipv6-prefer",
             _ => {
-                return unsupported(format!(
+                return unsupported(message!(
+                    "Unsupported Mihomo address strategy: {}",
                     "Mihomo 无法表达地址策略：{}",
                     serde_json::to_value(strategy)?
                 ));
@@ -643,7 +681,10 @@ pub fn client_tls(
         Security::Reality(reality) => (&reality.tls, Some(reality.as_ref())),
     };
     if reality.is_some() && !v2ray {
-        return unsupported(format!("Mihomo {kind} 出站没有 REALITY 配置"));
+        return unsupported(message!(
+            "Mihomo does not support REALITY on {kind} outbounds",
+            "Mihomo {kind} 出站没有 REALITY 配置"
+        ));
     }
     let mut options = Options::new(source)?;
     if !matches!(kind, "trojan" | "hysteria2" | "anytls") {
@@ -721,23 +762,35 @@ pub fn client_tls(
             .map(crate::security::Material::inline)
             .collect::<Option<Vec<_>>>()
         else {
-            return unsupported("Mihomo 的出站信任库使用证书正文，不支持文件路径");
+            return unsupported(tr(
+                "Mihomo outbound trust stores require certificate contents rather than file paths",
+                "Mihomo 的出站信任库使用证书正文，不支持文件路径",
+            ));
         };
         let value = json!({"custom-certifactes": trust});
         if globals.get("tls").is_some_and(|current| current != &value) {
-            return unsupported("Mihomo 同一连接的上传与下载使用共同的证书信任库");
+            return unsupported(tr(
+                "Mihomo upload and download connections must share a trust store",
+                "Mihomo 同一连接的上传与下载使用共同的证书信任库",
+            ));
         }
         globals.insert("tls".to_owned(), value);
     }
     options.take("ech");
     if let Some(value) = &source.ech {
         if !v2ray && !matches!(kind, "hysteria2" | "anytls") {
-            return unsupported(format!("Mihomo {kind} 出站没有 ECH 配置"));
+            return unsupported(message!(
+                "Mihomo does not support ECH on {kind} outbounds",
+                "Mihomo {kind} 出站没有 ECH 配置"
+            ));
         }
         let mut ech = Map::from_iter([("enable".to_owned(), json!(true))]);
         if let Some(config) = &value.config {
             let Some(text) = config.inline() else {
-                return unsupported("Mihomo 的 ECH 公共参数使用正文，不支持文件路径");
+                return unsupported(tr(
+                    "Mihomo requires inline ECH public configuration",
+                    "Mihomo 的 ECH 公共参数使用正文，不支持文件路径",
+                ));
             };
             ech.insert("config".to_owned(), json!(crate::ech::base64(text)?));
         }
@@ -780,7 +833,10 @@ fn server_tls(source: &Inbound, store: &Store, output: &mut Map<String, Value>) 
             .map(crate::security::Material::inline)
             .collect::<Option<Vec<_>>>()
         else {
-            return unsupported("Mihomo 的入站信任库可用多张证书正文或一条文件路径");
+            return unsupported(tr(
+                "Mihomo inbound trust stores accept inline certificates or one file path",
+                "Mihomo 的入站信任库可用多张证书正文或一条文件路径",
+            ));
         };
         output.insert("client-auth-cert".into(), json!(trust.join("\n")));
     }
@@ -791,5 +847,5 @@ fn server_tls(source: &Inbound, store: &Store, output: &mut Map<String, Value>) 
             crate::ech::server_key(ech, &store.directory)?,
         );
     }
-    options.finish("Mihomo 服务端 TLS")
+    options.finish(tr("Mihomo server TLS", "Mihomo 服务端 TLS"))
 }

@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     env,
     fs::{self, File, OpenOptions},
@@ -155,7 +156,11 @@ impl Component {
                 .components()
                 .any(|part| !matches!(part, std::path::Component::Normal(_)))
         {
-            return Err("组件版本不是有效的发布标签".into());
+            return Err(tr(
+                "The component version is not a valid release tag",
+                "组件版本不是有效的发布标签",
+            )
+            .into());
         }
         Ok(store
             .directory
@@ -171,7 +176,7 @@ impl Component {
         preview: bool,
         progress: &Progress,
     ) -> Result<Release> {
-        let step = progress.activity("查询版本");
+        let step = progress.activity(tr("Checking releases", "查询版本"));
         let url = url::Url::parse(&format!(
             "https://api.github.com/repos/{}/releases",
             self.repository()
@@ -179,7 +184,7 @@ impl Component {
         let release = if let Some(version) = version {
             let mut url = url.clone();
             url.path_segments_mut()
-                .map_err(|_| "版本地址格式不正确")?
+                .map_err(|_| tr("Invalid release URL", "版本地址格式不正确"))?
                 .extend(["tags", version]);
             resource::json(client, url.as_str(), progress, &step)?
         } else if preview {
@@ -191,7 +196,7 @@ impl Component {
             {
                 let mut url = url.clone();
                 url.path_segments_mut()
-                    .map_err(|_| "版本地址格式不正确")?
+                    .map_err(|_| tr("Invalid release URL", "版本地址格式不正确"))?
                     .extend(["tags", "Prerelease-Alpha"]);
                 releases.push(resource::json(client, url.as_str(), progress, &step)?);
             }
@@ -208,11 +213,11 @@ impl Component {
                 })
                 .max_by(|(left, _), (right, _)| left.cmp(right))
                 .map(|(_, release)| release)
-                .ok_or("发布列表中没有已发布版本")?
+                .ok_or(tr("No releases found", "发布列表中没有已发布版本"))?
         } else {
             let mut url = url;
             url.path_segments_mut()
-                .map_err(|_| "版本地址格式不正确")?
+                .map_err(|_| tr("Invalid release URL", "版本地址格式不正确"))?
                 .push("latest");
             resource::json(client, url.as_str(), progress, &step)?
         };
@@ -239,7 +244,13 @@ impl Component {
                     "windows" => "pc-windows-msvc",
                     "linux" => "unknown-linux-musl",
                     "macos" => "apple-darwin",
-                    _ => return Err(format!("没有提供 {system} 版 Overcast").into()),
+                    _ => {
+                        return Err(message!(
+                            "No Overcast binary for {system}",
+                            "没有提供 {system} 版 Overcast"
+                        )
+                        .into());
+                    }
                 };
                 (
                     format!(
@@ -285,7 +296,10 @@ impl Component {
                         })
                         .max_by_key(|(asset, _)| &asset.updated_at)
                         .ok_or_else(|| {
-                            format!("Mihomo Alpha 没有提供 {system}/{architecture} 程序")
+                            message!(
+                                "No Mihomo Alpha binary for {system}/{architecture}",
+                                "Mihomo Alpha 没有提供 {system}/{architecture} 程序"
+                            )
                         })?;
                     return Ok(Package {
                         asset,
@@ -320,7 +334,14 @@ impl Component {
             .assets
             .iter()
             .find(|asset| asset.name == name)
-            .ok_or_else(|| format!("{} {} 没有提供 {name}", self.name(), release.tag_name))?;
+            .ok_or_else(|| {
+                message!(
+                    "{} {} does not include {name}",
+                    "{} {} 没有提供 {name}",
+                    self.name(),
+                    release.tag_name
+                )
+            })?;
         Ok(Package {
             asset,
             member,
@@ -369,7 +390,7 @@ impl Component {
             let mut download = NamedTempFile::new_in(&parent)?;
             asset.download(client, download.as_file_mut(), progress)?;
             let unpacked = tempdir_in(&parent)?;
-            let step = progress.activity("展开程序");
+            let step = progress.activity(tr("Extracting binary", "展开程序"));
             unpack(
                 download.as_file_mut(),
                 &asset.name,
@@ -385,7 +406,13 @@ impl Component {
                 .find(|path| {
                     path.file_name().is_some_and(|name| name == member.as_str()) && path.is_file()
                 })
-                .ok_or_else(|| format!("{} 中没有找到 {member}", asset.name))?;
+                .ok_or_else(|| {
+                    message!(
+                        "{} does not contain {member}",
+                        "{} 中没有找到 {member}",
+                        asset.name
+                    )
+                })?;
             let path = binary.strip_prefix(unpacked.path())?.to_owned();
             #[cfg(unix)]
             fs::set_permissions(binary, fs::Permissions::from_mode(0o700))?;
@@ -412,7 +439,13 @@ impl Component {
                 .find(|path| {
                     path.file_name().is_some_and(|name| name == member.as_str()) && path.is_file()
                 })
-                .ok_or_else(|| format!("{} 中没有找到 {member}", directory.display()))?;
+                .ok_or_else(|| {
+                    message!(
+                        "{} does not contain {member}",
+                        "{} 中没有找到 {member}",
+                        directory.display()
+                    )
+                })?;
             binary.strip_prefix(&directory)?.to_owned()
         };
         let installed = Installed {
@@ -423,7 +456,7 @@ impl Component {
         };
         progress.check()?;
         let detail = format!("{} {}", self.name(), installed.version);
-        progress.record("准备完成", &detail);
+        progress.record(tr("Ready", "准备完成"), &detail);
         Ok(installed)
     }
 }
@@ -452,7 +485,11 @@ fn unpack(
             step,
         )?;
     } else {
-        return Err(format!("不支持的程序包格式：{name}").into());
+        return Err(message!(
+            "Unsupported package format: {name}",
+            "不支持的程序包格式：{name}"
+        )
+        .into());
     }
     progress.check()
 }
@@ -516,25 +553,36 @@ pub fn edit(
         let preview = settings.is_some_and(|settings| settings.preview);
         let installed = resources.components.get(&component);
         let own = component == Component::Overcast;
-        let version = component.version(&resources).unwrap_or("未安装");
+        let version = component
+            .version(&resources)
+            .unwrap_or(tr("Not installed", "未安装"));
         let channel = if own { crate::update::channel()? } else { None };
-        let mut heading = format!("当前版本：{version}");
+        let mut heading = message!("Current version: {version}", "当前版本：{version}");
         if let Some(channel) = &channel {
-            heading.push_str(&format!("（{channel} 安装）"));
+            heading.push_str(&message!(
+                " (installed via {channel})",
+                "（{channel} 安装）"
+            ));
         }
         let mut items = [
-            Item::new("install", "安装最新版".stylized()),
-            Item::new("version", "指定版本".stylized()),
-            Item::new("check", "检查更新".stylized()),
-            Item::new("preview", "包含预览版".stylized()),
-            Item::new("back", "返回".stylized()),
+            Item::new(
+                "install",
+                tr("Install latest version", "安装最新版").stylized(),
+            ),
+            Item::new("version", tr("Choose version", "指定版本").stylized()),
+            Item::new("check", tr("Check for updates", "检查更新").stylized()),
+            Item::new(
+                "preview",
+                tr("Include prereleases", "包含预览版").stylized(),
+            ),
+            Item::new("back", tr("Back", "返回").stylized()),
         ];
         items[1].value = if own {
             format!("v{version}")
         } else {
             installed.map_or_else(String::new, |v| v.tag.clone())
         };
-        items[1].detail = "发布标签".to_owned();
+        items[1].detail = tr("Release tag", "发布标签").to_owned();
         items[3].marker = if preview { "■" } else { "□" };
         if let Some(release) = &latest {
             items[0].value = component.package(release)?.version;
@@ -543,7 +591,10 @@ pub fn edit(
             title: component.name(),
             heading: &heading,
             items: &items,
-            help: "方向键 选择\n回车键 确定\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to confirm\nEsc to go back",
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            ),
         };
         match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(None),
@@ -552,9 +603,11 @@ pub fn edit(
         }
         let result = match items[selected].key.as_str() {
             "check" => screen
-                .work("查询版本", component.name(), |progress| {
-                    component.release(client, None, preview, progress)
-                })
+                .work(
+                    tr("Checking releases", "查询版本"),
+                    component.name(),
+                    |progress| component.release(client, None, preview, progress),
+                )
                 .map(|release| {
                     latest = Some(release);
                 }),
@@ -562,12 +615,15 @@ pub fn edit(
                 if let Some(channel) = &channel {
                     let mut selected = 0;
                     let choices = [
-                        Item::new("back", "返回".stylized()),
-                        Item::new("replace", "仍然更新".stylized()),
+                        Item::new("back", tr("Back", "返回").stylized()),
+                        Item::new("replace", tr("Update anyway", "仍然更新").stylized()),
                     ];
-                    let heading = format!("当前程序由 {channel} 安装，此操作会替换它。");
+                    let heading = message!(
+                        "This will replace the executable installed by {channel}.",
+                        "当前程序由 {channel} 安装，此操作会替换它。"
+                    );
                     let menu = Menu {
-                        title: "更新 Overcast",
+                        title: tr("Update Overcast", "更新 Overcast"),
                         heading: &heading,
                         items: &choices,
                         help: menu.help,
@@ -583,7 +639,7 @@ pub fn edit(
                         screen.input(&menu, selected, &items[selected].value, |value, _| {
                             let version = value.trim();
                             if version.is_empty() {
-                                return Err("请填写发布标签".into());
+                                return Err(tr("Enter a release tag", "请填写发布标签").into());
                             }
                             component.directory(store, version)?;
                             Ok(version.to_owned())
@@ -595,29 +651,33 @@ pub fn edit(
                 } else {
                     None
                 };
-                let result = screen.work("安装组件", component.name(), |progress| {
-                    let release =
-                        component.release(client, version.as_deref(), preview, progress)?;
-                    let updated = match component.prepare(
-                        store,
-                        client,
-                        &release,
-                        version.is_some(),
-                        progress,
-                    )? {
-                        Prepared::Overcast(update) => {
-                            update.map(|v| v.install(store, progress)).transpose()?
-                        }
-                        Prepared::Program(installed) => {
-                            store.update(progress, |_, resources| {
-                                resources.components.insert(component, installed);
-                                Ok(())
-                            })?;
-                            None
-                        }
-                    };
-                    Ok((release, updated))
-                });
+                let result = screen.work(
+                    tr("Installing component", "安装组件"),
+                    component.name(),
+                    |progress| {
+                        let release =
+                            component.release(client, version.as_deref(), preview, progress)?;
+                        let updated = match component.prepare(
+                            store,
+                            client,
+                            &release,
+                            version.is_some(),
+                            progress,
+                        )? {
+                            Prepared::Overcast(update) => {
+                                update.map(|v| v.install(store, progress)).transpose()?
+                            }
+                            Prepared::Program(installed) => {
+                                store.update(progress, |_, resources| {
+                                    resources.components.insert(component, installed);
+                                    Ok(())
+                                })?;
+                                None
+                            }
+                        };
+                        Ok((release, updated))
+                    },
+                );
                 match result {
                     Ok((_, Some(update))) => return Ok(Some(update)),
                     Ok((release, None)) => {

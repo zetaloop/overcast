@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
@@ -19,9 +20,14 @@ use super::{
 
 pub fn cipher(value: Cipher, core: Core, inbound: bool) -> Result<Value> {
     if !value.supported(core, inbound) {
-        return unsupported(format!(
+        return unsupported(message!(
+            "This core does not support cipher {1} for Shadowsocks {0}",
             "当前核心的 Shadowsocks {}不支持算法 {}",
-            if inbound { "入站" } else { "出站" },
+            if inbound {
+                tr("Inbound", "入站")
+            } else {
+                tr("Outbound", "出站")
+            },
             serde_json::to_value(value)?
         ));
     }
@@ -50,9 +56,10 @@ pub fn authentication(
         Authentication::IdentityKey => {
             output.insert(
                 "password".to_owned(),
-                options
-                    .take("password")
-                    .ok_or("缺少 Shadowsocks 入口共享密钥")?,
+                options.take("password").ok_or(tr(
+                    "Missing shared Shadowsocks inbound key",
+                    "缺少 Shadowsocks 入口共享密钥",
+                ))?,
             );
         }
         Authentication::Users => {}
@@ -62,7 +69,10 @@ pub fn authentication(
         Authentication::Single => {
             output.remove("users");
             let [(_, credential)] = users else {
-                return unsupported("当前 Shadowsocks 算法的入站需要单个认证密钥");
+                return unsupported(tr(
+                    "This Shadowsocks cipher requires a single inbound key",
+                    "当前 Shadowsocks 算法的入站需要单个认证密钥",
+                ));
             };
             output.insert("password".to_owned(), json!(credential.password));
         }
@@ -101,14 +111,13 @@ pub fn prepare(
             .filter_map(|(source, key)| key.map(|password| source.cipher.password(password)))
             .collect::<Result<_>>()?;
         if passwords.len() > 1 {
-            return Err(format!(
-                "入站 {} 关联的 Shadowsocks 监听要求不同的入口密钥",
+            return Err(message!("Shadowsocks listeners associated with inbound {} require different inbound keys", "入站 {} 关联的 Shadowsocks 监听要求不同的入口密钥",
                 group
                     .entries
                     .iter()
                     .map(|entry| graph.entries[*entry].inbound.name.as_str())
                     .collect::<Vec<_>>()
-                    .join("、")
+                    .join(tr(", ", "、"))
             )
             .into());
         }
@@ -134,7 +143,11 @@ pub(super) fn arguments(text: &str) -> Result<BTreeMap<String, String>> {
             None => (std::mem::take(part), "1".to_owned()),
         };
         if key.is_empty() {
-            return Err("插件参数名称不能为空".into());
+            return Err(tr(
+                "Plugin parameter names cannot be empty",
+                "插件参数名称不能为空",
+            )
+            .into());
         }
         values.entry(key).or_insert(value);
         Ok(())
@@ -142,7 +155,10 @@ pub(super) fn arguments(text: &str) -> Result<BTreeMap<String, String>> {
     let mut chars = text.chars();
     while let Some(value) = chars.next() {
         match value {
-            '\\' => part.push(chars.next().ok_or("插件参数的转义符后缺少字符")?),
+            '\\' => part.push(chars.next().ok_or(tr(
+                "Incomplete escape in plugin parameters",
+                "插件参数的转义符后缺少字符",
+            ))?),
             '=' if name.is_none() => name = Some(std::mem::take(&mut part)),
             ';' => insert(&mut name, &mut part)?,
             value => part.push(value),
@@ -169,7 +185,11 @@ pub fn plugin(
         "obfs-local" | "simple-obfs" | "obfs" => {
             let mode = values.remove("obfs").unwrap_or_else(|| "http".to_owned());
             if !matches!(mode.as_str(), "http" | "tls") {
-                return Err("Simple Obfs 模式需要使用 http 或 tls".into());
+                return Err(tr(
+                    "Simple Obfs requires http or tls mode",
+                    "Simple Obfs 模式需要使用 http 或 tls",
+                )
+                .into());
             }
             options.insert("mode".to_owned(), json!(mode));
             options.insert(
@@ -183,10 +203,17 @@ pub fn plugin(
                 .remove("mode")
                 .unwrap_or_else(|| "websocket".to_owned());
             if !matches!(mode.as_str(), "websocket" | "quic") {
-                return Err("v2ray-plugin 模式需要使用 websocket 或 quic".into());
+                return Err(tr(
+                    "v2ray-plugin requires websocket or quic mode",
+                    "v2ray-plugin 模式需要使用 websocket 或 quic",
+                )
+                .into());
             }
             if core == Core::Mihomo && mode != "websocket" {
-                return unsupported("Mihomo v2ray-plugin 使用 WebSocket");
+                return unsupported(tr(
+                    "Mihomo v2ray-plugin requires WebSocket",
+                    "Mihomo v2ray-plugin 使用 WebSocket",
+                ));
             }
             options.insert("mode".to_owned(), json!(mode));
             let host = values.remove("host");
@@ -200,7 +227,7 @@ pub fn plugin(
             );
             let tls = values.remove("tls").is_some();
             if mode == "quic" && !tls {
-                return unsupported("QUIC 插件需要 TLS");
+                return unsupported(tr("The QUIC plugin requires TLS", "QUIC 插件需要 TLS"));
             }
             if tls && core == Core::Mihomo && host.is_none() {
                 options.insert("host".to_owned(), json!(server));
@@ -218,13 +245,18 @@ pub fn plugin(
                 format!("-----BEGIN CERTIFICATE-----\n{value}\n-----END CERTIFICATE-----")
             });
             if cert.is_some() && raw.is_some() {
-                return Err("v2ray-plugin 的同一份证书请选择 cert 路径或 certRaw 正文".into());
+                return Err(tr(
+                    "Specify the v2ray-plugin certificate using either cert or certRaw",
+                    "v2ray-plugin 的同一份证书请选择 cert 路径或 certRaw 正文",
+                )
+                .into());
             }
             if core == Core::Mihomo && tls {
                 if cert.is_some() {
-                    return unsupported(
+                    return unsupported(tr(
+                        "Mihomo v2ray-plugin requires inline trust certificates in certRaw",
                         "Mihomo v2ray-plugin 的信任证书使用 certRaw 正文，不支持 cert 路径",
-                    );
+                    ));
                 }
                 if let Some(raw) = raw {
                     globals.insert("tls".to_owned(), json!({"custom-certifactes": [raw]}));
@@ -305,16 +337,30 @@ pub fn plugin(
                 "keepalive",
             ],
         ),
-        _ => return unsupported(format!("当前核心没有 SIP003 插件 {}", source.name)),
+        _ => {
+            return unsupported(message!(
+                "This core does not support SIP003 plugin {}",
+                "当前核心没有 SIP003 插件 {}",
+                source.name
+            ));
+        }
     };
     if core == Core::SingBox {
         if !matches!(name, "obfs" | "v2ray-plugin") {
-            return unsupported(format!("sing-box 没有 SIP003 插件 {name}"));
+            return unsupported(message!(
+                "sing-box does not support SIP003 plugin {name}",
+                "sing-box 没有 SIP003 插件 {name}"
+            ));
         }
         if !values.is_empty() {
-            return unsupported(format!(
+            return unsupported(message!(
+                "Unused sing-box plugin parameters: {}",
                 "sing-box 插件未使用参数：{}",
-                values.keys().cloned().collect::<Vec<_>>().join("、")
+                values
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(tr(", ", "、"))
             ));
         }
         if let Some(path) = original.get_mut("cert") {
@@ -339,13 +385,19 @@ pub fn plugin(
     } else if core == Core::Mihomo {
         if let Some(fingerprint) = values.remove("client-fingerprint") {
             if name != "restls" {
-                return unsupported("当前插件没有客户端握手指纹配置");
+                return unsupported(tr(
+                    "This plugin does not support client handshake fingerprints",
+                    "当前插件没有客户端握手指纹配置",
+                ));
             }
             output.insert("client-fingerprint".to_owned(), json!(fingerprint));
         }
         for (key, value) in values {
             if !allowed.contains(&key.as_str()) {
-                return unsupported(format!("Mihomo 插件未使用参数：{key}"));
+                return unsupported(message!(
+                    "Unused Mihomo plugin parameter: {key}",
+                    "Mihomo 插件未使用参数：{key}"
+                ));
             }
             let value = if key == "headers" {
                 let headers: Map<String, Value> = serde_json::from_str(&value)?;
@@ -372,7 +424,10 @@ pub fn plugin(
         output.insert("plugin".to_owned(), json!(name));
         output.insert("plugin-opts".to_owned(), json!(options));
     } else {
-        return unsupported("Xray Shadowsocks 使用传输设置配置封装");
+        return unsupported(tr(
+            "Xray Shadowsocks uses transport settings for encapsulation",
+            "Xray Shadowsocks 使用传输设置配置封装",
+        ));
     }
     Ok(output)
 }

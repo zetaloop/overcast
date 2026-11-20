@@ -1,3 +1,4 @@
+use crate::language::text as tr;
 use std::{fs, path::Path, process::Command};
 
 use super::execute;
@@ -10,7 +11,7 @@ fn quote(value: &Path) -> Result<String> {
         "\"{}\"",
         value
             .to_str()
-            .ok_or("路径包含无效字符")?
+            .ok_or(tr("Invalid character in path", "路径包含无效字符"))?
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('%', "%%")

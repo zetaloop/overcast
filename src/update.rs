@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{env, fmt::Write as _, fs, io, path::PathBuf};
 
 use semver::Version;
@@ -14,7 +15,7 @@ fn program() -> io::Result<PathBuf> {
 pub fn channel() -> Result<Option<String>> {
     match fs::read_to_string(program()?.with_extension("channel")) {
         Ok(text) if !text.trim().is_empty() => Ok(Some(text.trim().to_owned())),
-        Ok(_) => Err("安装渠道标记为空".into()),
+        Ok(_) => Err(tr("Installation channel marker is empty", "安装渠道标记为空").into()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -52,8 +53,13 @@ pub struct Installed {
 impl Installed {
     pub fn activate(self, store: &Store, progress: &Progress) -> Result<String> {
         if let Some(id) = self.running {
-            service::restart(store, id, progress)
-                .map_err(|error| format!("Overcast {} 已安装；{error}", self.version))?;
+            service::restart(store, id, progress).map_err(|error| {
+                message!(
+                    "Overcast {} was installed; {error}",
+                    "Overcast {} 已安装；{error}",
+                    self.version
+                )
+            })?;
         }
         Ok(self.version)
     }
@@ -67,10 +73,10 @@ impl Update {
         specific: bool,
         progress: &Progress,
     ) -> Result<Option<Self>> {
-        let candidate = Version::parse(
-            tag.strip_prefix('v')
-                .ok_or("Overcast 发布标签缺少 v 前缀")?,
-        )?;
+        let candidate = Version::parse(tag.strip_prefix('v').ok_or(tr(
+            "Overcast release tag is missing its v prefix",
+            "Overcast 发布标签缺少 v 前缀",
+        ))?)?;
         let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
         if !specific && candidate.cmp_precedence(&current).is_lt() {
             return Ok(None);
@@ -79,16 +85,24 @@ impl Update {
             .digest
             .as_deref()
             .filter(|s| s.starts_with("sha256:"))
-            .ok_or("发布文件缺少 SHA-256 摘要")?;
+            .ok_or(tr(
+                "Release asset is missing its SHA-256 digest",
+                "发布文件缺少 SHA-256 摘要",
+            ))?;
         let target = program()?;
         if candidate == current && digest(fs::File::open(&target)?)? == expected {
-            progress.record("当前版本", tag);
+            progress.record(tr("Current version", "当前版本"), tag);
             return Ok(None);
         }
         let mut download = NamedTempFile::new_in(target.parent().unwrap())?;
         asset.download(client, download.as_file_mut(), progress)?;
         if digest(download.as_file())? != expected {
-            return Err(format!("{} 的内容与发布文件摘要不符", asset.name).into());
+            return Err(message!(
+                "Contents of {} do not match the release digest",
+                "{} 的内容与发布文件摘要不符",
+                asset.name
+            )
+            .into());
         }
         #[cfg(unix)]
         download
@@ -106,7 +120,7 @@ impl Update {
         let lock = store.lock()?;
         let deployment = service::Deployment::load(store)?;
         progress.check()?;
-        let step = progress.activity("更新 Overcast");
+        let step = progress.activity(tr("Update Overcast", "更新 Overcast"));
         let candidate = self.download.into_temp_path();
         #[cfg(unix)]
         fs::rename(&candidate, &self.target)?;
@@ -116,8 +130,7 @@ impl Update {
             fs::rename(&self.target, &retired)?;
             if let Err(error) = fs::rename(&candidate, &self.target) {
                 fs::rename(&retired, &self.target).map_err(|restore| {
-                    format!(
-                        "安装新版失败：{error}；旧程序位于 {}：{restore}",
+                    message!("Could not install the update: {error}; previous executable at {}: {restore}", "安装新版失败：{error}；旧程序位于 {}：{restore}",
                         retired.display()
                     )
                 })?;

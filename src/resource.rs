@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::BTreeMap,
     env,
@@ -63,7 +64,11 @@ pub struct Asset {
 
 impl Asset {
     pub fn download(&self, client: &Agent, file: &mut File, progress: &Progress) -> Result<()> {
-        let step = progress.start("下载程序", self.size, "字节");
+        let step = progress.start(
+            tr("Downloading binary", "下载程序"),
+            self.size,
+            tr("bytes", "字节"),
+        );
         retry(progress, &step, || {
             step.set(0);
             step.detail(&self.name);
@@ -72,9 +77,14 @@ impl Asset {
             let mut response = request(client, &self.browser_download_url)?;
             copy(&mut response.body_mut().as_reader(), file, progress, &step)?;
             if file.stream_position()? != self.size {
-                return Err(
-                    io::Error::new(io::ErrorKind::UnexpectedEof, "下载大小与发布文件不符").into(),
-                );
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    tr(
+                        "Download size does not match the release asset",
+                        "下载大小与发布文件不符",
+                    ),
+                )
+                .into());
             }
             file.rewind()?;
             Ok(())
@@ -121,7 +131,7 @@ struct Status {
 
 impl fmt::Display for Status {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "HTTP {}：{}", self.code, self.message)
+        write!(formatter, "HTTP {}: {}", self.code, self.message)
     }
 }
 
@@ -152,7 +162,12 @@ pub fn request(client: &Agent, url: &str) -> Result<Response<Body>> {
     if url.starts_with("https://api.github.com/") {
         request = request.header("Accept", "application/vnd.github+json");
         if let Some(token) = env::var_os("GH_TOKEN").or_else(|| env::var_os("GITHUB_TOKEN")) {
-            let token = token.into_string().map_err(|_| "GitHub 凭据包含无效字符")?;
+            let token = token.into_string().map_err(|_| {
+                tr(
+                    "Invalid character in GitHub credential",
+                    "GitHub 凭据包含无效字符",
+                )
+            })?;
             request = request.header("Authorization", format!("Bearer {token}"));
         }
     }
@@ -223,7 +238,11 @@ pub fn retry<T>(
                 let Some(delay) = delay(error.as_ref(), backoff) else {
                     return Err(error);
                 };
-                step.detail(format!("{error}\n{:.0} 秒后重新请求", delay.as_secs_f64()));
+                step.detail(message!(
+                    "{error}\nRetrying in {:.0} seconds",
+                    "{error}\n{:.0} 秒后重新请求",
+                    delay.as_secs_f64()
+                ));
                 progress.wait(delay)?;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }

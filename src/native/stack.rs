@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use crate::{
     Result,
     connection::{self, Connection},
@@ -43,7 +44,7 @@ impl Connection {
                 Err(error) => errors.push(error.to_string()),
             }
         }
-        Err(errors.join("；").into())
+        Err(errors.join(tr("; ", "；")).into())
     }
 }
 
@@ -56,17 +57,23 @@ impl Stack<'_> {
 
     pub(crate) fn check(self, core: Core, security: usize, transport: &Transport) -> Result<()> {
         if !self.implements(core) {
-            return super::unsupported(format!("{} 没有这个协议的实现", core.text()));
+            return super::unsupported(message!(
+                "{} does not implement this protocol",
+                "{} 没有这个协议的实现",
+                core.text()
+            ));
         }
         if !self.security(core, security) {
-            return super::unsupported(format!(
+            return super::unsupported(message!(
+                "{} does not support the {} handshake for this protocol",
                 "{} 的此协议不支持「{}」握手",
                 core.text(),
-                ["无", "TLS", "REALITY"][security]
+                [tr("None", "无"), "TLS", "REALITY"][security]
             ));
         }
         if !self.transport(core, security, transport) {
-            return super::unsupported(format!(
+            return super::unsupported(message!(
+                "{} cannot use {} transport with this protocol and handshake",
                 "{} 的此协议与握手无法使用 {} 传输",
                 core.text(),
                 transport.text()

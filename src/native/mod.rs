@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 mod binding;
 pub(crate) mod carrier;
 pub(crate) mod encryption;
@@ -196,8 +197,9 @@ pub fn prepare(
     let mut clients = BTreeSet::new();
     let mut include = |inbound: &Inbound, layer: Layer| -> Result<()> {
         if layer == Layer::Transport && !inbound.response_only() && clients.insert(inbound.uuid) {
-            parameters::check_clients(inbound, store)
-                .map_err(|error| format!("入站 {}：{error}", inbound.name))?;
+            parameters::check_clients(inbound, store).map_err(|error| {
+                message!("Inbound {}: {error}", "入站 {}：{error}", inbound.name)
+            })?;
         }
         if let Some(scope) = scopes.remove(&inbound.uuid) {
             coverage.reached.extend(scope.reached);
@@ -302,7 +304,12 @@ pub fn prepare(
                 if layer == Layer::Protocol {
                     continue;
                 }
-                return Err(format!("入站 {uuid} 缺少 {} 接收器", network.name()).into());
+                return Err(message!(
+                    "Inbound {uuid} has no {} receiver",
+                    "入站 {uuid} 缺少 {} 接收器",
+                    network.name()
+                )
+                .into());
             };
             let networks = if layer == Layer::Protocol {
                 BTreeSet::from([graph::Network::Tcp])
@@ -350,7 +357,7 @@ pub fn prepare(
             )
         })
         .collect();
-    let step = progress.activity("生成核心配置");
+    let step = progress.activity(tr("Generating core configurations", "生成核心配置"));
     let mut receivers = Vec::new();
     for (index, listener) in listeners.iter_mut().enumerate() {
         progress.check()?;
@@ -595,7 +602,10 @@ pub fn prepare(
                     {
                         let (server, port) = forward::target(config, rule.destination)
                             .and_then(Connection::server)
-                            .ok_or("转交目标缺少后继连接")?;
+                            .ok_or(tr(
+                                "Forwarding target has no next connection",
+                                "转交目标缺少后继连接",
+                            ))?;
                         Some((server.to_owned(), port))
                     } else {
                         None
@@ -672,7 +682,8 @@ pub fn prepare(
                 .iter()
                 .find(|listener| listener.binding.overlaps(&http))
         {
-            return Err(format!(
+            return Err(message!(
+                "Inbound {} overlaps TCP port 80 used for HTTP certificate validation",
                 "入站 {} 的监听与证书 HTTP 验证所需的 TCP 80 端口重叠",
                 listener.source.name
             )
@@ -811,7 +822,11 @@ pub fn prepare(
         });
     }
     progress.check()?;
-    step.finish(format!("{} 个服务实例", state.instances.len()));
+    step.finish(message!(
+        "Service instances: {}",
+        "{} 个服务实例",
+        state.instances.len()
+    ));
     Ok((
         Some(Prepared {
             directory,
@@ -902,9 +917,17 @@ impl<'a> Builder<'a> {
             let destination = source.protocol.destination().unwrap();
             let server = forward::target(graph.config(), destination)
                 .and_then(Connection::server)
-                .ok_or("转发入口缺少后继连接")?;
+                .ok_or(tr(
+                    "Forwarding inbound has no next connection",
+                    "转发入口缺少后继连接",
+                ))?;
             if target.is_some_and(|target| target != server) {
-                return Err(format!("入站 {} 的同一监听对应不同转发目标", source.name).into());
+                return Err(message!(
+                    "Inbound {} has conflicting forwarding targets on the same listener",
+                    "入站 {} 的同一监听对应不同转发目标",
+                    source.name
+                )
+                .into());
             }
             for other in &listener.members[..index] {
                 let Destination::Outbound(left) = graph.entries[other.entry]
@@ -929,15 +952,24 @@ impl<'a> Builder<'a> {
                             Payload::Connection,
                         )?
                     {
-                        return Err(
-                            format!("入站 {} 的同一监听对应不同转发路径", source.name).into()
-                        );
+                        return Err(message!(
+                            "Inbound {} has conflicting forwarding paths on the same listener",
+                            "入站 {} 的同一监听对应不同转发路径",
+                            source.name
+                        )
+                        .into());
                     }
                 }
             }
             target = Some(server);
         }
-        target.ok_or_else(|| "转发入口缺少后继连接".into())
+        target.ok_or_else(|| {
+            tr(
+                "Forwarding inbound has no next connection",
+                "转发入口缺少后继连接",
+            )
+            .into()
+        })
     }
 
     fn service(
@@ -993,7 +1025,7 @@ impl<'a> Builder<'a> {
             .outbounds
             .iter()
             .find(|outbound| outbound.uuid == uuid)
-            .ok_or_else(|| format!("找不到出站：{uuid}"))?;
+            .ok_or_else(|| message!("Unknown outbound: {uuid}", "找不到出站：{uuid}"))?;
         let paths = self.plan(source, Some(preferred), payload)?;
         Ok(self
             .chains
@@ -1025,7 +1057,11 @@ impl<'a> Builder<'a> {
                     && core != Core::Xray
                     && (forward || matches!(connection, Connection::Direct(_)))
                 {
-                    errors.push(format!("{} 直连出站没有前置代理配置", key(core)));
+                    errors.push(message!(
+                        "{} direct outbounds cannot use a preceding proxy",
+                        "{} 直连出站没有前置代理配置",
+                        key(core)
+                    ));
                     continue;
                 }
                 let mut globals = Map::new();
@@ -1064,11 +1100,12 @@ impl<'a> Builder<'a> {
                     chains.clear();
                     break;
                 }
-                return Err(format!(
+                return Err(message!(
+                    "Outbound {}, connection {}: {}",
                     "出站 {} 第 {} 段连接无法生成：{}",
                     source.name,
                     index + 1,
-                    errors.join("；")
+                    errors.join(tr("; ", "；"))
                 )
                 .into());
             }
@@ -1114,12 +1151,11 @@ impl<'a> Builder<'a> {
                         _ => unreachable!(),
                     })
                     .collect();
-                return Err(format!(
-                    "出站 {} 第 {} 段（{}）之后可用 {}，无法承载第 {} 段（{}）",
+                return Err(message!("Outbound {}, connection {} ({}) provides {}, which cannot carry connection {} ({})", "出站 {} 第 {} 段（{}）之后可用 {}，无法承载第 {} 段（{}）",
                     source.name,
                     index,
                     source.connections[index - 1].summary(),
-                    prefix.into_iter().collect::<Vec<_>>().join(" 或 "),
+                    prefix.into_iter().collect::<Vec<_>>().join(tr(" or ", " 或 ")),
                     index + 1,
                     connection.summary(),
                 )
@@ -1141,7 +1177,10 @@ impl<'a> Builder<'a> {
         let selected = plans
             .iter()
             .position(|chain| chain.supports(network))
-            .ok_or("出站无法传递请求的网络类型")?;
+            .ok_or(tr(
+                "Outbound cannot carry the requested network type",
+                "出站无法传递请求的网络类型",
+            ))?;
         let nodes = plans[selected].nodes.clone();
         if let Some(endpoint) = self.outbounds.get(&(uuid, preferred, payload, selected)) {
             return Ok(endpoint.clone());
@@ -1206,7 +1245,7 @@ impl<'a> Builder<'a> {
                 resolve_udp: node.resolve_udp,
             });
         }
-        let endpoint = endpoint.ok_or("出站中没有连接")?;
+        let endpoint = endpoint.ok_or(tr("Outbound has no connections", "出站中没有连接"))?;
         self.outbounds
             .insert((uuid, preferred, payload, selected), endpoint.clone());
         Ok(endpoint)
@@ -1314,8 +1353,12 @@ impl<'a> Builder<'a> {
             Some(port) => port,
             None => {
                 let mut bytes = [0; 2];
-                getrandom::fill(&mut bytes)
-                    .map_err(|error| format!("分配核心转交端口失败：{error}"))?;
+                getrandom::fill(&mut bytes).map_err(|error| {
+                    message!(
+                        "Could not allocate a core handoff port: {error}",
+                        "分配核心转交端口失败：{error}"
+                    )
+                })?;
                 u16::from_ne_bytes(bytes)
             }
         };
@@ -1374,10 +1417,15 @@ impl<'a> Builder<'a> {
                 break;
             }
             if selected.is_none() {
-                return Err(format!(
+                return Err(message!(
+                    "No local port available for core handoff: {}",
                     "核心转交没有可用的本机端口：{}",
                     last_error.map_or_else(
-                        || "端口均被监听配置占用".to_owned(),
+                        || tr(
+                            "All ports are reserved by listeners",
+                            "端口均被监听配置占用"
+                        )
+                        .to_owned(),
                         |error| error.to_string()
                     )
                 )
@@ -1481,7 +1529,11 @@ fn digest(value: &str) -> Result<Vec<u8>> {
         STANDARD.decode(value)?
     };
     if bytes.len() != 32 {
-        return Err("SHA-256 固定值需要包含 32 字节".into());
+        return Err(tr(
+            "A SHA-256 pin must contain 32 bytes",
+            "SHA-256 固定值需要包含 32 字节",
+        )
+        .into());
     }
     Ok(bytes)
 }
@@ -1510,7 +1562,10 @@ fn single_headers(headers: &BTreeMap<String, Vec<String>>) -> Result<BTreeMap<St
         .iter()
         .map(|(name, values)| match values.as_slice() {
             [value] => Ok((name.clone(), value.clone())),
-            _ => unsupported(format!("这个核心的 HTTP 请求头每个名称使用一个值：{name}")),
+            _ => unsupported(message!(
+                "This core accepts one value per HTTP header: {name}",
+                "这个核心的 HTTP 请求头每个名称使用一个值：{name}"
+            )),
         })
         .collect()
 }

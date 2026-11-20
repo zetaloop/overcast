@@ -1,3 +1,4 @@
+use crate::language::text as tr;
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -14,11 +15,19 @@ pub fn client(source: &Client, core: Core) -> Result<Value> {
     let mut output = Map::from_iter([("enabled".to_owned(), json!(true))]);
     if core == Core::Xray {
         if source.protocol != Protocol::MuxCool {
-            return unsupported("Xray 的流复用使用 Mux.Cool");
+            return unsupported(tr(
+                "Xray uses Mux.Cool for multiplexing",
+                "Xray 的流复用使用 Mux.Cool",
+            ));
         }
         options.rename(&mut output, &[("max_streams", "concurrency")]);
         if let Some(streams) = source.max_streams {
-            i16::try_from(streams).map_err(|_| "Xray 并发流数超过支持范围")?;
+            i16::try_from(streams).map_err(|_| {
+                tr(
+                    "Xray stream concurrency exceeds the supported range",
+                    "Xray 并发流数超过支持范围",
+                )
+            })?;
         }
         options.take("tcp_only");
         if source.tcp_only {
@@ -27,7 +36,10 @@ pub fn client(source: &Client, core: Core) -> Result<Value> {
         output.insert("xudpProxyUDP443".to_owned(), json!("allow"));
     } else {
         if source.protocol == Protocol::MuxCool {
-            return unsupported("这个核心的流复用客户端使用 SMux、Yamux 或 H2Mux");
+            return unsupported(tr(
+                "This core requires SMux, Yamux or H2Mux for client multiplexing",
+                "这个核心的流复用客户端使用 SMux、Yamux 或 H2Mux",
+            ));
         }
         output.insert(
             "protocol".to_owned(),
@@ -66,13 +78,16 @@ pub fn client(source: &Client, core: Core) -> Result<Value> {
             );
         }
     }
-    options.finish("流复用客户端")?;
+    options.finish(tr("Multiplexing client", "流复用客户端"))?;
     Ok(json!(output))
 }
 
 pub fn server(source: &Server, core: Core) -> Result<Value> {
     if core == Core::Xray {
-        return unsupported("Xray 没有 S-Mux 服务端配置");
+        return unsupported(tr(
+            "Xray does not support server-side S-Mux",
+            "Xray 没有 S-Mux 服务端配置",
+        ));
     }
     let mut output = Map::new();
     if core == Core::SingBox {
@@ -89,11 +104,18 @@ pub fn server(source: &Server, core: Core) -> Result<Value> {
 
 fn brutal(source: &Brutal, core: Core) -> Result<Value> {
     if source.upload == 0 || source.download == 0 {
-        return Err("请填写 TCP Brutal 的上传与下载速率".into());
+        return Err(tr(
+            "Enter upload and download rates for TCP Brutal",
+            "请填写 TCP Brutal 的上传与下载速率",
+        )
+        .into());
     }
     if core == Core::SingBox {
         if !source.upload.is_multiple_of(125_000) || !source.download.is_multiple_of(125_000) {
-            return unsupported("sing-box 的 TCP Brutal 使用整数 Mbps 速率");
+            return unsupported(tr(
+                "sing-box requires whole Mbps for TCP Brutal rates",
+                "sing-box 的 TCP Brutal 使用整数 Mbps 速率",
+            ));
         }
         Ok(
             json!({"enabled": true, "up_mbps": source.upload / 125_000, "down_mbps": source.download / 125_000}),

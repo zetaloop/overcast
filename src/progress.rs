@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     io::{Error, ErrorKind},
     sync::{
@@ -132,7 +133,7 @@ impl Progress {
         self.warnings
             .lock()
             .expect("progress lock poisoned")
-            .push(format!("{name}：{detail}"));
+            .push(message!("{name}: {detail}", "{name}：{detail}"));
     }
 
     pub fn warnings(&self) -> Vec<String> {
@@ -152,7 +153,7 @@ impl Progress {
                 step.text.lock().expect("progress lock poisoned").finished = true;
             }
         }
-        self.record("操作失败", error);
+        self.record(tr("Operation failed", "操作失败"), error);
     }
 
     pub fn steps(&self) -> Vec<Step> {
@@ -178,7 +179,7 @@ impl Progress {
 
     pub fn check(&self) -> Result<()> {
         if self.cancelled.load(Ordering::Relaxed) {
-            return Err(Error::new(ErrorKind::Interrupted, "已取消").into());
+            return Err(Error::new(ErrorKind::Interrupted, tr("Cancelled", "已取消")).into());
         }
         Ok(())
     }

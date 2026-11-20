@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -73,7 +74,7 @@ impl Mode {
             Self::Shadowsocks | Self::ShadowsocksUdp => "Shadowsocks",
             Self::Hysteria2 => "Hysteria 2",
             Self::AnyTls => "AnyTLS",
-            Self::Forward | Self::ForwardUdp => "TCP/UDP 转发",
+            Self::Forward | Self::ForwardUdp => tr("TCP/UDP forwarding", "TCP/UDP 转发"),
         }
     }
 
@@ -159,9 +160,12 @@ impl Member {
                 && matches!(&source.protocol, Protocol::Vless(value)
                     if value.flow == crate::vless::Flow::Vision && value.encryption.is_none())
             {
-                return Err(
-                    format!("入站 {} 的 Vision 处理需要外层 TLS 上下文", source.name).into(),
-                );
+                return Err(message!(
+                    "Vision on inbound {} requires the outer TLS context",
+                    "入站 {} 的 Vision 处理需要外层 TLS 上下文",
+                    source.name
+                )
+                .into());
             }
             member
                 .modes
@@ -292,20 +296,31 @@ fn validate(
         source.listen.address.starts_with('@') || Path::new(&source.listen.address).is_absolute();
     let transport_udp = source.quic();
     if unix && source.core != Core::Xray {
-        return Err(format!("入站 {} 的核心没有 Unix socket 监听配置", source.name).into());
+        return Err(message!(
+            "The core for inbound {} cannot listen on Unix sockets",
+            "入站 {} 的核心没有 Unix socket 监听配置",
+            source.name
+        )
+        .into());
     }
     if unix
         && modes
             .iter()
             .any(|mode| mode.wire(source, Layer::Transport) == Network::Udp)
     {
-        return Err(format!("入站 {} 的传输需要 UDP 监听地址", source.name).into());
+        return Err(message!(
+            "The transport for inbound {} requires a UDP listener",
+            "入站 {} 的传输需要 UDP 监听地址",
+            source.name
+        )
+        .into());
     }
     if (unix || transport_udp)
         && source.core == Core::Xray
         && matches!(&source.protocol, Protocol::Mixed(protocol) if protocol.socks.enabled)
     {
-        return Err(format!(
+        return Err(message!(
+            "Xray SOCKS on inbound {} requires TCP; HTTP can use this transport",
             "入站 {} 的 Xray SOCKS 处理器需要 TCP 地址，HTTP 可使用当前传输",
             source.name
         )
@@ -316,11 +331,21 @@ fn validate(
         (Mode::Forward, Mode::ForwardUdp, ""),
     ] {
         if modes.contains(&packet) && (unix || transport_udp && modes.contains(&stream)) {
-            return Err(format!("入站 {} 的{name}数据报需要独立 UDP 套接字", source.name).into());
+            return Err(message!(
+                "Inbound {} requires a separate UDP socket for {name}datagrams",
+                "入站 {} 的{name}数据报需要独立 UDP 套接字",
+                source.name
+            )
+            .into());
         }
     }
     if users.is_empty() && source.protocol.needs_credentials() {
-        return Err(format!("入站 {} 需要用户或入口凭据", source.name).into());
+        return Err(message!(
+            "Inbound {} requires a user or inbound credentials",
+            "入站 {} 需要用户或入口凭据",
+            source.name
+        )
+        .into());
     }
     if matches!(source.protocol, Protocol::Hysteria2(_)) {
         for credential in users.values() {
@@ -362,7 +387,7 @@ pub fn build(
     keys: &BTreeMap<Uuid, crate::keys::Keys>,
     progress: &Progress,
 ) -> Result<Vec<Listener>> {
-    let step = progress.activity("分配监听资源");
+    let step = progress.activity(tr("Allocating listeners", "分配监听资源"));
     let mut groups: BTreeMap<Option<u16>, Vec<Vec<Member>>> = BTreeMap::new();
     let mut unbound = Vec::new();
     for (index, entry) in graph.entries.iter().enumerate() {
@@ -552,7 +577,7 @@ pub fn build(
     for members in combined.into_values() {
         result.push(merge(store, graph, members, progress)?);
     }
-    step.finish(format!("{} 组监听", result.len()));
+    step.finish(message!("Listener groups: {}", "{} 组监听", result.len()));
     result.extend(unbound);
     Ok(result)
 }
@@ -571,7 +596,15 @@ fn merge(
                 .iter()
                 .all(|member| candidate.binding.contains(&member.binding))
         })
-        .ok_or_else(|| conflict(&members, "监听地址与接口的组合无法合并"))?;
+        .ok_or_else(|| {
+            conflict(
+                &members,
+                tr(
+                    "The bind address and interface cannot be combined",
+                    "监听地址与接口的组合无法合并",
+                ),
+            )
+        })?;
     let mut binding = members[index].binding.clone();
     let mut source = (*members[index].source).clone();
     if let crate::inbound::Security::Reality(reality) = &mut source.security {
@@ -598,33 +631,61 @@ fn merge(
     let mut users = BTreeMap::new();
     for member in &members {
         if member.source.core != source.core {
-            return Err(conflict(&members, "同一监听资源指定了不同核心").into());
+            return Err(conflict(
+                &members,
+                tr(
+                    "The same listener is assigned to different cores",
+                    "同一监听资源指定了不同核心",
+                ),
+            )
+            .into());
         }
         if member.users.is_empty() != members[0].users.is_empty() {
-            return Err(conflict(&members, "认证与无凭据连接无法共用原生认证表").into());
+            return Err(conflict(&members, tr("Authenticated and anonymous connections cannot share this authentication table", "认证与无凭据连接无法共用原生认证表")).into());
         }
         for (&user, credential) in member.users.iter() {
             if source.protocol.credential() == Some(CredentialKind::Account)
                 && users.get(&user).is_some_and(|other| other != credential)
             {
-                return Err(conflict(&members, &format!("凭据 {user} 对应不同密码")).into());
+                return Err(conflict(
+                    &members,
+                    &message!(
+                        "Credential {user} has conflicting passwords",
+                        "凭据 {user} 对应不同密码"
+                    ),
+                )
+                .into());
             }
             users.insert(user, credential.clone());
         }
         if binding.interface != member.binding.interface {
-            return Err(conflict(&members, "监听套接字绑定到不同接口").into());
+            return Err(conflict(
+                &members,
+                tr(
+                    "Listeners bind to different interfaces",
+                    "监听套接字绑定到不同接口",
+                ),
+            )
+            .into());
         }
         same(
             binding.settings.as_ref(),
             member.binding.settings.as_ref(),
             &[],
-            "监听",
+            tr("Listener", "监听"),
             &members,
         )?;
         if matches!(source.security, crate::inbound::Security::None)
             != matches!(member.source.security, crate::inbound::Security::None)
         {
-            return Err(conflict(&members, "TLS 与明文连接使用了同一监听资源").into());
+            return Err(conflict(
+                &members,
+                tr(
+                    "TLS and plaintext connections use the same listener",
+                    "TLS 与明文连接使用了同一监听资源",
+                ),
+            )
+            .into());
         }
         if source.core == Core::Xray {
             same(
@@ -641,7 +702,7 @@ fn merge(
                     !matches!(member.source.security, crate::inbound::Security::None),
                 )?,
                 &[],
-                "传输",
+                tr("Transport", "传输"),
                 &members,
             )?;
         } else if source.core == Core::SingBox {
@@ -661,7 +722,7 @@ fn merge(
                 )?
                 .unwrap_or(serde_json::json!({})),
                 &[],
-                "传输",
+                tr("Transport", "传输"),
                 &members,
             )?;
         } else {
@@ -669,7 +730,7 @@ fn merge(
                 &super::transport::mihomo_server(&source.transport)?,
                 &super::transport::mihomo_server(&member.source.transport)?,
                 &[],
-                "传输",
+                tr("Transport", "传输"),
                 &members,
             )?;
         }
@@ -680,7 +741,14 @@ fn merge(
                     && crate::certificate::name(&source)?
                         != crate::certificate::name(&member.source)?
                 {
-                    return Err(conflict(&members, "这个核心的监听使用一组证书与私钥").into());
+                    return Err(conflict(
+                        &members,
+                        tr(
+                            "This core uses one certificate and private key per listener",
+                            "这个核心的监听使用一组证书与私钥",
+                        ),
+                    )
+                    .into());
                 }
             }
             (
@@ -701,12 +769,21 @@ fn merge(
                 same(&current.tls, &other.tls, &["server_name"], "TLS", &members)?;
             }
             (crate::inbound::Security::None, crate::inbound::Security::None) => {}
-            _ => return Err(conflict(&members, "TLS 与 REALITY 使用了同一监听资源").into()),
+            _ => {
+                return Err(conflict(
+                    &members,
+                    tr(
+                        "TLS and REALITY use the same listener",
+                        "TLS 与 REALITY 使用了同一监听资源",
+                    ),
+                )
+                .into());
+            }
         }
         match (&mut source.protocol, &member.source.protocol) {
             (Protocol::Mixed(current), Protocol::Mixed(other)) => {
                 if current.user_level != other.user_level {
-                    return Err(conflict(&members, "用户等级不同").into());
+                    return Err(conflict(&members, tr("User levels differ", "用户等级不同")).into());
                 }
                 current.udp |= other.udp;
                 if current.http.enabled && other.http.enabled {
@@ -744,10 +821,20 @@ fn merge(
                             || super::encryption::server(current)?
                                 != super::encryption::server(&other)?
                         {
-                            return Err(conflict(&members, "VLESS 加密参数不同").into());
+                            return Err(conflict(
+                                &members,
+                                tr("VLESS encryption parameters differ", "VLESS 加密参数不同"),
+                            )
+                            .into());
                         }
                     }
-                    _ => return Err(conflict(&members, "VLESS 加密参数不同").into()),
+                    _ => {
+                        return Err(conflict(
+                            &members,
+                            tr("VLESS encryption parameters differ", "VLESS 加密参数不同"),
+                        )
+                        .into());
+                    }
                 }
             }
             (Protocol::Vmess(current), Protocol::Vmess(other)) => {
@@ -774,7 +861,14 @@ fn merge(
                 if current.password.is_none() {
                     current.password = other.password.clone();
                 } else if other.password.is_some() && current.password != other.password {
-                    return Err(conflict(&members, "Shadowsocks 入口共享密钥不同").into());
+                    return Err(conflict(
+                        &members,
+                        tr(
+                            "Shared Shadowsocks inbound keys differ",
+                            "Shadowsocks 入口共享密钥不同",
+                        ),
+                    )
+                    .into());
                 }
                 current.tcp |= other.tcp;
                 current.udp |= other.udp;
@@ -784,13 +878,22 @@ fn merge(
                     current,
                     other,
                     &["outbound", "tcp", "udp"],
-                    "固定转发",
+                    tr("Fixed forwarding", "固定转发"),
                     &members,
                 )?;
                 current.tcp |= other.tcp;
                 current.udp |= other.udp;
             }
-            _ => return Err(conflict(&members, "协议参数无法合并为同一监听配置").into()),
+            _ => {
+                return Err(conflict(
+                    &members,
+                    tr(
+                        "Protocol settings cannot share one listener",
+                        "协议参数无法合并为同一监听配置",
+                    ),
+                )
+                .into());
+            }
         }
     }
     configure(&mut source, &modes);
@@ -848,7 +951,10 @@ fn merge(
                     if eligible.is_empty() {
                         return Err(conflict(
                             &members,
-                            "合并后的协议与凭据会产生原配置之外的接入资格",
+                            tr(
+                                "Combining these listeners would grant additional access",
+                                "合并后的协议与凭据会产生原配置之外的接入资格",
+                            ),
                         )
                         .into());
                     }
@@ -902,7 +1008,14 @@ fn merge(
                     if left_identity.is_some()
                         && left.source.system_users() != right.source.system_users()
                     {
-                        return Err(conflict(&members, "相同凭据对应不同的系统用户归属").into());
+                        return Err(conflict(
+                            &members,
+                            tr(
+                                "The same credentials identify different system users",
+                                "相同凭据对应不同的系统用户归属",
+                            ),
+                        )
+                        .into());
                     }
                     if !graph.equivalent(
                         left.entry,
@@ -913,7 +1026,8 @@ fn merge(
                     )? {
                         return Err(conflict(
                             &members,
-                            &format!(
+                            &message!(
+                                "{} traffic has different routes for the same identity",
                                 "{} 流量在相同接入身份下具有不同分流结果",
                                 network.name().to_uppercase()
                             ),
@@ -932,7 +1046,14 @@ fn merge(
                 if let Some((_, _, current)) = identities.get(&identity)
                     && current.level.unwrap_or_default() != credential.level.unwrap_or_default()
                 {
-                    return Err(conflict(&members, "相同认证凭据对应不同的用户等级").into());
+                    return Err(conflict(
+                        &members,
+                        tr(
+                            "The same credentials have different user levels",
+                            "相同认证凭据对应不同的用户等级",
+                        ),
+                    )
+                    .into());
                 }
                 identities
                     .entry(identity)
@@ -1026,9 +1147,10 @@ fn same<T: Serialize>(
     } else {
         Err(conflict(
             members,
-            &format!(
+            &message!(
+                "Conflicting {name} settings: {}",
                 "{name} 参数不同：{}",
-                fields.into_iter().collect::<Vec<_>>().join("、")
+                fields.into_iter().collect::<Vec<_>>().join(tr(", ", "、"))
             ),
         )
         .into())
@@ -1040,8 +1162,9 @@ fn conflict(members: &[Member], reason: &str) -> String {
         .iter()
         .map(|member| member.source.name.as_str())
         .collect();
-    format!(
+    message!(
+        "Listener conflict on inbound {}: {reason}",
         "入站 {} 的监听发生冲突：{reason}",
-        names.into_iter().collect::<Vec<_>>().join("、")
+        names.into_iter().collect::<Vec<_>>().join(tr(", ", "、"))
     )
 }

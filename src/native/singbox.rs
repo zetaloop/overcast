@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -23,7 +24,10 @@ pub fn outbound(
                 | Connection::Shadowsocks(_)
         )
     {
-        return unsupported("sing-box HTTP/SOCKS 出站没有流复用配置");
+        return unsupported(tr(
+            "sing-box HTTP and SOCKS outbounds do not support multiplexing",
+            "sing-box HTTP/SOCKS 出站没有流复用配置",
+        ));
     }
     let (kind, proxy, network) = match source {
         Connection::Direct(value) => ("direct", None, &value.network),
@@ -35,7 +39,12 @@ pub fn outbound(
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
         Connection::Hysteria2(value) => ("hysteria2", None, &value.network),
         Connection::AnyTls(value) => ("anytls", None, &value.network),
-        Connection::Warp(_) => return unsupported("sing-box 没有 WARP 认证配置"),
+        Connection::Warp(_) => {
+            return unsupported(tr(
+                "sing-box does not support WARP authentication",
+                "sing-box 没有 WARP 认证配置",
+            ));
+        }
         Connection::Forward(_) => unreachable!(),
     };
     let mut output = Map::from_iter([("type".to_owned(), json!(kind))]);
@@ -65,7 +74,10 @@ pub fn outbound(
         }
         Connection::AnyTls(value) => {
             if matches!(value.network.tcp_fast_open, Some(FastOpen::Enabled(true))) {
-                return unsupported("sing-box AnyTLS 出站与 TCP Fast Open 不兼容");
+                return unsupported(tr(
+                    "sing-box AnyTLS outbounds cannot use TCP Fast Open",
+                    "sing-box AnyTLS 出站与 TCP Fast Open 不兼容",
+                ));
             }
             let mut options = Options::new(&value.anytls)?;
             options.take("tcp");
@@ -339,10 +351,16 @@ pub fn outbound(
             output.insert("network".to_owned(), json!(networks));
             if let Some(version) = value.shadowsocks.udp_over_tcp {
                 if version > 2 {
-                    return unsupported("UDP over TCP 使用版本 1 或 2");
+                    return unsupported(tr(
+                        "UDP over TCP requires version 1 or 2",
+                        "UDP over TCP 使用版本 1 或 2",
+                    ));
                 }
                 if value.multiplex.is_some() {
-                    return unsupported("sing-box Shadowsocks 的 UoT 与 S-Mux 分别建立连接");
+                    return unsupported(tr(
+                        "sing-box Shadowsocks uses separate connections for UoT and S-Mux",
+                        "sing-box Shadowsocks 的 UoT 与 S-Mux 分别建立连接",
+                    ));
                 }
                 output.insert(
                     "udp_over_tcp".to_owned(),
@@ -399,7 +417,7 @@ pub(super) fn socket(source: &inbound::Socket) -> Result<Map<String, Value>> {
         options.take("tcp_fast_open");
         output.insert("tcp_fast_open".to_owned(), json!(value));
     }
-    options.finish("sing-box 监听")?;
+    options.finish(tr("sing-box listener", "sing-box 监听"))?;
     // udp_fragment is a *bool; the other boolean listen options have a false zero value.
     output.retain(|key, value| match key.as_str() {
         "tcp_fast_open" | "tcp_multi_path" | "reuse_addr" | "disable_tcp_keep_alive" => {
@@ -469,7 +487,7 @@ pub fn listeners(
     if let Protocol::AnyTls(value) = &source.protocol {
         let mut options = Options::new(value)?;
         options.copy(&mut output, &["padding_scheme"]);
-        options.finish("sing-box AnyTLS 入站")?;
+        options.finish(tr("sing-box AnyTLS inbound", "sing-box AnyTLS 入站"))?;
         output.insert("type".to_owned(), json!("anytls"));
         if let Some(tls) = server_tls(source, store)? {
             output.insert("tls".to_owned(), tls);
@@ -491,7 +509,10 @@ pub fn listeners(
     if let Protocol::Vless(value) = &source.protocol {
         source.core.check_encryption(value.encryption.is_some())?;
         if users.is_empty() {
-            return unsupported("VLESS 入口需要认证用户");
+            return unsupported(tr(
+                "VLESS requires authenticated users",
+                "VLESS 入口需要认证用户",
+            ));
         }
         let mut options = Options::new(value)?;
         options.take("encryption");
@@ -503,7 +524,7 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::SingBox)?,
             );
         }
-        options.finish("sing-box VLESS 入站")?;
+        options.finish(tr("sing-box VLESS inbound", "sing-box VLESS 入站"))?;
         output.insert("type".to_owned(), json!("vless"));
         if let Some(tls) = server_tls(source, store)? {
             output.insert("tls".to_owned(), tls);
@@ -520,12 +541,15 @@ pub fn listeners(
     }
     if let Protocol::Vmess(value) = &source.protocol {
         if users.is_empty() {
-            return unsupported("VMess 入口需要认证用户");
+            return unsupported(tr(
+                "VMess requires authenticated users",
+                "VMess 入口需要认证用户",
+            ));
         }
         let mut options = Options::new(value)?;
         options.take("alter_id");
         options.take("multiplex");
-        options.finish("sing-box VMess 入站")?;
+        options.finish(tr("sing-box VMess inbound", "sing-box VMess 入站"))?;
         output.insert("type".to_owned(), json!("vmess"));
         if let Some(multiplex) = &value.multiplex {
             output.insert(
@@ -548,12 +572,15 @@ pub fn listeners(
     }
     if let Protocol::Trojan(value) = &source.protocol {
         if users.is_empty() && value.fallbacks.is_empty() {
-            return unsupported("Trojan 入口需要认证用户");
+            return unsupported(tr(
+                "Trojan requires authenticated users",
+                "Trojan 入口需要认证用户",
+            ));
         }
         let mut options = Options::new(value)?;
         options.take("fallbacks");
         options.take("multiplex");
-        options.finish("sing-box Trojan 入站")?;
+        options.finish(tr("sing-box Trojan inbound", "sing-box Trojan 入站"))?;
         output.insert("type".to_owned(), json!("trojan"));
         if let Some(multiplex) = &value.multiplex {
             output.insert(
@@ -600,14 +627,23 @@ pub fn listeners(
                 super::multiplex::server(multiplex, inbound::Core::SingBox)?,
             );
         }
-        options.finish("sing-box Shadowsocks 入站")?;
+        options.finish(tr(
+            "sing-box Shadowsocks inbound",
+            "sing-box Shadowsocks 入站",
+        ))?;
         return Ok(vec![output]);
     }
     if let Protocol::Forward(value) = &source.protocol {
         if value.user_level.is_some() {
-            return unsupported("sing-box 固定转发入口没有用户等级配置");
+            return unsupported(tr(
+                "sing-box fixed forwarding does not support user levels",
+                "sing-box 固定转发入口没有用户等级配置",
+            ));
         }
-        let (server, port) = target.ok_or("转发入口缺少后继连接")?;
+        let (server, port) = target.ok_or(tr(
+            "Forwarding inbound has no next connection",
+            "转发入口缺少后继连接",
+        ))?;
         output.insert("type".to_owned(), json!("direct"));
         output.insert("override_address".to_owned(), json!(server));
         output.insert("override_port".to_owned(), json!(port));
@@ -632,11 +668,14 @@ pub fn listeners(
     if value.socks.enabled {
         let mut options = Options::new(&value.socks)?;
         options.take("enabled");
-        options.finish("sing-box SOCKS 入站")?;
+        options.finish(tr("sing-box SOCKS inbound", "sing-box SOCKS 入站"))?;
     }
     if let Some(tls) = server_tls(source, store)? {
         if !value.http.enabled {
-            return unsupported("sing-box 的 SOCKS TLS 使用 Mixed 入口，需要同时启用 HTTP");
+            return unsupported(tr(
+                "SOCKS over TLS in sing-box requires a mixed inbound with HTTP enabled",
+                "sing-box 的 SOCKS TLS 使用 Mixed 入口，需要同时启用 HTTP",
+            ));
         }
         output.insert("tls".to_owned(), tls);
     }
@@ -663,14 +702,17 @@ pub fn listeners(
     options.take("versions");
     if value.socks.enabled {
         if !versions.contains(&1) || !versions.contains(&2) {
-            return unsupported("sing-box Mixed 的 HTTP/1 与 HTTP/2 共同启用");
+            return unsupported(tr(
+                "sing-box mixed inbounds enable HTTP/1 and HTTP/2 together",
+                "sing-box Mixed 的 HTTP/1 与 HTTP/2 共同启用",
+            ));
         }
         let mut quic = Map::new();
         options.copy(
             &mut quic,
             &["initial_packet_size", "disable_path_mtu_discovery"],
         );
-        options.finish("sing-box Mixed 的 HTTP")?;
+        options.finish(tr("sing-box mixed HTTP", "sing-box Mixed 的 HTTP"))?;
         output.insert("type".to_owned(), json!("mixed"));
         if versions.contains(&3) {
             let mut packet = output.clone();
@@ -683,7 +725,7 @@ pub fn listeners(
         output.insert("type".to_owned(), json!("http"));
         output.insert("version".to_owned(), json!(versions));
         http(&mut options, &mut output)?;
-        options.finish("sing-box HTTP 入站")?;
+        options.finish(tr("sing-box HTTP inbound", "sing-box HTTP 入站"))?;
     }
     Ok(vec![output])
 }
@@ -712,7 +754,7 @@ fn http(options: &mut Options, output: &mut Map<String, Value>) -> Result<()> {
 pub fn dialer(source: &connection::Network, output: &mut Map<String, Value>) -> Result<()> {
     let mut options = Options::new(source)?;
     dial_options(source, &mut options, output)?;
-    options.finish("sing-box 连接")
+    options.finish(tr("sing-box connection", "sing-box 连接"))
 }
 
 pub(super) fn dial_options(
@@ -756,7 +798,10 @@ pub(super) fn dial_options(
     )?;
     if let Some(value) = options.take("tcp_fast_open") {
         if !value.is_boolean() {
-            return unsupported("sing-box 的 TCP 快速打开使用开关");
+            return unsupported(tr(
+                "sing-box expects a boolean for TCP Fast Open",
+                "sing-box 的 TCP 快速打开使用开关",
+            ));
         }
         output.insert("tcp_fast_open".to_owned(), value);
     }
@@ -770,7 +815,8 @@ pub(super) fn dial_options(
             AddressStrategy::PreferIpv4 => "prefer_ipv4",
             AddressStrategy::PreferIpv6 => "prefer_ipv6",
             _ => {
-                return unsupported(format!(
+                return unsupported(message!(
+                    "Unsupported sing-box address strategy: {}",
                     "sing-box 无法表达地址策略：{}",
                     serde_json::to_value(strategy)?
                 ));
@@ -810,21 +856,26 @@ fn fallbacks(
         if rule.path.as_deref() == Some("") {
             options.take("path");
         }
-        options.finish("sing-box 协议回落")?;
+        options.finish(tr("sing-box protocol fallback", "sing-box 协议回落"))?;
         let (host, port) = if let Ok(port) = rule.target.address().parse::<u16>() {
             ("localhost".to_owned(), port)
         } else {
             let address = url::Url::parse(&format!("tcp://{}", rule.target.address()))?;
             if address.path() != "" && address.path() != "/" {
-                return unsupported("sing-box 回落使用 TCP 地址");
+                return unsupported(tr(
+                    "sing-box fallback requires a TCP address",
+                    "sing-box 回落使用 TCP 地址",
+                ));
             }
             (
                 crate::link::host(&address)?,
-                address.port().ok_or("回落目标缺少端口")?,
+                address
+                    .port()
+                    .ok_or(tr("Fallback target is missing a port", "回落目标缺少端口"))?,
             )
         };
         if port == 0 {
-            return Err("请填写回落目标端口".into());
+            return Err(tr("Enter the fallback target port", "请填写回落目标端口").into());
         }
         let target = json!({"server": host, "server_port": port});
         if let Some(alpn) = rule.alpn.as_ref().filter(|value| !value.is_empty()) {
@@ -834,7 +885,10 @@ fn fallbacks(
                     protocols.insert(alpn.clone(), target);
                 }
                 inbound::Security::Reality(_) => {
-                    return unsupported("sing-box REALITY 不提供 ALPN 协商结果");
+                    return unsupported(tr(
+                        "sing-box REALITY does not report a negotiated ALPN",
+                        "sing-box REALITY 不提供 ALPN 协商结果",
+                    ));
                 }
             }
         } else {
@@ -1033,7 +1087,10 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
                     .versions
                     .contains(&inbound::HttpVersion::Http3)
             {
-                return unsupported("REALITY 握手使用 TCP，无法提供 HTTP/3 监听");
+                return unsupported(tr(
+                    "REALITY uses TCP and cannot provide an HTTP/3 listener",
+                    "REALITY 握手使用 TCP，无法提供 HTTP/3 监听",
+                ));
             }
             return super::reality::server(source, reality).map(Some);
         }
@@ -1071,7 +1128,10 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
     )?;
     options.take("client_certificates");
     if source.core.inline_trust(true, &tls.client_certificates) {
-        return unsupported("sing-box 入站的客户端信任证书需同为正文或同为文件路径");
+        return unsupported(tr(
+            "sing-box inbound trust certificates must be all inline or all file paths",
+            "sing-box 入站的客户端信任证书需同为正文或同为文件路径",
+        ));
     }
     certificates(
         &mut output,
@@ -1105,6 +1165,6 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
         );
         output.insert("ech".to_owned(), json!(ech));
     }
-    options.finish("sing-box 服务端 TLS")?;
+    options.finish(tr("sing-box server TLS", "sing-box 服务端 TLS"))?;
     Ok(Some(json!(output)))
 }

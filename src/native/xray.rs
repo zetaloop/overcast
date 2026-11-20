@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::borrow::Cow;
 use std::time::Duration;
 
@@ -28,7 +29,12 @@ pub fn outbound(
         Connection::Trojan(value) => ("trojan", None, &value.network),
         Connection::Shadowsocks(value) => ("shadowsocks", None, &value.network),
         Connection::Hysteria2(value) => ("hysteria", None, &value.network),
-        Connection::AnyTls(_) => return unsupported("Xray 没有 AnyTLS 出站"),
+        Connection::AnyTls(_) => {
+            return unsupported(tr(
+                "Xray does not support AnyTLS outbounds",
+                "Xray 没有 AnyTLS 出站",
+            ));
+        }
         Connection::Warp(value) => ("masque", None, &value.network),
         Connection::Forward(value) => ("freedom", None, &value.network),
     };
@@ -46,7 +52,7 @@ pub fn outbound(
         output.insert("sendThrough".to_owned(), value);
     }
     let sockopt = dialer(network, &mut options)?;
-    options.finish("Xray 连接")?;
+    options.finish(tr("Xray connection", "Xray 连接"))?;
     if !sockopt.is_empty() {
         stream.insert("sockopt".to_owned(), json!(sockopt));
     }
@@ -115,7 +121,10 @@ pub fn outbound(
         Connection::Socks(value) => {
             let mut options = Options::new(&value.socks)?;
             if value.socks.version != SocksVersion::V5 {
-                return unsupported("Xray SOCKS 出站使用 SOCKS5");
+                return unsupported(tr(
+                    "Xray SOCKS outbounds require SOCKS5",
+                    "Xray SOCKS 出站使用 SOCKS5",
+                ));
             }
             options.rename(
                 &mut settings,
@@ -131,7 +140,10 @@ pub fn outbound(
         }
         Connection::Vless(value) => {
             if value.multiplex.is_some() && value.vless.flow == crate::vless::Flow::Vision {
-                return unsupported("Vision 与 Mux.Cool TCP 流复用无法同时使用");
+                return unsupported(tr(
+                    "Vision is incompatible with Mux.Cool TCP multiplexing",
+                    "Vision 与 Mux.Cool TCP 流复用无法同时使用",
+                ));
             }
             let mut options = input.vless(&value.vless, inbound::Core::Xray)?;
             settings.insert("address".to_owned(), json!(value.server));
@@ -163,7 +175,10 @@ pub fn outbound(
                 if value.vless.packet_encoding == connection::PacketEncoding::Packet
                     && value.vless.flow == crate::vless::Flow::Vision
                 {
-                    return unsupported("原生 VLESS 数据包与 Vision 无法同时使用");
+                    return unsupported(tr(
+                        "Native VLESS packets are incompatible with Vision",
+                        "原生 VLESS 数据包与 Vision 无法同时使用",
+                    ));
                 }
                 packets(
                     &mut output,
@@ -185,7 +200,10 @@ pub fn outbound(
                     | crate::vmess::Cipher::Aes128Gcm
                     | crate::vmess::Cipher::Chacha20Poly1305
             ) {
-                return unsupported("Xray VMess 使用 AES-128-GCM 或 ChaCha20-Poly1305");
+                return unsupported(tr(
+                    "Xray VMess requires AES-128-GCM or ChaCha20-Poly1305",
+                    "Xray VMess 使用 AES-128-GCM 或 ChaCha20-Poly1305",
+                ));
             }
             options.take("cipher");
             settings.insert(
@@ -302,15 +320,32 @@ fn packets(
 ) -> Result<()> {
     use connection::PacketEncoding;
     if let Some(concurrency) = concurrency {
-        i16::try_from(concurrency).map_err(|_| "Xray UDP 并发流数超过支持范围")?;
+        i16::try_from(concurrency).map_err(|_| {
+            tr(
+                "Xray UDP concurrency exceeds the supported range",
+                "Xray UDP 并发流数超过支持范围",
+            )
+        })?;
         if concurrency == 0 && encoding == PacketEncoding::Xudp {
-            return Err("XUDP 并发流数需要大于零".into());
+            return Err(tr(
+                "XUDP concurrency must be positive",
+                "XUDP 并发流数需要大于零",
+            )
+            .into());
         }
     }
     match encoding {
-        PacketEncoding::PacketAddr => return unsupported("Xray 没有 PacketAddr 编码配置"),
+        PacketEncoding::PacketAddr => {
+            return unsupported(tr(
+                "Xray does not support PacketAddr encoding",
+                "Xray 没有 PacketAddr 编码配置",
+            ));
+        }
         PacketEncoding::Packet if concurrency.is_some() => {
-            return unsupported("原生数据包不使用 XUDP 并发配置");
+            return unsupported(tr(
+                "Native packets do not use XUDP concurrency",
+                "原生数据包不使用 XUDP 并发配置",
+            ));
         }
         _ => {}
     }
@@ -319,7 +354,10 @@ fn packets(
             || json!({"enabled": true, "concurrency": -1, "xudpProxyUDP443": "allow"}),
         );
         if mux["xudpConcurrency"] == -1 {
-            return unsupported("仅 TCP 流复用与 XUDP 并发配置无法同时使用");
+            return unsupported(tr(
+                "TCP-only multiplexing is incompatible with XUDP concurrency",
+                "仅 TCP 流复用与 XUDP 并发配置无法同时使用",
+            ));
         }
         mux["xudpConcurrency"] = json!(concurrency.unwrap_or(8));
     }
@@ -333,7 +371,10 @@ pub fn listeners(
     target: Option<(&str, u16)>,
 ) -> Result<Vec<Map<String, Value>>> {
     if source.quic() && source.listen.socket.proxy_protocol {
-        return unsupported("UDP 传输监听没有 PROXY protocol 支持");
+        return unsupported(tr(
+            "UDP listeners do not support PROXY protocol",
+            "UDP 传输监听没有 PROXY protocol 支持",
+        ));
     }
     let mut output = Map::from_iter([
         ("listen".to_owned(), json!(source.listen.address)),
@@ -363,7 +404,10 @@ pub fn listeners(
             options.rename(&mut settings, &[("user_level", "userLevel")]);
             options.finish("Xray HTTP/SOCKS")?;
             if !value.http.enabled && value.socks.enabled {
-                return unsupported("Xray 的 SOCKS 入口同时接收 HTTP 请求");
+                return unsupported(tr(
+                    "Xray SOCKS inbounds also accept HTTP requests",
+                    "Xray 的 SOCKS 入口同时接收 HTTP 请求",
+                ));
             }
             let mut options = Options::new(&value.http)?;
             options.take("enabled");
@@ -376,7 +420,10 @@ pub fn listeners(
                 options.take("versions");
             }
             if value.socks.enabled {
-                options.finish("Xray HTTP/SOCKS 的 HTTP")?;
+                options.finish(tr(
+                    "Xray HTTP/SOCKS HTTP settings",
+                    "Xray HTTP/SOCKS 的 HTTP",
+                ))?;
                 output.insert("protocol".to_owned(), json!("socks"));
                 settings.insert(
                     "auth".to_owned(),
@@ -390,16 +437,19 @@ pub fn listeners(
                 let mut options = Options::new(&value.socks)?;
                 options.take("enabled");
                 options.rename(&mut settings, &[("udp_address", "ip")]);
-                options.finish("Xray SOCKS 入站")?;
+                options.finish(tr("Xray SOCKS inbound", "Xray SOCKS 入站"))?;
             } else {
                 output.insert("protocol".to_owned(), json!("http"));
                 options.rename(&mut settings, &[("transparent", "allowTransparent")]);
-                options.finish("Xray HTTP 入站")?;
+                options.finish(tr("Xray HTTP inbound", "Xray HTTP 入站"))?;
             }
         }
         Protocol::Vless(value) => {
             if users.is_empty() && value.fallbacks.is_empty() {
-                return unsupported("VLESS 入口需要认证用户");
+                return unsupported(tr(
+                    "VLESS requires authenticated users",
+                    "VLESS 入口需要认证用户",
+                ));
             }
             output.insert("protocol".to_owned(), json!("vless"));
             let mut options = Options::new(value)?;
@@ -446,15 +496,21 @@ pub fn listeners(
             options.take("fallbacks");
             if !value.fallbacks.is_empty() {
                 if value.encryption.is_some() {
-                    return unsupported("VLESS Encryption 与协议回落无法同时使用");
+                    return unsupported(tr(
+                        "VLESS Encryption is incompatible with protocol fallbacks",
+                        "VLESS Encryption 与协议回落无法同时使用",
+                    ));
                 }
                 settings.insert("fallbacks".to_owned(), fallbacks(&value.fallbacks)?);
             }
-            options.finish("Xray VLESS 入站")?;
+            options.finish(tr("Xray VLESS inbound", "Xray VLESS 入站"))?;
         }
         Protocol::Vmess(value) => {
             if users.is_empty() {
-                return unsupported("VMess 入口需要认证用户");
+                return unsupported(tr(
+                    "VMess requires authenticated users",
+                    "VMess 入口需要认证用户",
+                ));
             }
             output.insert("protocol".to_owned(), json!("vmess"));
             let mut options = Options::new(value)?;
@@ -487,11 +543,14 @@ pub fn listeners(
                         .collect::<Vec<_>>()
                 ),
             );
-            options.finish("Xray VMess 入站")?;
+            options.finish(tr("Xray VMess inbound", "Xray VMess 入站"))?;
         }
         Protocol::Trojan(value) => {
             if users.is_empty() && value.fallbacks.is_empty() {
-                return unsupported("Trojan 入口需要认证用户");
+                return unsupported(tr(
+                    "Trojan requires authenticated users",
+                    "Trojan 入口需要认证用户",
+                ));
             }
             output.insert("protocol".to_owned(), json!("trojan"));
             let mut options = Options::new(value)?;
@@ -522,13 +581,16 @@ pub fn listeners(
             if !value.fallbacks.is_empty() {
                 settings.insert("fallbacks".to_owned(), fallbacks(&value.fallbacks)?);
             }
-            options.finish("Xray Trojan 入站")?;
+            options.finish(tr("Xray Trojan inbound", "Xray Trojan 入站"))?;
         }
         Protocol::Shadowsocks(value) => {
             let method = super::shadowsocks::cipher(value.cipher, inbound::Core::Xray, true)?;
             let multi = super::shadowsocks::multi(source, users.len());
             if users.is_empty() || !multi && users.len() > 1 {
-                return unsupported("当前 Shadowsocks 算法的入站需要单个认证密钥");
+                return unsupported(tr(
+                    "This Shadowsocks cipher requires a single inbound key",
+                    "当前 Shadowsocks 算法的入站需要单个认证密钥",
+                ));
             }
             output.insert("protocol".to_owned(), json!("shadowsocks"));
             let mut options = Options::new(value)?;
@@ -552,12 +614,10 @@ pub fn listeners(
                     options.take("password");
                     settings.insert(
                         "password".to_owned(),
-                        json!(
-                            value
-                                .password
-                                .as_ref()
-                                .ok_or("缺少 Shadowsocks 入口共享密钥")?
-                        ),
+                        json!(value.password.as_ref().ok_or(tr(
+                            "Missing shared Shadowsocks inbound key",
+                            "缺少 Shadowsocks 入口共享密钥"
+                        ))?),
                     );
                 }
                 settings.insert(
@@ -595,7 +655,7 @@ pub fn listeners(
                     settings.insert("level".to_owned(), json!(level));
                 }
             }
-            options.finish("Xray Shadowsocks 入站")?;
+            options.finish(tr("Xray Shadowsocks inbound", "Xray Shadowsocks 入站"))?;
         }
         Protocol::AnyTls(_) => unreachable!("validated inbound core"),
         Protocol::Hysteria2(value) => {
@@ -622,7 +682,10 @@ pub fn listeners(
             stream.extend(super::hysteria::server(value, inbound::Core::Xray, store)?);
         }
         Protocol::Forward(value) => {
-            let (server, port) = target.ok_or("转发入口缺少后继连接")?;
+            let (server, port) = target.ok_or(tr(
+                "Forwarding inbound has no next connection",
+                "转发入口缺少后继连接",
+            ))?;
             output.insert("protocol".to_owned(), json!("tunnel"));
             settings.insert("address".to_owned(), json!(server));
             settings.insert("port".to_owned(), json!(port));
@@ -686,7 +749,10 @@ pub fn listeners(
             target_os = "macos",
             windows
         )))]
-        return unsupported("Xray 在此平台需要通过保活时间参数启用 TCP 保活");
+        return unsupported(tr(
+            "On this platform Xray requires a keepalive duration to enable TCP keepalive",
+            "Xray 在此平台需要通过保活时间参数启用 TCP 保活",
+        ));
     }
     if let Some(interface) = source
         .listen
@@ -704,7 +770,10 @@ pub fn listeners(
             }));
         }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        return unsupported(format!("Xray 在此平台无法绑定入站接口：{interface}"));
+        return unsupported(message!(
+            "Xray cannot bind an inbound interface on this platform: {interface}",
+            "Xray 在此平台无法绑定入站接口：{interface}"
+        ));
     }
     if !custom.is_empty() {
         if let Some(Value::Array(values)) = sockopt.remove("customSockopt") {
@@ -719,7 +788,7 @@ pub fn listeners(
             ("forwarded_sources", "trustedXForwardedFor"),
         ],
     );
-    options.finish("Xray 监听")?;
+    options.finish(tr("Xray listener", "Xray 监听"))?;
     if !sockopt.is_empty() {
         stream.insert("sockopt".to_owned(), json!(sockopt));
     }
@@ -757,7 +826,10 @@ pub(super) fn source_address(options: &mut Options) -> Result<Option<Value>> {
     let v4 = options.take("source_ipv4");
     let v6 = options.take("source_ipv6");
     if v4.is_some() && v6.is_some() {
-        return unsupported("Xray 每个出站的 sendThrough 使用一个源地址");
+        return unsupported(tr(
+            "Xray sendThrough accepts one source address per outbound",
+            "Xray 每个出站的 sendThrough 使用一个源地址",
+        ));
     }
     Ok(v4.or(v6))
 }
@@ -838,7 +910,10 @@ fn socket(options: &mut Options) -> Result<Map<String, Value>> {
         if let Some(value) = values.remove("delay").filter(|value| !value.is_null()) {
             let duration = humantime::parse_duration(value.as_str().unwrap())?;
             if duration.as_nanos() % 1_000_000 != 0 {
-                return unsupported("Xray 双栈尝试间隔使用整数毫秒");
+                return unsupported(tr(
+                    "Xray dual-stack attempt intervals require whole milliseconds",
+                    "Xray 双栈尝试间隔使用整数毫秒",
+                ));
             }
             output_values.insert(
                 "tryDelayMs".to_owned(),
@@ -887,7 +962,7 @@ fn fallbacks(source: &[inbound::Fallback]) -> Result<Value> {
     let mut fallbacks = Vec::new();
     for fallback in source {
         if fallback.target.address().is_empty() {
-            return Err("请填写回落目标".into());
+            return Err(tr("Enter a fallback target", "请填写回落目标").into());
         }
         let mut options = Options::new(fallback)?;
         let mut output = Map::new();
@@ -901,7 +976,7 @@ fn fallbacks(source: &[inbound::Fallback]) -> Result<Value> {
                 ("proxy_protocol", "xver"),
             ],
         );
-        options.finish("Xray 协议回落")?;
+        options.finish(tr("Xray protocol fallback", "Xray 协议回落"))?;
         fallbacks.push(output);
     }
     Ok(json!(fallbacks))
@@ -911,7 +986,10 @@ fn reality_transport(source: &crate::transport::Transport) -> Result<()> {
     if source.xray_reality() {
         Ok(())
     } else {
-        unsupported("Xray REALITY 可用于原生 TCP、XHTTP 和 gRPC 传输")
+        unsupported(tr(
+            "Xray REALITY supports raw TCP, XHTTP and gRPC transport",
+            "Xray REALITY 可用于原生 TCP、XHTTP 和 gRPC 传输",
+        ))
     }
 }
 
@@ -1004,7 +1082,10 @@ fn client_tls(source: &connection::Tls, directory: &std::path::Path) -> Result<V
     if let Some(ech) = &source.ech {
         if let Some(config) = &ech.config {
             let Some(config) = config.inline() else {
-                return unsupported("Xray 的 ECH 公共参数使用正文，不支持文件路径");
+                return unsupported(tr(
+                    "Xray requires inline ECH public configuration",
+                    "Xray 的 ECH 公共参数使用正文，不支持文件路径",
+                ));
             };
             output.insert(
                 "echConfigList".to_owned(),
@@ -1064,10 +1145,13 @@ fn server_tls(source: &Inbound, tls: &inbound::Tls, store: &Store) -> Result<Val
     options.take("ech");
     if let Some(ech) = &tls.ech {
         let Some(text) = ech.key.inline() else {
-            return unsupported("Xray 的 ECH 服务端密钥使用正文，不支持文件路径");
+            return unsupported(tr(
+                "Xray requires inline ECH server keys",
+                "Xray 的 ECH 服务端密钥使用正文，不支持文件路径",
+            ));
         };
         output.insert("echServerKeys".into(), json!(crate::ech::base64_key(text)?));
     }
-    options.finish("Xray 服务端 TLS")?;
+    options.finish(tr("Xray server TLS", "Xray 服务端 TLS"))?;
     Ok(json!(output))
 }

@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{collections::BTreeSet, time::Duration};
 
 use serde::Serialize;
@@ -88,12 +89,17 @@ impl Options {
         for &(source, destination) in names {
             if let Some(value) = self.take(source) {
                 let text = value.as_str().unwrap();
-                let duration = humantime::parse_duration(text)
-                    .map_err(|error| format!("时间格式不正确 {text}：{error}"))?;
+                let duration = humantime::parse_duration(text).map_err(|error| {
+                    message!(
+                        "Invalid duration {text}: {error}",
+                        "时间格式不正确 {text}：{error}"
+                    )
+                })?;
                 let value = match unit {
                     Some(unit) => {
                         if duration.as_nanos() % unit.as_nanos() != 0 {
-                            return unsupported(format!(
+                            return unsupported(message!(
+                                "{source} cannot express {text} in units of {}",
                                 "{source} 的精度无法用 {} 表达：{text}",
                                 humantime::format_duration(unit),
                             ));
@@ -112,9 +118,14 @@ impl Options {
         if self.values.is_empty() {
             Ok(())
         } else {
-            unsupported(format!(
+            unsupported(message!(
+                "Unsupported {name} parameters: {}",
                 "{name} 无法表达参数：{}",
-                self.values.keys().cloned().collect::<Vec<_>>().join("、"),
+                self.values
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(tr(", ", "、")),
             ))
         }
     }

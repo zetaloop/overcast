@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::BTreeSet,
     fs::{File, OpenOptions},
@@ -152,7 +153,11 @@ impl Startup {
                             return Ok(true);
                         }
                     }
-                    Err(TryRecvError::Disconnected) => return Err("启动结果通道已关闭".into()),
+                    Err(TryRecvError::Disconnected) => {
+                        return Err(
+                            tr("Startup status channel closed", "启动结果通道已关闭").into()
+                        );
+                    }
                     // The reader delivers the complete diagnostic at EOF, including the final line.
                     Err(TryRecvError::Empty) if matches!(self.signal, Signal::Message(_)) => {
                         return Ok(false);
@@ -181,8 +186,15 @@ impl Startup {
                 .last()
                 .transpose()?
                 .filter(|line| !line.is_empty())
-                .map_or_else(|| status.to_owned(), |line| format!("{status}：{line}"));
-            return Err(format!("进程在启动时退出：{reason}").into());
+                .map_or_else(
+                    || status.to_owned(),
+                    |line| message!("{status}: {line}", "{status}：{line}"),
+                );
+            return Err(message!(
+                "Process exited during startup: {reason}",
+                "进程在启动时退出：{reason}"
+            )
+            .into());
         }
         Ok(false)
     }
@@ -195,7 +207,11 @@ fn message(component: Component, reader: &mut impl BufRead, output: &mut File) -
         line.clear();
         if reader.read_until(b'\n', &mut line)? == 0 {
             return Err(if last.is_empty() {
-                "进程在发出启动结果前关闭了输出".into()
+                tr(
+                    "Process closed its output before reporting startup",
+                    "进程在发出启动结果前关闭了输出",
+                )
+                .into()
             } else {
                 last.into()
             });
@@ -242,9 +258,10 @@ fn listeners(expected: &BTreeSet<String>, output: impl BufRead) -> Result<()> {
         }
     }
     if !missing.is_empty() {
-        return Err(format!(
+        return Err(message!(
+            "No startup status for listeners: {}",
             "以下监听没有返回启动结果：{}",
-            missing.into_iter().collect::<Vec<_>>().join("、")
+            missing.into_iter().collect::<Vec<_>>().join(tr(", ", "、"))
         )
         .into());
     }
@@ -269,7 +286,12 @@ impl Pingback {
         )?;
         let address = listener.local_addr()?;
         let mut token = [0; 32];
-        getrandom::fill(&mut token).map_err(|error| format!("生成 Caddy 启动回执失败：{error}"))?;
+        getrandom::fill(&mut token).map_err(|error| {
+            message!(
+                "Could not generate Caddy startup acknowledgement: {error}",
+                "生成 Caddy 启动回执失败：{error}"
+            )
+        })?;
         let (input, mut writer) = io::pipe()?;
         writer.write_all(&token)?;
         command

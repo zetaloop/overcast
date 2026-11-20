@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -52,9 +53,10 @@ pub fn prepare(
                 .iter()
                 .map(|entry| graph.entries[*entry].inbound.name.as_str())
                 .collect();
-            return Err(format!(
+            return Err(message!(
+                "VLESS listeners associated with inbound {} require different encryption material",
                 "入站 {} 关联的 VLESS 监听要求不同的加密材料",
-                names.join("、")
+                names.join(tr(", ", "、"))
             )
             .into());
         }
@@ -87,7 +89,11 @@ pub fn server(source: &Server) -> Result<String> {
         .as_str()
         .map_or_else(|| session.to_string(), str::to_owned);
     if session.starts_with('-') {
-        return Err("VLESS 加密会话时长需要使用非负秒数".into());
+        return Err(tr(
+            "VLESS encryption session lifetime must be nonnegative, in seconds",
+            "VLESS 加密会话时长需要使用非负秒数",
+        )
+        .into());
     }
     let mut parts = vec![
         "mlkem768x25519plus".to_owned(),

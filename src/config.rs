@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env,
@@ -88,19 +89,21 @@ impl Config {
                 return Ok(false);
             }
             let (kind, uuid) = match object {
-                Reference::User(uuid) => ("用户", uuid),
-                Reference::Inbound(uuid) => ("入站", uuid),
-                Reference::Outbound(uuid) => ("出站", uuid),
+                Reference::User(uuid) => (tr("User", "用户"), uuid),
+                Reference::Inbound(uuid) => (tr("Inbound", "入站"), uuid),
+                Reference::Outbound(uuid) => (tr("Outbound", "出站"), uuid),
             };
-            Err(format!("找不到{kind}：{uuid}").into())
+            Err(message!("Unknown {kind}: {uuid}", "找不到{kind}：{uuid}").into())
         };
         for (index, rule) in self.rules.iter_mut().enumerate() {
             rule.prune(&keep)
-                .map_err(|e| format!("分流规则 {}：{e}", index + 1))?;
+                .map_err(|e| message!("Routing rule {}: {e}", "分流规则 {}：{e}", index + 1))?;
         }
         for inbound in &mut self.inbounds {
-            let keep =
-                |object| keep(object).map_err(|e| format!("入站 {}：{e}", inbound.name).into());
+            let keep = |object| {
+                keep(object)
+                    .map_err(|e| message!("Inbound {}: {e}", "入站 {}：{e}", inbound.name).into())
+            };
             if let Some(fallbacks) = inbound.protocol.fallbacks_mut() {
                 for fallback in fallbacks {
                     if let Endpoint::Inbound(uuid) = fallback.target
@@ -120,7 +123,8 @@ impl Config {
             }
         }
         for uuid in self.keys.keys() {
-            keep(Reference::Inbound(*uuid)).map_err(|e| format!("握手资料：{e}"))?;
+            keep(Reference::Inbound(*uuid))
+                .map_err(|e| message!("Handshake details: {e}", "握手资料：{e}"))?;
         }
         self.keys
             .retain(|uuid, _| current.contains(&Reference::Inbound(*uuid)));
@@ -158,24 +162,41 @@ impl Config {
         for user in &self.users {
             user.validate()?;
             if !identifiers.insert(user.uuid) {
-                return Err(format!("用户 UUID 重复：{}", user.uuid).into());
+                return Err(
+                    message!("Duplicate user UUID: {}", "用户 UUID 重复：{}", user.uuid).into(),
+                );
             }
             if let Some(name) = passwords.insert(&user.password, &user.name) {
-                return Err(format!("{name} 与 {} 的主密码相同", user.name).into());
+                return Err(message!(
+                    "{name} and {} have the same master password",
+                    "{name} 与 {} 的主密码相同",
+                    user.name
+                )
+                .into());
             }
         }
         identifiers.clear();
         for inbound in &self.inbounds {
             inbound.validate()?;
             if !identifiers.insert(inbound.uuid) {
-                return Err(format!("入站 UUID 重复：{}", inbound.uuid).into());
+                return Err(message!(
+                    "Duplicate inbound UUID: {}",
+                    "入站 UUID 重复：{}",
+                    inbound.uuid
+                )
+                .into());
             }
         }
         identifiers.clear();
         for outbound in &self.outbounds {
             outbound.validate()?;
             if !identifiers.insert(outbound.uuid) {
-                return Err(format!("出站 UUID 重复：{}", outbound.uuid).into());
+                return Err(message!(
+                    "Duplicate outbound UUID: {}",
+                    "出站 UUID 重复：{}",
+                    outbound.uuid
+                )
+                .into());
             }
         }
         for rule in &self.rules {
@@ -208,7 +229,11 @@ fn default_directory() -> Result<PathBuf> {
             unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, ptr::null_mut(), &mut path) };
         if result < 0 {
             unsafe { CoTaskMemFree(path.cast()) };
-            return Err(format!("无法获取应用数据目录：HRESULT {result:#010x}").into());
+            return Err(message!(
+                "Could not locate the application data directory: HRESULT {result:#010x}",
+                "无法获取应用数据目录：HRESULT {result:#010x}"
+            )
+            .into());
         }
         let directory = unsafe {
             let mut length = 0;
@@ -242,14 +267,24 @@ impl Store {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Config::default()),
             Err(error) => {
-                return Err(format!("无法读取 {}：{error}", path.display()).into());
+                return Err(message!(
+                    "Could not read {}: {error}",
+                    "无法读取 {}：{error}",
+                    path.display()
+                )
+                .into());
             }
         };
-        let config: Config = serde_json::from_reader(BufReader::new(file))
-            .map_err(|error| format!("无法解析 {}：{error}", path.display()))?;
+        let config: Config = serde_json::from_reader(BufReader::new(file)).map_err(|error| {
+            message!(
+                "Could not parse {}: {error}",
+                "无法解析 {}：{error}",
+                path.display()
+            )
+        })?;
         config
             .validate()
-            .map_err(|error| format!("{}：{error}", path.display()))?;
+            .map_err(|error| message!("{}: {error}", "{}：{error}", path.display()))?;
         Ok(config)
     }
 
@@ -338,20 +373,30 @@ impl Store {
             file.write_all(b"\n")?;
             Ok(())
         }) {
-            let step = progress.activity("恢复部署");
+            let step = progress.activity(tr("Restoring deployment", "恢复部署"));
             match service::restore(self, &target, &previous, &Progress::default()) {
-                Ok(()) => step.finish("已恢复此前部署"),
-                Err(recovery) => return Err(format!("{error}；恢复部署失败：{recovery}").into()),
+                Ok(()) => step.finish(tr("Previous deployment restored", "已恢复此前部署")),
+                Err(recovery) => {
+                    return Err(message!(
+                        "{error}; could not restore the previous deployment: {recovery}",
+                        "{error}；恢复部署失败：{recovery}"
+                    )
+                    .into());
+                }
             }
-            return Err(format!("{error}\n已恢复此前部署").into());
+            return Err(message!(
+                "{error}\nPrevious deployment restored",
+                "{error}\n已恢复此前部署"
+            )
+            .into());
         }
         for directory in directories.difference(&used) {
             if let Err(error) = fs::remove_dir_all(directory)
                 && error.kind() != ErrorKind::NotFound
             {
                 progress.warn(
-                    "清理旧配置失败",
-                    &format!("{}：{error}", directory.display()),
+                    tr("Could not remove the old configuration", "清理旧配置失败"),
+                    &message!("{}: {error}", "{}：{error}", directory.display()),
                 );
             }
             if let Some(parent) = directory.parent()
@@ -361,19 +406,30 @@ impl Store {
                     ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
                 )
             {
-                progress.warn("清理旧配置失败", &format!("{}：{error}", parent.display()));
+                progress.warn(
+                    tr("Could not remove the old configuration", "清理旧配置失败"),
+                    &message!("{}: {error}", "{}：{error}", parent.display()),
+                );
             }
         }
         Ok(result)
     }
 
     pub fn write(&self, path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
-        let directory = path.parent().ok_or("文件路径缺少目录")?;
+        let directory = path
+            .parent()
+            .ok_or(tr("File path has no parent directory", "文件路径缺少目录"))?;
         let mut file = NamedTempFile::new_in(directory)?;
         write(file.as_file_mut())?;
         file.as_file().sync_all()?;
-        file.persist(path)
-            .map_err(|error| format!("无法保存 {}：{}", path.display(), error.error))?;
+        file.persist(path).map_err(|error| {
+            message!(
+                "Could not save {}: {}",
+                "无法保存 {}：{}",
+                path.display(),
+                error.error
+            )
+        })?;
         Ok(())
     }
 

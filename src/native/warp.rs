@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{net::IpAddr, time::Duration};
 
 use serde_json::{Map, Value, json};
@@ -22,7 +23,10 @@ pub fn xray(source: &Client, input: super::parameters::Input<'_>) -> Result<Map<
         .iter()
         .any(|server| server.parse::<IpAddr>().is_err())
     {
-        return unsupported("Xray WARP 的远端 DNS 使用 IP 地址");
+        return unsupported(tr(
+            "Xray WARP requires an IP address for remote DNS",
+            "Xray WARP 的远端 DNS 使用 IP 地址",
+        ));
     }
     let mut tls = Map::from_iter([
         (
@@ -87,7 +91,10 @@ pub fn xray(source: &Client, input: super::parameters::Input<'_>) -> Result<Map<
             "stateless_reset",
         ] {
             if options.take(name).is_some() {
-                return unsupported(format!("Xray WARP QUIC 无法表达参数：{name}"));
+                return unsupported(message!(
+                    "Unsupported Xray WARP QUIC parameter: {name}",
+                    "Xray WARP QUIC 无法表达参数：{name}"
+                ));
             }
         }
         super::transport::quic(&value.quic, false)?
@@ -107,7 +114,10 @@ pub fn mihomo(source: &Client, input: super::parameters::Input<'_>) -> Result<Ma
         && (matches!(source.network.tcp_fast_open, Some(FastOpen::Enabled(true)))
             || source.network.tcp_multi_path == Some(true))
     {
-        return unsupported("Mihomo WARP 没有 TCP Fast Open 和 MPTCP 配置");
+        return unsupported(tr(
+            "Mihomo WARP does not support TCP Fast Open or MPTCP",
+            "Mihomo WARP 没有 TCP Fast Open 和 MPTCP 配置",
+        ));
     }
     let mut options = Options::new(value)?;
     for name in ["mode", "tcp", "udp", "remote_dns", "quic", "stack"] {
@@ -158,7 +168,7 @@ pub fn mihomo(source: &Client, input: super::parameters::Input<'_>) -> Result<Ma
     let mut stack = Map::new();
     options.copy(&mut stack, &["mode"]);
     options.rename(&mut stack, &[("congestion", "congestion-controller")]);
-    options.finish("Mihomo IP 协议栈")?;
+    options.finish(tr("Mihomo IP stack", "Mihomo IP 协议栈"))?;
     if !stack.is_empty() {
         output.insert("ip-stack".to_owned(), json!(stack));
     }
@@ -170,7 +180,12 @@ pub fn mihomo(source: &Client, input: super::parameters::Input<'_>) -> Result<Ma
                 Congestion::Bbr => "bbr",
                 Congestion::Reno => "new_reno",
                 Congestion::Cubic => "cubic",
-                _ => return unsupported("Mihomo WARP 使用 BBR、Reno 或 Cubic"),
+                _ => {
+                    return unsupported(tr(
+                        "Mihomo WARP requires BBR, Reno or Cubic",
+                        "Mihomo WARP 使用 BBR、Reno 或 Cubic",
+                    ));
+                }
             };
             output.insert("congestion-controller".to_owned(), json!(name));
         }

@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 #[cfg(target_os = "macos")]
 mod macos;
 mod startup;
@@ -175,10 +176,9 @@ impl Deployment {
                 .unwrap()
                 .to_string_lossy();
             let name = stem.into_owned();
-            let installed = resources
-                .components
-                .get(component)
-                .ok_or_else(|| format!("缺少 {} 程序", component.name()))?;
+            let installed = resources.components.get(component).ok_or_else(|| {
+                message!("Missing {} executable", "缺少 {} 程序", component.name())
+            })?;
             let mut unit = Unit {
                 component: *component,
                 name,
@@ -304,7 +304,11 @@ impl Unit {
 
     fn check(&self, progress: &Progress) -> Result<()> {
         progress.check()?;
-        let step = progress.activity(format!("读取 {} 配置", self.component.name()));
+        let step = progress.activity(message!(
+            "Reading {} configuration",
+            "读取 {} 配置",
+            self.component.name()
+        ));
         execute(&mut self.command(true))?;
         step.finish(&self.name);
         Ok(())
@@ -340,7 +344,7 @@ pub fn logs(screen: &mut Screen, store: &Store) -> Result<()> {
     }
     paths.sort();
     if paths.is_empty() {
-        return screen.view("运行日志", "尚无运行日志");
+        return screen.view(tr("Logs", "运行日志"), tr("No logs yet", "尚无运行日志"));
     }
     let mut selected = 0;
     let mut notice = String::new();
@@ -351,13 +355,19 @@ pub fn logs(screen: &mut Screen, store: &Store) -> Result<()> {
                 let name = path.file_name().unwrap().to_string_lossy();
                 Item::new(name.clone().into_owned(), name.into_owned().stylized())
             })
-            .chain(std::iter::once(Item::new("back", "返回".stylized())))
+            .chain(std::iter::once(Item::new(
+                "back",
+                tr("Back", "返回").stylized(),
+            )))
             .collect();
         let menu = Menu {
-            title: "运行日志",
+            title: tr("Logs", "运行日志"),
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 查看\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to view\nEsc to go back",
+                "方向键 选择\n回车键 查看\nEsc 返回",
+            ),
         };
         match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),
@@ -396,12 +406,22 @@ pub fn apply(
     progress.check()?;
     target.save(store)?;
     if let Err(error) = switch(store, previous, target, progress) {
-        let step = progress.activity("恢复部署");
+        let step = progress.activity(tr("Restoring deployment", "恢复部署"));
         match restore(store, target, previous, &Progress::default()) {
-            Ok(()) => step.finish("已恢复此前部署"),
-            Err(recovery) => return Err(format!("{error}；恢复部署失败：{recovery}").into()),
+            Ok(()) => step.finish(tr("Previous deployment restored", "已恢复此前部署")),
+            Err(recovery) => {
+                return Err(message!(
+                    "{error}; could not restore the previous deployment: {recovery}",
+                    "{error}；恢复部署失败：{recovery}"
+                )
+                .into());
+            }
         }
-        return Err(format!("{error}\n已恢复此前部署").into());
+        return Err(message!(
+            "{error}\nPrevious deployment restored",
+            "{error}\n已恢复此前部署"
+        )
+        .into());
     }
     Ok(())
 }
@@ -425,37 +445,52 @@ fn switch(
     match (previous.config.running, target.config.running) {
         (false, false) => {}
         (true, false) => {
-            let step = progress.activity("停止服务");
+            let step = progress.activity(tr("Stopping service", "停止服务"));
             platform::remove()?;
-            step.finish("已停止");
+            step.finish(tr("Stopped", "已停止"));
         }
         (false, true) => {
-            let step = progress.activity("启动服务");
-            report(store, target.id, Some("启动编排器".to_owned()), None)?;
+            let step = progress.activity(tr("Starting service", "启动服务"));
+            report(
+                store,
+                target.id,
+                Some(tr("Starting orchestrator", "启动编排器").to_owned()),
+                None,
+            )?;
             platform::install(store)?;
             wait(store, target.id, progress, &step)?;
-            step.finish("已启动");
+            step.finish(tr("Started", "已启动"));
         }
         (true, true)
             if previous.units == target.units
                 && previous.config.maintenance == target.config.maintenance => {}
         (true, true) => {
-            let step = progress.activity("应用服务");
-            report(store, target.id, Some("载入配置".to_owned()), None)?;
+            let step = progress.activity(tr("Applying services", "应用服务"));
+            report(
+                store,
+                target.id,
+                Some(tr("Loading configuration", "载入配置").to_owned()),
+                None,
+            )?;
             platform::reload()?;
             wait(store, target.id, progress, &step)?;
-            step.finish("已应用");
+            step.finish(tr("Applied", "已应用"));
         }
     }
     Ok(())
 }
 
 pub fn restart(store: &Store, id: Uuid, progress: &Progress) -> Result<()> {
-    let step = progress.activity("重启 Overcast 服务");
-    report(store, id, Some("启动新版 Overcast".to_owned()), None)?;
+    let step = progress.activity(tr("Restarting Overcast service", "重启 Overcast 服务"));
+    report(
+        store,
+        id,
+        Some(tr("Starting updated Overcast", "启动新版 Overcast").to_owned()),
+        None,
+    )?;
     platform::restart()?;
     wait(store, id, progress, &step)?;
-    step.finish("已启动");
+    step.finish(tr("Started", "已启动"));
     Ok(())
 }
 
@@ -586,7 +621,13 @@ fn orchestrate(
             let result = orchestrator.transition(&deployment, &target);
             retries.clear();
             if let Err(error) = &result {
-                log(store, &format!("应用部署失败：{error}"));
+                log(
+                    store,
+                    &message!(
+                        "Could not apply deployment: {error}",
+                        "应用部署失败：{error}"
+                    ),
+                );
             }
             report(
                 store,
@@ -611,7 +652,12 @@ fn orchestrate(
             None => events.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         match event {
-            Ok(Event::Reload) => pending = true,
+            Ok(Event::Reload) => {
+                if let Err(error) = crate::language::load(store) {
+                    log(store, &error.to_string());
+                }
+                pending = true;
+            }
             Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => break Exit::Stop,
             Ok(Event::Restart) => break Exit::Restart,
             Ok(Event::Exited(name, generation)) => {
@@ -630,7 +676,8 @@ fn orchestrate(
                     };
                     log(
                         store,
-                        &format!(
+                        &message!(
+                            "{name} exited: {}",
                             "{name} 退出：{}",
                             process.status().expect("missing exit status")
                         ),
@@ -640,11 +687,24 @@ fn orchestrate(
                 }
             }
             Ok(Event::Maintained(Ok(Some(update)))) => {
-                log(store, &format!("Overcast 已更新至 {}", update.version));
+                log(
+                    store,
+                    &message!(
+                        "Updated Overcast to {}",
+                        "Overcast 已更新至 {}",
+                        update.version
+                    ),
+                );
                 break Exit::Restart;
             }
             Ok(Event::Maintained(Ok(None))) => {}
-            Ok(Event::Maintained(Err(error))) => log(store, &format!("定时维护失败：{error}")),
+            Ok(Event::Maintained(Err(error))) => log(
+                store,
+                &message!(
+                    "Scheduled maintenance failed: {error}",
+                    "定时维护失败：{error}"
+                ),
+            ),
             Err(RecvTimeoutError::Timeout) => {
                 let now = Instant::now();
                 let due: Vec<_> = retries
@@ -658,7 +718,13 @@ fn orchestrate(
                         continue;
                     };
                     if let Err(error) = orchestrator.start(unit) {
-                        log(store, &format!("{name} 启动失败：{error}"));
+                        log(
+                            store,
+                            &message!(
+                                "Could not start {name}: {error}",
+                                "{name} 启动失败：{error}"
+                            ),
+                        );
                         let delay = (delays[&name] * 2).min(BACKOFF);
                         delays.insert(name.clone(), delay);
                         retries.insert(name, now + delay);
@@ -716,7 +782,12 @@ impl Orchestrator<'_> {
             .find(|process| process.unit.component == Component::Caddy)
             .map(|process| process.unit.name.clone());
         if let Some(unit) = target.caddy().filter(|unit| changed.contains(&unit.name)) {
-            report(self.store, target.id, Some("准备 Caddy".to_owned()), None)?;
+            report(
+                self.store,
+                target.id,
+                Some(tr("Preparing Caddy", "准备 Caddy").to_owned()),
+                None,
+            )?;
             unit.check(self.progress)?;
             match caddy
                 .as_ref()
@@ -744,9 +815,14 @@ impl Orchestrator<'_> {
             report(
                 self.store,
                 target.id,
-                Some(format!(
+                Some(message!(
+                    "Preparing certificates: {}",
                     "准备证书：{}",
-                    certificates.iter().cloned().collect::<Vec<_>>().join("、")
+                    certificates
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(tr(", ", "、"))
                 )),
                 None,
             )?;
@@ -768,7 +844,11 @@ impl Orchestrator<'_> {
             report(
                 self.store,
                 target.id,
-                Some(format!("检查 {} 配置", unit.component.name())),
+                Some(message!(
+                    "Checking {} configuration",
+                    "检查 {} 配置",
+                    unit.component.name()
+                )),
                 None,
             )?;
             unit.check(self.progress)?;
@@ -787,7 +867,12 @@ impl Orchestrator<'_> {
             .map(|process| process.unit.name.clone())
             .collect();
         for name in obsolete {
-            report(self.store, target.id, Some(format!("停止 {name}")), None)?;
+            report(
+                self.store,
+                target.id,
+                Some(message!("Stopping {name}", "停止 {name}")),
+                None,
+            )?;
             self.stop(&name);
         }
         for unit in target
@@ -799,7 +884,7 @@ impl Orchestrator<'_> {
             report(
                 self.store,
                 target.id,
-                Some(format!("启动 {}", unit.component.name())),
+                Some(message!("Starting {}", "启动 {}", unit.component.name())),
                 None,
             )?;
             self.start(unit)?;
@@ -821,9 +906,13 @@ impl Orchestrator<'_> {
             self.progress,
         )?;
         isolate(&mut command);
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("启动 {} 失败：{error}", unit.component.name()))?;
+        let mut child = command.spawn().map_err(|error| {
+            message!(
+                "Could not start {}: {error}",
+                "启动 {} 失败：{error}",
+                unit.component.name()
+            )
+        })?;
         drop(command);
         self.generation += 1;
         let (finished, done) = mpsc::sync_channel(1);
@@ -851,12 +940,21 @@ impl Orchestrator<'_> {
         if let Err(error) = self.progress.until(|| {
             let desired = Deployment::load(self.store)?;
             if !desired.config.running || !desired.units.contains(unit) {
-                return Err(std::io::Error::new(ErrorKind::Interrupted, "部署已被替换").into());
+                return Err(std::io::Error::new(
+                    ErrorKind::Interrupted,
+                    tr("Deployment superseded", "部署已被替换"),
+                )
+                .into());
             }
             startup.ready(process.status())
         }) {
             process.stop();
-            return Err(format!("启动 {} 失败：{error}", unit.name).into());
+            return Err(message!(
+                "Could not start {}: {error}",
+                "启动 {} 失败：{error}",
+                unit.name
+            )
+            .into());
         }
         self.running.insert(unit.name.clone(), process);
         Ok(())
@@ -879,7 +977,9 @@ impl Process {
 
     fn check(&mut self) -> Result<()> {
         if let Some(status) = self.status().map(str::to_owned) {
-            return Err(format!("{} 已退出：{status}", self.unit.name).into());
+            return Err(
+                message!("{} exited: {status}", "{} 已退出：{status}", self.unit.name).into(),
+            );
         }
         Ok(())
     }
@@ -959,8 +1059,8 @@ fn report(store: &Store, id: Uuid, activity: Option<String>, error: Option<Strin
 // Waiting clients learn from the status file when the service stops before applying their deployment.
 fn finish(store: &Store, result: Result<()>) -> Result<()> {
     let error = match &result {
-        Ok(()) => "服务已停止".to_owned(),
-        Err(error) => format!("服务已停止：{error}"),
+        Ok(()) => tr("Service stopped", "服务已停止").to_owned(),
+        Err(error) => message!("Service stopped: {error}", "服务已停止：{error}"),
     };
     let id = Deployment::load(store).map_or_else(|_| Uuid::nil(), |deployment| deployment.id);
     let _ = report(store, id, None, Some(error));
@@ -995,7 +1095,8 @@ fn reload(unit: &Unit, port: u16) -> Result<()> {
 
 fn execute(command: &mut Command) -> Result<String> {
     let output = command.output().map_err(|error| {
-        format!(
+        message!(
+            "Could not run {}: {error}",
             "执行 {} 失败：{error}",
             command.get_program().to_string_lossy()
         )
@@ -1006,7 +1107,8 @@ fn execute(command: &mut Command) -> Result<String> {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        return Err(format!(
+        return Err(message!(
+            "{} failed: {}",
             "{} 执行失败：{}",
             command.get_program().to_string_lossy(),
             detail.trim()

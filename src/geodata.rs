@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
@@ -54,19 +55,17 @@ impl Catalog {
 
     pub fn update(store: &Store, progress: &Progress) -> Result<Self> {
         let client = resource::client();
-        let step = progress.activity("查询规则数据");
+        let step = progress.activity(tr("Checking routing data", "查询规则数据"));
         let release: Release = resource::json(
             &client,
             "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/tags/latest",
             progress,
             &step,
         )?;
-        step.finish(
-            release
-                .published_at
-                .as_deref()
-                .ok_or("规则数据版本尚未发布")?,
-        );
+        step.finish(release.published_at.as_deref().ok_or(tr(
+            "No published routing data version",
+            "规则数据版本尚未发布",
+        ))?);
         let directory = Self::directory(store, release.id);
         store.create_dir(&directory)?;
         let asset = |name| {
@@ -74,7 +73,12 @@ impl Catalog {
                 .assets
                 .iter()
                 .find(|asset| asset.name == name)
-                .ok_or_else(|| format!("规则数据发布中没有 {name}"))
+                .ok_or_else(|| {
+                    message!(
+                        "Routing data release does not include {name}",
+                        "规则数据发布中没有 {name}"
+                    )
+                })
         };
         let sites = load(
             store,
@@ -163,7 +167,11 @@ fn load<T>(
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            let step = progress.start("下载规则数据", asset.size, "字节");
+            let step = progress.start(
+                tr("Downloading routing data", "下载规则数据"),
+                asset.size,
+                tr("bytes", "字节"),
+            );
             let bytes = resource::retry(progress, &step, || {
                 step.set(0);
                 step.detail(&asset.name);
@@ -183,7 +191,7 @@ fn load<T>(
         }
         Err(error) => return Err(error.into()),
     };
-    let step = progress.activity("读取规则数据");
+    let step = progress.activity(tr("Reading routing data", "读取规则数据"));
     step.detail(&asset.name);
     let value = decode(&bytes)?;
     progress.check()?;

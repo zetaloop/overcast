@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -258,7 +259,7 @@ pub fn build<'a>(
     }
     let targets = Targets::load(store, geodata, conditions, progress)?;
     let mut graph = Analysis::new(&targets, config, progress)?;
-    let step = progress.activity("分析分流");
+    let step = progress.activity(tr("Analyzing routes", "分析分流"));
     let mut entries = Vec::new();
     for inbound in &config.inbounds {
         progress.check()?;
@@ -295,8 +296,7 @@ pub fn build<'a>(
                         .find(|route| route.destination != Destination::Block)
                     {
                         if !verified {
-                            return Err(format!(
-                                "入站 {} 的 {} 接收器未验证凭据，规则 {} 要求提供用户 {} 的接入",
+                            return Err(message!("Inbound {} does not authenticate {} connections, but rule {} requires access for user {}", "入站 {} 的 {} 接收器未验证凭据，规则 {} 要求提供用户 {} 的接入",
                                 inbound.name,
                                 network.name().to_uppercase(),
                                 location(&route.path),
@@ -320,7 +320,8 @@ pub fn build<'a>(
                         .iter()
                         .any(|route| route.destination != Destination::Block)
                 {
-                    return Err(format!(
+                    return Err(message!(
+                        "Inbound {} does not check inbound credentials for {} connections",
                         "入站 {} 的 {} 接收器不验证入口凭据",
                         inbound.name,
                         network.name().to_uppercase()
@@ -352,8 +353,7 @@ pub fn build<'a>(
                                 if route.destination == destination
                                     && graph.possible(affected, inbound.core)?
                                 {
-                                    return Err(format!(
-                                        "入站 {} 的 {} 流量未提供用户身份，分流规则 {} 的结果依赖用户 {}",
+                                    return Err(message!("Inbound {} does not identify users on {} traffic, but rule {} depends on user {}", "入站 {} 的 {} 流量未提供用户身份，分流规则 {} 的结果依赖用户 {}",
                                         inbound.name, network.name().to_uppercase(), location(&route.path), user.name,
                                     ).into());
                                 }
@@ -377,7 +377,7 @@ pub fn build<'a>(
             entries.push(Entry { inbound, accounts });
         }
     }
-    step.finish(format!("{} 个入口", entries.len()));
+    step.finish(message!("Inbounds: {}", "{} 个入口", entries.len()));
     Ok((!entries.is_empty()).then_some(Graph {
         targets,
         entries,
@@ -638,7 +638,8 @@ impl<'a> Analysis<'a> {
                         .iter()
                         .any(|outbound| outbound.uuid == uuid)
                 {
-                    return Err(format!(
+                    return Err(message!(
+                        "Routing rule {} refers to an unknown outbound: {uuid}",
                         "分流规则 {} 指向不存在的出站：{uuid}",
                         location(&route.path),
                     )
@@ -646,7 +647,8 @@ impl<'a> Analysis<'a> {
                 }
                 if let Destination::Inbound(uuid) = route.destination {
                     if !self.config.inbounds.iter().any(|value| value.uuid == uuid) {
-                        return Err(format!(
+                        return Err(message!(
+                            "Routing rule {} refers to an unknown inbound: {uuid}",
                             "分流规则 {} 指向不存在的入站：{uuid}",
                             location(&route.path)
                         )
@@ -718,7 +720,7 @@ impl<'a> Analysis<'a> {
                 .inbounds
                 .iter()
                 .find(|value| value.uuid == uuid)
-                .ok_or_else(|| format!("找不到入站：{uuid}"))?;
+                .ok_or_else(|| message!("Unknown inbound: {uuid}", "找不到入站：{uuid}"))?;
             if !self.enabled(inbound, reachable)? {
                 continue;
             }

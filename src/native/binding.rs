@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::BTreeSet,
     fs,
@@ -232,7 +233,12 @@ impl Binding {
         }
         if let Some(zone) = zone {
             if interface.is_some_and(|interface| interface != zone) {
-                return Err(format!("入站 {} 的 IPv6 区域与监听接口不同", source.name).into());
+                return Err(message!(
+                    "Inbound {} has an IPv6 zone different from its listening interface",
+                    "入站 {} 的 IPv6 区域与监听接口不同",
+                    source.name
+                )
+                .into());
             }
             interface = Some(zone);
         }
@@ -342,7 +348,11 @@ impl Namespace {
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             if name.is_some() {
-                return Err("当前系统没有 Linux 网络命名空间".into());
+                return Err(tr(
+                    "Linux network namespaces are unavailable on this system",
+                    "当前系统没有 Linux 网络命名空间",
+                )
+                .into());
             }
             Ok(Self { key: None })
         }
@@ -383,7 +393,11 @@ fn interface_index(name: &str) -> Result<u32> {
             Ndis::NET_LUID_LH,
         };
         if name.contains('\0') {
-            return Err("网络接口名称包含 NUL 字符".into());
+            return Err(tr(
+                "Network interface name contains a NUL character",
+                "网络接口名称包含 NUL 字符",
+            )
+            .into());
         }
         let name: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
         let mut luid = NET_LUID_LH { Value: 0 };
@@ -412,8 +426,15 @@ fn canonical(path: &Path) -> Result<PathBuf> {
                 return Ok(path);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(parent.file_name().ok_or("套接字路径缺少名称")?);
-                parent = parent.parent().ok_or("套接字路径缺少目录")?;
+                missing.push(
+                    parent
+                        .file_name()
+                        .ok_or(tr("Socket path has no name", "套接字路径缺少名称"))?,
+                );
+                parent = parent.parent().ok_or(tr(
+                    "Socket path has no parent directory",
+                    "套接字路径缺少目录",
+                ))?;
             }
             Err(error) => return Err(error.into()),
         }

@@ -1,3 +1,4 @@
+use crate::language::text as tr;
 use std::{
     ffi::{OsStr, OsString, c_void},
     io,
@@ -186,13 +187,19 @@ pub(super) fn install(store: &Store) -> Result<()> {
 }
 
 pub(super) fn reload() -> Result<()> {
-    let service = open(ServiceAccess::USER_DEFINED_CONTROL)?.ok_or("Overcast 服务未注册")?;
+    let service = open(ServiceAccess::USER_DEFINED_CONTROL)?.ok_or(tr(
+        "Overcast service is not registered",
+        "Overcast 服务未注册",
+    ))?;
     service.notify(RELOAD)?;
     Ok(())
 }
 
 pub(super) fn restart() -> Result<()> {
-    let service = open(ServiceAccess::USER_DEFINED_CONTROL)?.ok_or("Overcast 服务未注册")?;
+    let service = open(ServiceAccess::USER_DEFINED_CONTROL)?.ok_or(tr(
+        "Overcast service is not registered",
+        "Overcast 服务未注册",
+    ))?;
     service.notify(RESTART)?;
     Ok(())
 }
@@ -236,7 +243,9 @@ pub(super) fn kill(pid: u32) {
 static STORE: OnceLock<Store> = OnceLock::new();
 
 pub(super) fn serve(store: Store) -> Result<()> {
-    STORE.set(store).map_err(|_| "服务入口已初始化")?;
+    STORE
+        .set(store)
+        .map_err(|_| tr("Service entry point initialized", "服务入口已初始化"))?;
     service_dispatcher::start(NAME, service_main)?;
     Ok(())
 }

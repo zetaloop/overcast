@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::collections::BTreeSet;
 
 use serde_json::Map;
@@ -86,7 +87,10 @@ impl Core {
 
     pub(super) fn check_encryption(self, enabled: bool) -> Result<()> {
         if enabled && !self.vless_encryption() {
-            return super::unsupported("sing-box 不支持 VLESS Encryption");
+            return super::unsupported(tr(
+                "sing-box does not support VLESS Encryption",
+                "sing-box 不支持 VLESS Encryption",
+            ));
         }
         Ok(())
     }
@@ -113,7 +117,10 @@ impl Core {
             && let (Some(cert), Some(key)) = (&tls.client_certificate, &tls.client_key)
             && cert.inline().is_some() != key.inline().is_some()
         {
-            return super::unsupported("Mihomo 的客户端证书与私钥需同为正文或同为文件路径");
+            return super::unsupported(tr(
+                "Mihomo requires the client certificate and key to be both inline or both file paths",
+                "Mihomo 的客户端证书与私钥需同为正文或同为文件路径",
+            ));
         }
         Ok(())
     }
@@ -244,15 +251,16 @@ pub(crate) fn check_clients(source: &Inbound, store: &Store) -> Result<()> {
             match core.parameters(&client, store, pending) {
                 Ok(()) => true,
                 Err(error) => {
-                    errors.push(format!("{}：{error}", super::key(core)));
+                    errors.push(message!("{}: {error}", "{}：{error}", super::key(core)));
                     false
                 }
             }
         }) {
-            return Err(format!(
+            return Err(message!(
+                "Cannot generate client settings for {}: {}",
                 "{} 客户端参数无法生成：{}",
                 client.summary(),
-                errors.join("；")
+                errors.join(tr("; ", "；"))
             )
             .into());
         }
@@ -290,6 +298,6 @@ impl Core {
     pub(crate) fn network(self, value: &Network) -> Result<()> {
         let mut options = Options::new(value)?;
         dial(self, value, &mut options)?;
-        options.finish("出站网络")
+        options.finish(tr("Outbound network", "出站网络"))
     }
 }

@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -75,7 +76,11 @@ pub fn client(source: &Client, core: Core) -> Result<Map<String, Value>> {
     let value = &source.hysteria;
     if value.ports.is_empty() && (value.hop_interval.is_some() || value.hop_interval_max.is_some())
     {
-        return Err("跳跃间隔需要同时配置跳跃端口".into());
+        return Err(tr(
+            "Hop interval requires hopping ports",
+            "跳跃间隔需要同时配置跳跃端口",
+        )
+        .into());
     }
     let mut output = parameters(&value.quic, value.obfs.as_ref(), core, false)?;
     let mut options = Options::new(value)?;
@@ -126,7 +131,11 @@ pub fn client(source: &Client, core: Core) -> Result<Map<String, Value>> {
             let min = interval.get("min").and_then(Value::as_u64).unwrap_or(30);
             let max = interval.get("max").and_then(Value::as_u64).unwrap_or(min);
             if max < min {
-                return Err("最大跳跃间隔需要大于或等于跳跃间隔".into());
+                return Err(tr(
+                    "Maximum hop interval must be at least the hop interval",
+                    "最大跳跃间隔需要大于或等于跳跃间隔",
+                )
+                .into());
             }
             if core == Core::Mihomo {
                 if !value.ports.is_empty() {
@@ -151,7 +160,7 @@ pub fn client(source: &Client, core: Core) -> Result<Map<String, Value>> {
             }
         }
     }
-    options.finish("Hysteria 2 出站")?;
+    options.finish(tr("Hysteria 2 outbound", "Hysteria 2 出站"))?;
     Ok(output)
 }
 
@@ -179,7 +188,7 @@ pub fn server(source: &Server, core: Core, store: &Store) -> Result<Map<String, 
             output.insert("masquerade".to_owned(), value);
         }
     }
-    options.finish("Hysteria 2 入站")?;
+    options.finish(tr("Hysteria 2 inbound", "Hysteria 2 入站"))?;
     Ok(output)
 }
 
@@ -225,7 +234,10 @@ fn parameters(
                 if let Some(value) = options.take(name) {
                     let rate = super::transport::mbps(value.as_str().unwrap())?;
                     if rate.fract() != 0.0 || rate >= i64::MAX as f64 {
-                        return unsupported("sing-box HY2 使用整数 Mbps 带宽");
+                        return unsupported(tr(
+                            "sing-box requires whole Mbps for HY2 bandwidth",
+                            "sing-box HY2 使用整数 Mbps 带宽",
+                        ));
                     }
                     output.insert(key.to_owned(), json!(rate as u64));
                 }
@@ -286,7 +298,7 @@ fn parameters(
                 options.copy(&mut value, &["min_packet_size", "max_packet_size"]);
             }
         }
-        options.finish("HY2 混淆")?;
+        options.finish(tr("HY2 obfuscation", "HY2 混淆"))?;
         match core {
             Core::SingBox => {
                 value.insert("type".to_owned(), json!(source.kind));
@@ -314,7 +326,11 @@ fn masquerade(source: &Masquerade, core: Core, store: &Store) -> Result<Value> {
     let url = match source.kind {
         MasqueradeKind::File => {
             if source.directory.is_empty() {
-                return Err("请填写 HY2 伪装文件目录".into());
+                return Err(tr(
+                    "Enter a directory for HY2 file masquerading",
+                    "请填写 HY2 伪装文件目录",
+                )
+                .into());
             }
             options.take("directory");
             let directory = path(store, &source.directory);
@@ -327,13 +343,20 @@ fn masquerade(source: &Masquerade, core: Core, store: &Store) -> Result<Value> {
                 .to_owned(),
                 json!(directory),
             );
-            let mut url = Url::from_directory_path(&directory)
-                .map_err(|_| "HY2 伪装文件目录需要使用绝对路径")?;
+            let mut url = Url::from_directory_path(&directory).map_err(|_| {
+                tr(
+                    "HY2 masquerade requires an absolute directory path",
+                    "HY2 伪装文件目录需要使用绝对路径",
+                )
+            })?;
             // Mihomo opens the URL path as a native filesystem path.
             if cfg!(windows) && core == Core::Mihomo {
                 let mut directory = directory
                     .to_str()
-                    .ok_or("HY2 伪装目录包含无效字符")?
+                    .ok_or(tr(
+                        "Invalid character in HY2 masquerade directory",
+                        "HY2 伪装目录包含无效字符",
+                    ))?
                     .replace('\\', "/");
                 if !directory.starts_with("//") {
                     directory = format!("//?/{directory}");
@@ -344,12 +367,19 @@ fn masquerade(source: &Masquerade, core: Core, store: &Store) -> Result<Value> {
             url.to_string()
         }
         MasqueradeKind::Proxy => {
-            let url = Url::parse(&source.url)
-                .map_err(|error| format!("HY2 伪装目标地址格式不正确：{error}"))?;
+            let url = Url::parse(&source.url).map_err(|error| {
+                message!(
+                    "Invalid HY2 masquerade target: {error}",
+                    "HY2 伪装目标地址格式不正确：{error}"
+                )
+            })?;
             if !matches!(url.scheme(), "http" | "https")
                 && !(core == Core::Xray && url.scheme() == "unix")
             {
-                return unsupported("HY2 伪装反代需要 HTTP 或 HTTPS 目标");
+                return unsupported(tr(
+                    "HY2 reverse proxy requires an HTTP or HTTPS upstream",
+                    "HY2 伪装反代需要 HTTP 或 HTTPS 目标",
+                ));
             }
             options.copy(&mut output, &["url"]);
             match core {
@@ -376,7 +406,10 @@ fn masquerade(source: &Masquerade, core: Core, store: &Store) -> Result<Value> {
         }
         MasqueradeKind::String => {
             if core == Core::Mihomo {
-                return unsupported("Mihomo HY2 伪装响应使用文件或 HTTP 反代");
+                return unsupported(tr(
+                    "Mihomo HY2 masquerade supports files or an HTTP reverse proxy",
+                    "Mihomo HY2 伪装响应使用文件或 HTTP 反代",
+                ));
             }
             if let Some(code) = source.status_code {
                 ureq::http::StatusCode::from_u16(code)?;
@@ -396,7 +429,7 @@ fn masquerade(source: &Masquerade, core: Core, store: &Store) -> Result<Value> {
             String::new()
         }
     };
-    options.finish("HY2 伪装响应")?;
+    options.finish(tr("HY2 masquerade response", "HY2 伪装响应"))?;
     Ok(if core == Core::Mihomo {
         json!(url)
     } else {

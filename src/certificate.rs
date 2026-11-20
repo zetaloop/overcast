@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::BTreeSet,
     fs,
@@ -33,7 +34,12 @@ pub fn name(source: &Inbound) -> Result<String> {
         return Ok(address.to_canonical().to_string());
     }
     Ok(Host::parse(value)
-        .map_err(|error| format!("证书地址 {value} 的格式不正确：{error}"))?
+        .map_err(|error| {
+            message!(
+                "Invalid certificate address {value}: {error}",
+                "证书地址 {value} 的格式不正确：{error}"
+            )
+        })?
         .to_string())
 }
 
@@ -107,10 +113,14 @@ pub fn wait(
     store.create_dir(&directory)?;
     watcher.watch(&directory, RecursiveMode::Recursive)?;
     watcher.watch(&store.directory, RecursiveMode::NonRecursive)?;
-    let step = progress.activity("准备证书");
+    let step = progress.activity(tr("Preparing certificates", "准备证书"));
     progress.until(|| {
         if !current()? {
-            return Err(std::io::Error::new(ErrorKind::Interrupted, "部署已被替换").into());
+            return Err(std::io::Error::new(
+                ErrorKind::Interrupted,
+                tr("Deployment superseded", "部署已被替换"),
+            )
+            .into());
         }
         if let Some(error) = failure.lock().expect("certificate lock poisoned").take() {
             return Err(error.into());
@@ -128,21 +138,30 @@ pub fn wait(
                 Err(error) => return Err(error.into()),
             };
             let certificates = x509_cert::Certificate::load_pem_chain(&bytes)?;
-            let certificate = certificates
-                .first()
-                .ok_or_else(|| format!("证书文件为空：{}", certificate.display()))?;
+            let certificate = certificates.first().ok_or_else(|| {
+                message!(
+                    "Certificate file is empty: {}",
+                    "证书文件为空：{}",
+                    certificate.display()
+                )
+            })?;
             let validity = certificate.tbs_certificate().validity();
             if now < validity.not_before.to_system_time() {
-                return Err(format!("证书 {name} 从 {} 开始生效", validity.not_before).into());
+                return Err(message!(
+                    "Certificate {name} is valid from {}",
+                    "证书 {name} 从 {} 开始生效",
+                    validity.not_before
+                )
+                .into());
             }
             if !key.try_exists()? || now >= validity.not_after.to_system_time() {
                 pending.push(name.as_str());
             }
         }
-        step.detail(pending.join("、"));
+        step.detail(pending.join(tr(", ", "、")));
         Ok(pending.is_empty())
     })?;
-    step.finish(format!("{} 份证书", names.len()));
+    step.finish(message!("Certificates: {}", "{} 份证书", names.len()));
     Ok(())
 }
 

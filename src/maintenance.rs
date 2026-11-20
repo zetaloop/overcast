@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -82,16 +83,22 @@ impl Schedule {
         }
         match self.mode {
             Mode::Calendar => {
-                let (hour, minute) = self
-                    .calendar
-                    .time
-                    .trim()
-                    .split_once(':')
-                    .ok_or("维护时间使用 HH:mm 格式")?;
-                let hour: i8 = hour.parse().map_err(|_| "维护时间的小时格式不正确")?;
-                let minute: i8 = minute.parse().map_err(|_| "维护时间的分钟格式不正确")?;
-                let time = jiff::civil::Time::new(hour, minute, 0, 0)
-                    .map_err(|_| "维护时间使用 00:00 至 23:59")?;
+                let (hour, minute) = self.calendar.time.trim().split_once(':').ok_or(tr(
+                    "Enter the maintenance time as HH:mm",
+                    "维护时间使用 HH:mm 格式",
+                ))?;
+                let hour: i8 = hour
+                    .parse()
+                    .map_err(|_| tr("Invalid maintenance hour", "维护时间的小时格式不正确"))?;
+                let minute: i8 = minute
+                    .parse()
+                    .map_err(|_| tr("Invalid maintenance minute", "维护时间的分钟格式不正确"))?;
+                let time = jiff::civil::Time::new(hour, minute, 0, 0).map_err(|_| {
+                    tr(
+                        "Enter a time between 00:00 and 23:59",
+                        "维护时间使用 00:00 至 23:59",
+                    )
+                })?;
                 let now = jiff::Zoned::now();
                 let mut date = now.date();
                 for _ in 0..8 {
@@ -107,10 +114,18 @@ impl Schedule {
                 unreachable!("calendar schedule within a week")
             }
             Mode::Interval => {
-                let interval = humantime::parse_duration(&self.interval)
-                    .map_err(|error| format!("维护间隔格式不正确：{error}"))?;
+                let interval = humantime::parse_duration(&self.interval).map_err(|error| {
+                    message!(
+                        "Invalid maintenance interval: {error}",
+                        "维护间隔格式不正确：{error}"
+                    )
+                })?;
                 if interval.is_zero() {
-                    return Err("维护间隔需要大于零".into());
+                    return Err(tr(
+                        "Maintenance interval must be positive",
+                        "维护间隔需要大于零",
+                    )
+                    .into());
                 }
                 Ok(Some(interval))
             }
@@ -137,27 +152,37 @@ impl form::Form for Schedule {
     fn fields(&mut self, defaults: Self) -> form::Fields<'_> {
         let mode = self.mode;
         let mut fields = vec![
-            form::field("enabled", "启用", &mut self.enabled, defaults.enabled),
-            form::field("mode", "安排方式", &mut self.mode, defaults.mode),
+            form::field(
+                "enabled",
+                tr("Enabled", "启用"),
+                &mut self.enabled,
+                defaults.enabled,
+            ),
+            form::field(
+                "mode",
+                tr("Schedule type", "安排方式"),
+                &mut self.mode,
+                defaults.mode,
+            ),
         ];
         match mode {
             Mode::Calendar => {
                 fields.push(form::field(
                     "time",
-                    "时间",
+                    tr("Time", "时间"),
                     &mut self.calendar.time,
                     defaults.calendar.time,
                 ));
                 fields.push(form::field(
                     "weekdays",
-                    "星期",
+                    tr("Days", "星期"),
                     &mut self.calendar.weekdays,
                     defaults.calendar.weekdays,
                 ));
             }
             Mode::Interval => fields.push(form::field(
                 "interval",
-                "间隔",
+                tr("Interval", "间隔"),
                 &mut self.interval,
                 defaults.interval,
             )),
@@ -169,13 +194,13 @@ impl form::Form for Schedule {
 impl Value for Weekdays {
     fn text(&self) -> String {
         if self.0.is_empty() {
-            "每天".to_owned()
+            tr("Every day", "每天").to_owned()
         } else {
             self.0
                 .iter()
                 .map(Value::text)
                 .collect::<Vec<_>>()
-                .join("、")
+                .join(tr(", ", "、"))
         }
     }
 
@@ -184,19 +209,22 @@ impl Value for Weekdays {
         let mut selected = 0;
         let mut changed = false;
         loop {
-            let mut items = vec![Item::new("daily", "每天".stylized())];
+            let mut items = vec![Item::new("daily", tr("Every day", "每天").stylized())];
             items[0].marker = self.0.is_empty().marker();
             for (key, label, day) in &days {
                 let mut item = Item::new(*key, (*label).stylized());
                 item.marker = self.0.contains(day).marker();
                 items.push(item);
             }
-            items.push(Item::new("back", "返回".stylized()));
+            items.push(Item::new("back", tr("Back", "返回").stylized()));
             let menu = Menu {
-                title: "星期",
+                title: tr("Days", "星期"),
                 heading: "",
                 items: &items,
-                help: "方向键 选择\n回车键 切换\nEsc 返回",
+                help: tr(
+                    "Arrow keys to select\nEnter to toggle\nEsc to go back",
+                    "方向键 选择\n回车键 切换\nEsc 返回",
+                ),
             };
             match screen.select(&menu, &mut selected, "")? {
                 Action::Back => return Ok(changed),
@@ -229,18 +257,18 @@ impl Value for Weekdays {
 }
 
 choices!(Mode {
-    Calendar: "calendar" => "日历安排",
-    Interval: "interval" => "固定间隔",
+    Calendar: "calendar" => ("Calendar", "日历安排"),
+    Interval: "interval" => ("Fixed interval", "固定间隔"),
 });
 
 choices!(Day {
-    Monday: "monday" => "周一",
-    Tuesday: "tuesday" => "周二",
-    Wednesday: "wednesday" => "周三",
-    Thursday: "thursday" => "周四",
-    Friday: "friday" => "周五",
-    Saturday: "saturday" => "周六",
-    Sunday: "sunday" => "周日",
+    Monday: "monday" => ("Monday", "周一"),
+    Tuesday: "tuesday" => ("Tuesday", "周二"),
+    Wednesday: "wednesday" => ("Wednesday", "周三"),
+    Thursday: "thursday" => ("Thursday", "周四"),
+    Friday: "friday" => ("Friday", "周五"),
+    Saturday: "saturday" => ("Saturday", "周六"),
+    Sunday: "sunday" => ("Sunday", "周日"),
 });
 
 pub fn update(store: &Store, progress: &Progress) -> Result<Option<crate::update::Installed>> {
@@ -277,36 +305,48 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::I
     loop {
         let config = store.load()?;
         let resources = Resources::load(store)?;
-        let mut running = Item::new("running", "运行服务".stylized());
+        let mut running = Item::new("running", tr("Run service", "运行服务").stylized());
         running.marker = if config.running { "■" } else { "□" };
-        let mut schedule = Item::new("schedule", "定时维护".stylized());
+        let mut schedule = Item::new(
+            "schedule",
+            tr("Scheduled maintenance", "定时维护").stylized(),
+        );
         schedule.value = if config.maintenance.enabled {
-            "开启"
+            tr("On", "开启")
         } else {
-            "关闭"
+            tr("Off", "关闭")
         }
         .to_owned();
         let mut items = vec![
             running,
-            Item::new("logs", "运行日志".stylized()),
-            Item::new("rules", "更新规则数据".stylized()),
-            Item::new("update", "更新全部".stylized()),
+            Item::new("logs", tr("Logs", "运行日志").stylized()),
+            Item::new(
+                "rules",
+                tr("Update routing data", "更新规则数据").stylized(),
+            ),
+            Item::new("update", tr("Update all", "更新全部").stylized()),
             schedule,
         ];
         items[2].gap = true;
         let versions = items.len();
         items.extend(Component::ALL.iter().map(|component| {
             let mut item = Item::new(component.key(), component.name().stylized());
-            item.value = component.version(&resources).unwrap_or("未安装").to_owned();
+            item.value = component
+                .version(&resources)
+                .unwrap_or(tr("Not installed", "未安装"))
+                .to_owned();
             item
         }));
         items[versions].gap = true;
-        items.push(Item::new("back", "返回".stylized()));
+        items.push(Item::new("back", tr("Back", "返回").stylized()));
         let menu = Menu {
-            title: "维护",
+            title: tr("Maintenance", "维护"),
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 确定\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to confirm\nEsc to go back",
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            ),
         };
         match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(None),
@@ -323,9 +363,9 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::I
                 "running" => screen
                     .work(
                         if config.running {
-                            "停止服务"
+                            tr("Stopping service", "停止服务")
                         } else {
-                            "启动服务"
+                            tr("Starting service", "启动服务")
                         },
                         "",
                         |progress| {
@@ -338,20 +378,30 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::I
                     .map(|()| None),
                 "logs" => crate::service::logs(screen, store).map(|()| None),
                 "rules" => screen
-                    .work("更新规则数据", "", |progress| rules(store, progress))
+                    .work(
+                        tr("Update routing data", "更新规则数据"),
+                        "",
+                        |progress| rules(store, progress),
+                    )
                     .map(|()| None),
-                "update" => screen.work("更新资源", "", |progress| update(store, progress)),
+                "update" => screen.work(tr("Updating resources", "更新资源"), "", |progress| {
+                    update(store, progress)
+                }),
                 "schedule" => form::page(
                     screen,
-                    "定时维护",
+                    tr("Scheduled maintenance", "定时维护"),
                     &config.maintenance,
                     |settings: &Schedule, screen| {
-                        screen.work("更新维护日程", "", |progress| {
-                            store.update(progress, |config, _| {
-                                config.maintenance = settings.clone();
-                                Ok(())
-                            })
-                        })
+                        screen.work(
+                            tr("Updating maintenance schedule", "更新维护日程"),
+                            "",
+                            |progress| {
+                                store.update(progress, |config, _| {
+                                    config.maintenance = settings.clone();
+                                    Ok(())
+                                })
+                            },
+                        )
                     },
                 )
                 .map(|()| None),

@@ -1,3 +1,4 @@
+use crate::language::message;
 use std::{fs, process::Command};
 
 use serde_json::json;
@@ -16,7 +17,8 @@ fn loaded() -> Result<bool> {
         return Ok(false);
     }
     if !output.status.success() {
-        return Err(format!(
+        return Err(message!(
+            "Could not read service status: {}",
             "读取服务状态失败：{}",
             String::from_utf8_lossy(&output.stderr).trim()
         )
