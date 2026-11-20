@@ -87,7 +87,11 @@ pub struct Screen {
 impl Screen {
     pub fn open(arguments: impl IntoIterator<Item = String>) -> Result<Self> {
         if !std::io::stdin().is_terminal() || !stdout().is_terminal() {
-            return Err("Overcast 需要在终端中运行".into());
+            return Err(crate::language::text(
+                "Run Overcast in a terminal",
+                "Overcast 需要在终端中运行",
+            )
+            .into());
         }
         let mut screen = Self {
             output: PlatformTerminal::new()?,
@@ -269,11 +273,14 @@ impl Screen {
         }
         if std::mem::take(&mut self.copied) && notice.is_empty() {
             footer.push(String::new().stylized());
-            footer.push("已复制".foreground(AnsiColor::Green));
+            footer.push(crate::language::text("Copied", "已复制").foreground(AnsiColor::Green));
         }
         footer.push(String::new().stylized());
         let help = if editing {
-            "回车键 确定\nEsc 取消\nCtrl+A 全选\nCtrl+C 复制 / Ctrl+X 剪切"
+            crate::language::text(
+                "Enter to confirm\nEsc to cancel\nCtrl+A to select all\nCtrl+C to copy / Ctrl+X to cut",
+                "回车键 确定\nEsc 取消\nCtrl+A 全选\nCtrl+C 复制 / Ctrl+X 剪切",
+            )
         } else {
             menu.help
         };
@@ -375,10 +382,17 @@ impl Screen {
         };
         let mut lines = wrap(width);
         if lines.is_empty() {
-            lines.push("日志为空".to_owned().stylized());
+            lines.push(
+                crate::language::text("The log is empty", "日志为空")
+                    .to_owned()
+                    .stylized(),
+            );
         }
         let mut first = lines.len().saturating_sub(1);
-        let back = [Item::new("back", "返回".stylized())];
+        let back = [Item::new(
+            "back",
+            crate::language::text("Back", "返回").stylized(),
+        )];
         let mut notice = String::new();
         while !self.exiting {
             let dimensions = self.dimensions()?;
@@ -386,14 +400,21 @@ impl Screen {
                 width = dimensions.cols as usize;
                 lines = wrap(width);
                 if lines.is_empty() {
-                    lines.push("日志为空".to_owned().stylized());
+                    lines.push(
+                        crate::language::text("The log is empty", "日志为空")
+                            .to_owned()
+                            .stylized(),
+                    );
                 }
                 first = lines.len().saturating_sub(1);
             }
             let footer: Vec<_> = crate::input::wrap(&notice, width)
                 .into_iter()
                 .map(|line| line.foreground(AnsiColor::BrightRed))
-                .chain(["方向键 滚动".bold(), "  > 返回".stylized()])
+                .chain([
+                    crate::language::text("Arrow keys to scroll", "方向键 滚动").bold(),
+                    crate::language::text("  > Back", "  > 返回").stylized(),
+                ])
                 .collect();
             let count = (dimensions.rows as usize)
                 .saturating_sub(footer.len() + 2)
@@ -535,7 +556,10 @@ impl Screen {
                 matches.iter().map(|index| &items[*index]),
                 (!matches.is_empty()).then_some(selected),
                 &notice,
-                "输入文字 搜索\n↑↓ 选择\n回车键 确定\nEsc 返回",
+                crate::language::text(
+                    "Type to search\n↑↓ to select\nEnter to confirm\nEsc to go back",
+                    "输入文字 搜索\n↑↓ 选择\n回车键 确定\nEsc 返回",
+                ),
             )?;
             let Some(event) = self.event(false)? else {
                 continue;
@@ -584,7 +608,11 @@ impl Screen {
         }
         let items = menu.items;
         if items.is_empty() {
-            return Err("菜单中没有可选择的项目".into());
+            return Err(crate::language::text(
+                "This menu has no selectable items",
+                "菜单中没有可选择的项目",
+            )
+            .into());
         }
         *selected = (*selected).min(items.len() - 1);
         if items[*selected].inert {
@@ -736,7 +764,11 @@ impl Screen {
                         Ok(result) => return result,
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => {
-                            return Err("处理线程已中断".into());
+                            return Err(crate::language::text(
+                                "The worker thread stopped unexpectedly",
+                                "处理线程已中断",
+                            )
+                            .into());
                         }
                     }
                     let dimensions = self.dimensions()?;
@@ -799,9 +831,9 @@ impl Screen {
                     lines.push(String::new().stylized());
                     lines.push(
                         if cancelled {
-                            "正在取消…"
+                            crate::language::text("Cancelling…", "正在取消…")
                         } else {
-                            "Esc 取消"
+                            crate::language::text("Esc to cancel", "Esc 取消")
                         }
                         .to_owned()
                         .bold(),
@@ -840,7 +872,7 @@ impl Screen {
     }
 
     pub fn about(&mut self) -> Result<()> {
-        self.draw("关于", &[], &[], None)?;
+        self.draw(crate::language::text("About", "关于"), &[], &[], None)?;
         write!(self.output, "\x1b[3;1H")?;
         let body = format!(
             "\x1b[1m   Overcast v{}\n\x1b[0m   By zetaloop\n\n[",
@@ -867,7 +899,11 @@ impl Screen {
             self.output.flush()?;
             sleep(index as u32 % 2);
         }
-        write!(self.output, "]\r\n\r\n\x1b[7m  > 返回   \x1b[m")?;
+        write!(
+            self.output,
+            "]\r\n\r\n\x1b[7m  > {}   \x1b[m",
+            crate::language::text("Back", "返回")
+        )?;
         self.output.flush()?;
         self.rows = 8;
         if self.arguments.pop_front().is_none() {
@@ -881,7 +917,8 @@ impl Screen {
     }
 
     pub fn finish(&mut self) -> Result<()> {
-        let heading = "==== Overcast [退出] ====";
+        let heading =
+            crate::language::text("==== Overcast [Quit] ====", "==== Overcast [退出] ====");
         write!(self.output, "\x1b[H{}\x1b[K", heading.bold())?;
         self.output.flush()?;
         let start = Instant::now();
@@ -960,19 +997,24 @@ pub(crate) fn choice(
     argument: &str,
 ) -> std::result::Result<usize, String> {
     if argument == "-" {
-        return items
-            .get(selected)
-            .map(|_| selected)
-            .ok_or_else(|| "没有可选择的项目".to_owned());
+        return items.get(selected).map(|_| selected).ok_or_else(|| {
+            crate::language::text("No selectable item", "没有可选择的项目").to_owned()
+        });
     }
     let mut matches = items.iter().enumerate().filter(|(_, item)| {
         !item.inert && (item.key == argument || item.label.content == argument)
     });
     let Some((index, _)) = matches.next() else {
-        return Err(format!("找不到菜单项：{argument}"));
+        return Err(crate::language::message!(
+            "No menu item matches {argument}",
+            "找不到菜单项：{argument}"
+        ));
     };
     if matches.next().is_some() {
-        return Err(format!("名称对应多个菜单项：{argument}"));
+        return Err(crate::language::message!(
+            "Multiple menu items match {argument}",
+            "名称对应多个菜单项：{argument}"
+        ));
     }
     Ok(index)
 }

@@ -16,6 +16,7 @@ mod hysteria;
 mod inbound;
 pub mod input;
 mod keys;
+mod language;
 mod link;
 mod maintenance;
 mod multiplex;
@@ -56,21 +57,33 @@ fn run() -> Result<()> {
     match args.peek().map(String::as_str) {
         Some("--run") => {
             args.next();
-            return service::run(Store::open(args.next().map(Into::into))?);
+            let store = Store::open(args.next().map(Into::into))?;
+            language::load(&store)?;
+            return service::run(store);
         }
         Some("--update") => {
             args.next();
             let store = Store::open(args.next().map(Into::into))?;
+            language::load(&store)?;
             let progress = progress::Progress::default();
             if let Some(update) = maintenance::update(&store, &progress)? {
-                println!("Overcast 已更新至 {}", update.activate(&store, &progress)?);
+                println!(
+                    "{} {}",
+                    language::text("Updated Overcast to", "Overcast 已更新至"),
+                    update.activate(&store, &progress)?
+                );
             }
             return Ok(());
         }
         _ => {}
     }
     let store = Store::open(None)?;
-    let mut screen = Screen::open(args)?;
+    let configured = language::load(&store)?;
+    let mut screen = Screen::open([])?;
+    if !configured && !language::choose(&mut screen, &store)? {
+        return screen.finish();
+    }
+    screen.arguments.extend(args);
     screen.aliases(&[
         ("help", &["about"]),
         ("version", &["about"]),
@@ -78,22 +91,30 @@ fn run() -> Result<()> {
     ]);
     let mut selected = 0;
     let mut notice = String::new();
-    let items = [
-        Item::new("inbounds", "入站".stylized()),
-        Item::new("outbounds", "出站".stylized()),
-        Item::new("users", "用户".stylized()),
-        Item::new("rules", "分流".stylized()),
-        Item::new("maintenance", "维护".stylized()),
-        Item::new("about", "关于".stylized()),
-        Item::new("exit", "退出".foreground(AnsiColor::BrightRed)),
-    ];
-    let menu = Menu {
-        title: "主菜单",
-        heading: "",
-        items: &items,
-        help: "方向键 选择\n回车键 确定\nEsc 退出",
-    };
     loop {
+        use language::text;
+        let items = [
+            Item::new("inbounds", text("Inbounds", "入站").stylized()),
+            Item::new("outbounds", text("Outbounds", "出站").stylized()),
+            Item::new("users", text("Users", "用户").stylized()),
+            Item::new("rules", text("Routing", "分流").stylized()),
+            Item::new("maintenance", text("Maintenance", "维护").stylized()),
+            Item::new("settings", text("Settings", "设置").stylized()),
+            Item::new("about", text("About", "关于").stylized()),
+            Item::new(
+                "exit",
+                text("Quit", "退出").foreground(AnsiColor::BrightRed),
+            ),
+        ];
+        let menu = Menu {
+            title: text("Main menu", "主菜单"),
+            heading: "",
+            items: &items,
+            help: text(
+                "Arrow keys to select\nEnter to open\nEsc to quit",
+                "方向键 选择\n回车键 确定\nEsc 退出",
+            ),
+        };
         match screen.select(&menu, &mut selected, &notice)? {
             Action::Select => {}
             Action::Back => break,
@@ -106,16 +127,22 @@ fn run() -> Result<()> {
             3 => route::run(&mut screen, &store),
             4 => match maintenance::run(&mut screen, &store) {
                 Ok(Some(update)) => {
-                    let version = screen.work("应用更新", "", |progress| {
-                        update.activate(&store, progress)
-                    });
+                    let version =
+                        screen.work(text("Applying update", "应用更新"), "", |progress| {
+                            update.activate(&store, progress)
+                        });
                     drop(screen);
-                    println!("Overcast 已更新至 {}", version?);
+                    println!(
+                        "{} {}",
+                        text("Updated Overcast to", "Overcast 已更新至"),
+                        version?
+                    );
                     return Ok(());
                 }
                 result => result.map(|_| ()),
             },
-            5 => screen.about(),
+            5 => language::settings(&mut screen, &store),
+            6 => screen.about(),
             _ => break,
         };
         notice = result

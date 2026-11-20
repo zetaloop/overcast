@@ -389,7 +389,10 @@ fn edit_group<T>(
                 .any(|group| group.fields.contains(&field.key())),
         });
         if let Some(flag) = enabled.as_deref_mut() {
-            fields.insert(0, field("use", "启用", flag, false));
+            fields.insert(
+                0,
+                field("use", crate::language::text("Enabled", "启用"), flag, false),
+            );
         }
         let mut items: Vec<_> = fields.iter().map(|field| field.item()).collect();
         items.extend(
@@ -399,22 +402,33 @@ fn edit_group<T>(
         );
         let editing = pending;
         if editing {
-            let mut save = Item::new("apply", "确定".stylized());
+            let mut save = Item::new("apply", crate::language::text("Confirm", "确定").stylized());
             save.gap = true;
             items.push(save);
         }
         items.push(Item::new(
             "back",
-            if editing { "取消" } else { "返回" }.stylized(),
+            if editing {
+                crate::language::text("Cancel", "取消")
+            } else {
+                crate::language::text("Back", "返回")
+            }
+            .stylized(),
         ));
         let menu = Menu {
             title,
             heading: "",
             items: &items,
             help: if editing {
-                "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 取消"
+                crate::language::text(
+                    "Arrow keys to select\nEnter to edit\nDel to reset\nEsc to cancel",
+                    "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 取消",
+                )
             } else {
-                "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 返回"
+                crate::language::text(
+                    "Arrow keys to select\nEnter to edit\nDel to reset\nEsc to go back",
+                    "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 返回",
+                )
             },
         };
         let result = match screen.select(&menu, &mut selected, &notice)? {
@@ -475,9 +489,9 @@ where
     T::Err: Display,
 {
     let Some(edited) = screen.input(menu, selected, &value.to_string(), |text, _| {
-        let edited = text
-            .parse()
-            .map_err(|error| format!("格式不正确：{error}"))?;
+        let edited = text.parse().map_err(|error| {
+            crate::language::message!("Invalid value: {error}", "格式不正确：{error}")
+        })?;
         Ok(edited)
     })?
     else {
@@ -502,7 +516,12 @@ scalar!(String, u8, u16, u32, u64, i32, i64, uuid::Uuid);
 
 impl Value for bool {
     fn text(&self) -> String {
-        if *self { "开启" } else { "关闭" }.to_owned()
+        if *self {
+            crate::language::text("On", "开启")
+        } else {
+            crate::language::text("Off", "关闭")
+        }
+        .to_owned()
     }
 
     fn marker(&self) -> &'static str {
@@ -510,7 +529,10 @@ impl Value for bool {
     }
 
     fn choices() -> Vec<(&'static str, &'static str, Self)> {
-        vec![("on", "开启", true), ("off", "关闭", false)]
+        vec![
+            ("on", crate::language::text("On", "开启"), true),
+            ("off", crate::language::text("Off", "关闭"), false),
+        ]
     }
 
     fn edit(&mut self, _: &mut Screen, _: &Menu<'_>, _: usize) -> Result<bool> {
@@ -525,7 +547,7 @@ impl<T: Value> Value for Option<T> {
         if values.is_empty() {
             return Vec::new();
         }
-        std::iter::once(("default", "默认", None))
+        std::iter::once(("default", crate::language::text("Default", "默认"), None))
             .chain(
                 values
                     .into_iter()
@@ -535,9 +557,9 @@ impl<T: Value> Value for Option<T> {
     }
     fn text(&self) -> String {
         self.as_ref().map_or_else(
-            || "默认".to_owned(),
+            || crate::language::text("Default", "默认").to_owned(),
             |value| match value.text() {
-                text if text.is_empty() => "已设置".to_owned(),
+                text if text.is_empty() => crate::language::text("Set", "已设置").to_owned(),
                 text => text,
             },
         )
@@ -550,13 +572,14 @@ impl<T: Value> Value for Option<T> {
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
         let choices = T::choices();
         if !choices.is_empty() {
-            let choices: Vec<_> = std::iter::once(("default", "默认", None))
-                .chain(
-                    choices
-                        .into_iter()
-                        .map(|(key, label, value)| (key, label, Some(value))),
-                )
-                .collect();
+            let choices: Vec<_> =
+                std::iter::once(("default", crate::language::text("Default", "默认"), None))
+                    .chain(
+                        choices
+                            .into_iter()
+                            .map(|(key, label, value)| (key, label, Some(value))),
+                    )
+                    .collect();
             let current = match self.as_ref() {
                 None => 0,
                 Some(value) => choices
@@ -578,11 +601,11 @@ impl<T: Value> Value for Option<T> {
 impl<T: Value> Value for Vec<T> {
     fn text(&self) -> String {
         if self.is_empty() {
-            return "空".to_owned();
+            return crate::language::text("Empty", "空").to_owned();
         }
         let values: Vec<_> = self.iter().map(Value::text).collect();
         if values.iter().any(String::is_empty) {
-            format!("{} 项", self.len())
+            crate::language::message!("{} items", "{} 项", self.len())
         } else {
             values.join("、")
         }
@@ -606,15 +629,21 @@ impl<T: Value> Value for Vec<T> {
                     item
                 })
                 .collect();
-            let mut add = Item::new("add", "添加".stylized());
+            let mut add = Item::new("add", crate::language::text("Add", "添加").stylized());
             add.gap = !items.is_empty();
             items.push(add);
-            items.push(Item::new("back", "返回".stylized()));
+            items.push(Item::new(
+                "back",
+                crate::language::text("Back", "返回").stylized(),
+            ));
             let menu = Menu {
                 title: &title,
                 heading: "",
                 items: &items,
-                help: "方向键 选择\n回车键 编辑\nDel 删除\nAlt+↑↓ 移动\nEsc 返回",
+                help: crate::language::text(
+                    "Arrow keys to select\nEnter to edit\nDel to remove\nAlt+↑↓ to move\nEsc to go back",
+                    "方向键 选择\n回车键 编辑\nDel 删除\nAlt+↑↓ 移动\nEsc 返回",
+                ),
             };
             let result = match screen.select(&menu, &mut selected, &notice)? {
                 Action::Back => return Ok(changed),
@@ -664,7 +693,7 @@ impl<T: Value> Value for Vec<T> {
 impl<T: Value> Value for BTreeMap<String, T> {
     fn text(&self) -> String {
         if self.is_empty() {
-            "空".to_owned()
+            crate::language::text("Empty", "空").to_owned()
         } else {
             self.keys().cloned().collect::<Vec<_>>().join("、")
         }
@@ -687,15 +716,21 @@ impl<T: Value> Value for BTreeMap<String, T> {
                     item
                 })
                 .collect();
-            let mut add = Item::new("add", "添加".stylized());
+            let mut add = Item::new("add", crate::language::text("Add", "添加").stylized());
             add.gap = !items.is_empty();
             items.push(add);
-            items.push(Item::new("back", "返回".stylized()));
+            items.push(Item::new(
+                "back",
+                crate::language::text("Back", "返回").stylized(),
+            ));
             let menu = Menu {
                 title: &title,
                 heading: "",
                 items: &items,
-                help: "方向键 选择\n回车键 编辑\nDel 删除\nEsc 返回",
+                help: crate::language::text(
+                    "Arrow keys to select\nEnter to edit\nDel to remove\nEsc to go back",
+                    "方向键 选择\n回车键 编辑\nDel 删除\nEsc 返回",
+                ),
             };
             let result = match screen.select(&menu, &mut selected, &notice)? {
                 Action::Back => return Ok(changed),
@@ -703,7 +738,11 @@ impl<T: Value> Value for BTreeMap<String, T> {
                 Action::Select if selected == self.len() => {
                     let Some(key) = screen.input(&menu, selected, "", |key, _| {
                         if self.contains_key(key) {
-                            return Err("这个名称已经存在".into());
+                            return Err(crate::language::text(
+                                "This name is already in use",
+                                "这个名称已经存在",
+                            )
+                            .into());
                         }
                         Ok(key.to_owned())
                     })?
@@ -727,7 +766,10 @@ impl<T: Value> Value for BTreeMap<String, T> {
                 }
                 Action::Select => self
                     .get_mut(&keys[selected])
-                    .ok_or("项目已被删除")?
+                    .ok_or(crate::language::text(
+                        "This item has been deleted",
+                        "项目已被删除",
+                    ))?
                     .edit(screen, &menu, selected),
                 Action::Key(key) if key.code == KeyCode::Delete && selected < keys.len() => {
                     self.remove(&keys[selected]);
@@ -778,12 +820,18 @@ pub(crate) fn pick<T>(
     if let Some(index) = current {
         items[index].marker = "■";
     }
-    items.push(Item::new("back", "返回".stylized()));
+    items.push(Item::new(
+        "back",
+        crate::language::text("Back", "返回").stylized(),
+    ));
     let menu = Menu {
         title,
         heading: "",
         items: &items,
-        help: "方向键 选择\n回车键 确定\nEsc 返回",
+        help: crate::language::text(
+            "Arrow keys to select\nEnter to confirm\nEsc to go back",
+            "方向键 选择\n回车键 确定\nEsc 返回",
+        ),
     };
     let mut selected = current.unwrap_or_default();
     loop {
