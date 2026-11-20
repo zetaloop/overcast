@@ -277,7 +277,9 @@ fn service(_: Vec<OsString>) {
     }) else {
         return;
     };
-    let result = contain().and_then(|_job| {
+    let mut job = None;
+    let result = contain().and_then(|owned| {
+        job = Some(owned);
         report(&handle, ServiceState::Running, ServiceExitCode::Win32(0))?;
         orchestrate(store, sender, events, &progress)
     });
@@ -293,6 +295,7 @@ fn service(_: Vec<OsString>) {
         },
     };
     let _ = report(&handle, ServiceState::Stopped, code);
+    drop(job);
 }
 
 // Cores share this console so CTRL_BREAK reaches their process groups, and the job ends them with the service.
