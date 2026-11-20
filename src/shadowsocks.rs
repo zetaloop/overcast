@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -267,10 +268,17 @@ impl Cipher {
             let mut key = match crate::link::decode(value) {
                 Ok(key) => key,
                 Err(_) if value.len() == size => value.as_bytes().to_vec(),
-                Err(error) => return Err(format!("Shadowsocks 密钥编码不正确：{error}").into()),
+                Err(error) => {
+                    return Err(message!(
+                        "Invalid Shadowsocks key encoding: {error}",
+                        "Shadowsocks 密钥编码不正确：{error}"
+                    )
+                    .into());
+                }
             };
             if key.len() < size {
-                return Err(format!(
+                return Err(message!(
+                    "Shadowsocks key must be {size} bytes; got {}",
                     "Shadowsocks 密钥需要 {size} 字节，当前为 {} 字节",
                     key.len()
                 )
@@ -282,7 +290,11 @@ impl Cipher {
             keys.push(STANDARD.encode(key));
         }
         if self == Self::Chacha20Poly13052022 && keys.len() > 1 {
-            return Err("Shadowsocks 2022 ChaCha20-Poly1305 使用单个密钥".into());
+            return Err(tr(
+                "Shadowsocks 2022 ChaCha20-Poly1305 requires a single key",
+                "Shadowsocks 2022 ChaCha20-Poly1305 使用单个密钥",
+            )
+            .into());
         }
         Ok(keys.join(":"))
     }
@@ -303,17 +315,28 @@ impl Keys {
     }
 
     pub fn resolve(source: &Server) -> Result<Self> {
-        let size = source.cipher.key_size().ok_or("当前算法使用用户密码")?;
+        let size = source.cipher.key_size().ok_or(tr(
+            "This cipher uses the user password",
+            "当前算法使用用户密码",
+        ))?;
         let password = if let Some(password) = &source.password {
             source.cipher.password(password)?
         } else {
             let mut bytes = vec![0; size];
-            getrandom::fill(&mut bytes)
-                .map_err(|error| format!("生成 Shadowsocks 入口密钥失败：{error}"))?;
+            getrandom::fill(&mut bytes).map_err(|error| {
+                message!(
+                    "Could not generate a Shadowsocks inbound key: {error}",
+                    "生成 Shadowsocks 入口密钥失败：{error}"
+                )
+            })?;
             STANDARD.encode(bytes)
         };
         if password.contains(':') {
-            return Err("Shadowsocks 入口共享密钥需要单个密钥".into());
+            return Err(tr(
+                "A shared Shadowsocks inbound key must be a single key",
+                "Shadowsocks 入口共享密钥需要单个密钥",
+            )
+            .into());
         }
         Ok(Self {
             cipher: source.cipher,
@@ -325,27 +348,27 @@ impl Keys {
 crate::connection::client_fields!(
     Shadowsocks,
     Client {
-        name: "名称",
-        server: "地址",
-        port: "端口",
-        password: "密码",
-        core: "核心",
+        name: ("Name", "名称"),
+        server: ("Address", "地址"),
+        port: ("Port", "端口"),
+        password: ("Password", "密码"),
+        core: ("Core", "核心"),
         shadowsocks: "Shadowsocks",
-        security: "加密",
-        transport: "传输",
-        multiplex: "多路复用",
-        network: "网络",
+        security: ("Encryption", "加密"),
+        transport: ("Transport", "传输"),
+        multiplex: ("Multiplexing", "多路复用"),
+        network: ("Network", "网络"),
     }
 );
 
 fields!(ClientOptions {
-    cipher: "算法",
+    cipher: ("Cipher", "算法"),
     tcp: "TCP",
     udp: "UDP",
     udp_over_tcp: "UDP over TCP",
-    plugin: "SIP003 插件",
-    user_level: "用户等级",
-    user_label: "用户标识",
+    plugin: ("SIP003 plugin", "SIP003 插件"),
+    user_level: ("User level", "用户等级"),
+    user_label: ("User ID", "用户标识"),
 });
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -395,13 +418,27 @@ impl Server {
     fn fields(&mut self, core: ServerCore) -> form::Fields<'_> {
         let d = Self::default();
         vec![
-            form::choice_field("cipher", "算法", &mut self.cipher, d.cipher, move |v| {
-                v.supported(core, true)
-            }),
-            form::field("tcp", "TCP 接收", &mut self.tcp, d.tcp),
-            form::field("udp", "UDP 接收", &mut self.udp, d.udp),
-            form::field("password", "入口共享密钥", &mut self.password, d.password),
-            form::field("user_level", "用户等级", &mut self.user_level, d.user_level),
+            form::choice_field(
+                "cipher",
+                tr("Cipher", "算法"),
+                &mut self.cipher,
+                d.cipher,
+                move |v| v.supported(core, true),
+            ),
+            form::field("tcp", tr("Accept TCP", "TCP 接收"), &mut self.tcp, d.tcp),
+            form::field("udp", tr("Accept UDP", "UDP 接收"), &mut self.udp, d.udp),
+            form::field(
+                "password",
+                tr("Shared inbound key", "入口共享密钥"),
+                &mut self.password,
+                d.password,
+            ),
+            form::field(
+                "user_level",
+                tr("User level", "用户等级"),
+                &mut self.user_level,
+                d.user_level,
+            ),
             form::field("multiplex", "S-Mux", &mut self.multiplex, d.multiplex),
         ]
     }
@@ -420,7 +457,8 @@ impl Server {
 
     pub fn validate(&self, core: ServerCore) -> Result<()> {
         if !self.cipher.supported(core, true) {
-            return Err(format!(
+            return Err(message!(
+                "{} does not support {} on Shadowsocks inbounds",
                 "{} 的 Shadowsocks 入站不支持 {}",
                 core.text(),
                 self.cipher.text()
@@ -429,13 +467,26 @@ impl Server {
         }
         let allowed = self.fields_for(core);
         for (key, label, set) in [
-            ("tcp", "关闭 TCP 接收", !self.tcp),
-            ("password", "入口共享密钥", self.password.is_some()),
-            ("user_level", "用户等级", self.user_level.is_some()),
+            (
+                "tcp",
+                tr("Disable TCP reception", "关闭 TCP 接收"),
+                !self.tcp,
+            ),
+            (
+                "password",
+                tr("Shared inbound key", "入口共享密钥"),
+                self.password.is_some(),
+            ),
+            (
+                "user_level",
+                tr("User level", "用户等级"),
+                self.user_level.is_some(),
+            ),
             ("multiplex", "S-Mux", self.multiplex.is_some()),
         ] {
             if set && !allowed(key) {
-                return Err(format!(
+                return Err(message!(
+                    "{} does not support {label} on {} inbounds",
                     "{} 的 {} 入站不支持{label}",
                     core.text(),
                     self.cipher.text()
@@ -446,7 +497,11 @@ impl Server {
         if let Some(password) = &self.password {
             let key = self.cipher.password(password)?;
             if key.contains(':') {
-                return Err("Shadowsocks 入口共享密钥需要单个密钥".into());
+                return Err(tr(
+                    "A shared Shadowsocks inbound key must be a single key",
+                    "Shadowsocks 入口共享密钥需要单个密钥",
+                )
+                .into());
             }
         }
         Ok(())
@@ -472,8 +527,8 @@ impl Form for (Server, ServerCore) {
 }
 
 fields!(Plugin {
-    name: "名称",
-    options: "参数",
+    name: ("Name", "名称"),
+    options: ("Parameters", "参数"),
 });
 
 choices!(Cipher {
@@ -514,5 +569,5 @@ choices!(Cipher {
     Chacha20: "chacha20" => "chacha20",
     Chacha20Ietf: "chacha20-ietf" => "chacha20-ietf",
     Xchacha20: "xchacha20" => "xchacha20",
-    None: "none" => "无",
+    None: "none" => ("None", "无"),
 });

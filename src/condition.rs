@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{cell::LazyCell, collections::BTreeMap};
 
 use ipnetwork::IpNetwork;
@@ -100,7 +101,7 @@ impl Condition {
     fn format(&self, config: &Config, parent: u8) -> String {
         let (children, operator, precedence) = match self {
             Self::Always => return if parent == 0 { "" } else { "()" }.to_owned(),
-            Self::Never => return "黑洞".to_owned(),
+            Self::Never => return tr("Blackhole", "黑洞").to_owned(),
             Self::And(children) => (children, " & ", 2),
             Self::Or(children) => (children, " | ", 1),
             _ => {
@@ -198,14 +199,19 @@ impl Condition {
         let condition = parser.or()?;
         parser.space();
         if parser.position != text.len() {
-            return Err(format!("条件中有多余内容：{}", &text[parser.position..]).into());
+            return Err(message!(
+                "Unexpected text after condition: {}",
+                "条件中有多余内容：{}",
+                &text[parser.position..]
+            )
+            .into());
         }
         Ok(condition)
     }
 
     pub fn literal(kind: &str, name: &str) -> Result<Self> {
         if name.is_empty() {
-            return Err(format!("{kind} 条件缺少内容").into());
+            return Err(message!("Missing value for {kind}", "{kind} 条件缺少内容").into());
         }
         match kind {
             "domain" => domain(name).map(Self::Domain),
@@ -216,7 +222,7 @@ impl Condition {
                 Ok(Self::Regex(name.to_owned()))
             }
             "ip" => network(name).map(Self::Ip),
-            _ => Err(format!("未知目标类型：{kind}").into()),
+            _ => Err(message!("Unknown target type: {kind}", "未知目标类型：{kind}").into()),
         }
     }
 
@@ -328,7 +334,7 @@ impl<F: FnOnce() -> Result<Catalog>> Parser<'_, F> {
             }
             let condition = self.or()?;
             if !self.take(')') {
-                return Err("条件缺少右括号".into());
+                return Err(tr("Missing closing parenthesis", "条件缺少右括号").into());
             }
             return Ok(condition);
         }
@@ -343,8 +349,13 @@ impl<F: FnOnce() -> Result<Catalog>> Parser<'_, F> {
                     .into_iter::<String>();
                 let text = decoder
                     .next()
-                    .ok_or("名称引号不完整")?
-                    .map_err(|error| format!("引号内的文字格式不正确：{error}"))?;
+                    .ok_or(tr("Unterminated quoted name", "名称引号不完整"))?
+                    .map_err(|error| {
+                        message!(
+                            "Invalid quoted text: {error}",
+                            "引号内的文字格式不正确：{error}"
+                        )
+                    })?;
                 self.position += decoder.byte_offset();
                 value.push_str(&text);
                 end = value.len();
@@ -358,13 +369,13 @@ impl<F: FnOnce() -> Result<Catalog>> Parser<'_, F> {
         }
         value.truncate(end);
         if value.is_empty() {
-            return Err("条件中缺少名称或目标".into());
+            return Err(tr("Expected a name or target", "条件中缺少名称或目标").into());
         }
         self.resolve(&value)
     }
 
     fn resolve(&self, value: &str) -> Result<Condition> {
-        if value == "黑洞" {
+        if matches!(value, "Blackhole" | "黑洞") {
             return Ok(Condition::Never);
         }
         if let Some(condition) = self.bindings.get(value) {
@@ -375,7 +386,7 @@ impl<F: FnOnce() -> Result<Catalog>> Parser<'_, F> {
         }
         if let Some((kind, name)) = value.split_once(':') {
             if name.is_empty() {
-                return Err(format!("{kind} 条件缺少内容").into());
+                return Err(message!("Missing value for {kind}", "{kind} 条件缺少内容").into());
             }
             match kind {
                 "domain" | "suffix" | "keyword" | "regex" | "ip" => {
@@ -430,15 +441,16 @@ impl<F: FnOnce() -> Result<Catalog>> Parser<'_, F> {
             matches.push(Condition::Domain(domain));
         }
         match matches.len() {
-            0 => Err(format!("找不到条件项：{name}").into()),
+            0 => Err(message!("No condition matches {name}", "找不到条件项：{name}").into()),
             1 => Ok(matches.pop().unwrap()),
-            _ => Err(format!(
+            _ => Err(message!(
+                "Multiple conditions match: {}",
                 "名称对应多个条件：{}",
                 matches
                     .iter()
                     .map(|condition| condition.text(self.config))
                     .collect::<Vec<_>>()
-                    .join("、")
+                    .join(tr(", ", "、"))
             )
             .into()),
         }
@@ -446,15 +458,24 @@ impl<F: FnOnce() -> Result<Catalog>> Parser<'_, F> {
 }
 
 fn domain(value: &str) -> Result<String> {
-    match url::Host::parse(value).map_err(|error| format!("域名格式不正确：{error}"))? {
+    match url::Host::parse(value)
+        .map_err(|error| message!("Invalid domain: {error}", "域名格式不正确：{error}"))?
+    {
         url::Host::Domain(name) => Ok(name),
-        _ => Err("域名条件需要填写域名，IP 地址使用 ip: 条件".into()),
+        _ => Err(tr(
+            "Expected a domain. Use ip: for an IP address.",
+            "域名条件需要填写域名，IP 地址使用 ip: 条件",
+        )
+        .into()),
     }
 }
 
 fn network(value: &str) -> Result<IpNetwork> {
-    let ip: IpNetwork = value
-        .parse()
-        .map_err(|error| format!("IP 地址或网段格式不正确：{error}"))?;
+    let ip: IpNetwork = value.parse().map_err(|error| {
+        message!(
+            "Invalid IP address or subnet: {error}",
+            "IP 地址或网段格式不正确：{error}"
+        )
+    })?;
     Ok(IpNetwork::new(ip.network(), ip.prefix())?)
 }

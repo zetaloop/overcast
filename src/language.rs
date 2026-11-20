@@ -37,6 +37,16 @@ macro_rules! message {
 }
 pub(crate) use message;
 
+macro_rules! label {
+    (($en:literal, $zh:literal)) => {
+        $crate::language::text($en, $zh)
+    };
+    ($label:literal) => {
+        $label
+    };
+}
+pub(crate) use label;
+
 pub fn load(store: &Store) -> Result<bool> {
     let path = store.directory.join("language");
     let code = match fs::read_to_string(&path) {

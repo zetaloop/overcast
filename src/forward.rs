@@ -56,18 +56,18 @@ impl Default for Server {
 crate::connection::client_fields!(
     Forward,
     Client {
-        name: "名称",
-        server: "地址",
-        port: "端口",
-        core: "核心",
-        security: "加密",
-        transport: "传输",
-        network: "网络",
+        name: ("Name", "名称"),
+        server: ("Address", "地址"),
+        port: ("Port", "端口"),
+        core: ("Core", "核心"),
+        security: ("Encryption", "加密"),
+        transport: ("Transport", "传输"),
+        network: ("Network", "网络"),
     }
 );
 
 fields!(Server {
-    tcp: "TCP 接收",
-    udp: "UDP 接收",
-    user_level: "用户等级",
+    tcp: ("Accept TCP", "TCP 接收"),
+    udp: ("Accept UDP", "UDP 接收"),
+    user_level: ("User level", "用户等级"),
 });

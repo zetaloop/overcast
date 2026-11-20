@@ -54,27 +54,27 @@ pub struct Server {
 crate::connection::client_fields!(
     AnyTls,
     Client {
-        name: "名称",
-        server: "地址",
-        port: "端口",
-        password: "密码",
-        core: "核心",
-        security: "握手",
-        anytls: "会话参数",
-        network: "网络",
+        name: ("Name", "名称"),
+        server: ("Address", "地址"),
+        port: ("Port", "端口"),
+        password: ("Password", "密码"),
+        core: ("Core", "核心"),
+        security: ("Handshake", "握手"),
+        anytls: ("Session settings", "会话参数"),
+        network: ("Network", "网络"),
     }
 );
 
 fields!(ClientOptions {
     tcp: "TCP",
     udp: "UDP",
-    idle_session_check_interval: "空闲会话检查间隔",
-    idle_session_timeout: "空闲会话超时",
-    min_idle_session: "保留空闲会话数",
-    reuse: "复用连接",
-    client_metadata: "客户端标识",
+    idle_session_check_interval: ("Idle session check interval", "空闲会话检查间隔"),
+    idle_session_timeout: ("Idle session timeout", "空闲会话超时"),
+    min_idle_session: ("Minimum idle sessions", "保留空闲会话数"),
+    reuse: ("Reuse connections", "复用连接"),
+    client_metadata: ("Client ID", "客户端标识"),
 });
 
 fields!(Server {
-    padding_scheme: "填充方案",
+    padding_scheme: ("Padding scheme", "填充方案"),
 });

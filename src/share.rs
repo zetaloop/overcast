@@ -1,3 +1,4 @@
+use crate::language::text as tr;
 use std::{collections::BTreeMap, net::IpAddr};
 
 use base64::{
@@ -29,15 +30,21 @@ pub fn copy(
     generate: impl Fn(&mut Screen, bool) -> Result<String>,
 ) -> Result<()> {
     let items = [
-        Item::new("links", "分享链接".stylized()),
-        Item::new("config", "复制 Overcast 配置".stylized()),
-        Item::new("back", "返回".stylized()),
+        Item::new("links", tr("Share links", "分享链接").stylized()),
+        Item::new(
+            "config",
+            tr("Copy Overcast configuration", "复制 Overcast 配置").stylized(),
+        ),
+        Item::new("back", tr("Back", "返回").stylized()),
     ];
     let menu = Menu {
         title,
         heading: "",
         items: &items,
-        help: "方向键 选择\n回车键 复制\nEsc 返回",
+        help: tr(
+            "Arrow keys to select\nEnter to copy\nEsc to go back",
+            "方向键 选择\n回车键 复制\nEsc 返回",
+        ),
     };
     let mut selected = 0;
     let mut notice = String::new();
@@ -61,10 +68,20 @@ pub fn path(connections: &[Connection], name: &str) -> Result<String> {
         .iter()
         .rev()
         .filter(|c| !matches!(c, Connection::Direct(_)));
-    let mut inner = values.next().ok_or("直连没有远端分享链接")?.clone();
+    let mut inner = values
+        .next()
+        .ok_or(tr(
+            "Direct connections have no remote node URI",
+            "直连没有远端分享链接",
+        ))?
+        .clone();
     for outer in values {
         let Connection::Forward(value) = outer else {
-            return Err("多段代理连接使用连接路径 JSON 分享".into());
+            return Err(tr(
+                "Share multi-hop connections as connection path JSON",
+                "多段代理连接使用连接路径 JSON 分享",
+            )
+            .into());
         };
         inner.set_server(&value.server);
         let (port, security, transport) = match &mut inner {
@@ -105,7 +122,11 @@ pub fn path(connections: &[Connection], name: &str) -> Result<String> {
             ),
             Connection::Direct(_) => unreachable!(),
             Connection::Warp(_) => {
-                return Err("WARP 连接使用连接路径 JSON 分享".into());
+                return Err(tr(
+                    "Share WARP connections as connection path JSON",
+                    "WARP 连接使用连接路径 JSON 分享",
+                )
+                .into());
             }
             Connection::Hysteria2(value) => {
                 // The forwarded client dials the outer port, not the backend's hopping ports.
@@ -120,10 +141,18 @@ pub fn path(connections: &[Connection], name: &str) -> Result<String> {
             .as_deref()
             .is_none_or(|security| !matches!(security, Security::None));
         if !matches!(value.security, Security::None) && secure {
-            return Err("嵌套 TLS 连接使用连接路径 JSON 分享".into());
+            return Err(tr(
+                "Share nested TLS connections as connection path JSON",
+                "嵌套 TLS 连接使用连接路径 JSON 分享",
+            )
+            .into());
         }
         if !value.transport.is_default() && secure {
-            return Err("传输内部的 TLS 连接使用连接路径 JSON 分享".into());
+            return Err(tr(
+                "Share TLS inside a transport as connection path JSON",
+                "传输内部的 TLS 连接使用连接路径 JSON 分享",
+            )
+            .into());
         }
         if let Some(security) = security
             && !matches!(value.security, Security::None)
@@ -132,7 +161,11 @@ pub fn path(connections: &[Connection], name: &str) -> Result<String> {
         }
         if !value.transport.is_default() {
             let Some(transport) = transport.filter(|transport| transport.is_default()) else {
-                return Err("嵌套传输连接使用连接路径 JSON 分享".into());
+                return Err(tr(
+                    "Share nested transports as connection path JSON",
+                    "嵌套传输连接使用连接路径 JSON 分享",
+                )
+                .into());
             };
             *transport = value.transport.clone();
         }
@@ -142,7 +175,10 @@ pub fn path(connections: &[Connection], name: &str) -> Result<String> {
 }
 
 pub fn link(source: &Connection, name: &str) -> Result<String> {
-    let (server, port) = source.server().ok_or("直连没有远端分享链接")?;
+    let (server, port) = source.server().ok_or(tr(
+        "Direct connections have no remote node URI",
+        "直连没有远端分享链接",
+    ))?;
     let server = match server.parse::<IpAddr>() {
         Ok(server) => server.to_string(),
         Err(_) => Host::parse(server)?.to_string(),
@@ -150,9 +186,19 @@ pub fn link(source: &Connection, name: &str) -> Result<String> {
     let mut query = Map::new();
     let (scheme, user) = match source {
         Connection::Direct(_) => unreachable!(),
-        Connection::Warp(_) => return Err("WARP 连接使用连接路径 JSON 分享".into()),
+        Connection::Warp(_) => {
+            return Err(tr(
+                "Share WARP connections as connection path JSON",
+                "WARP 连接使用连接路径 JSON 分享",
+            )
+            .into());
+        }
         Connection::Forward(_) => {
-            return Err("此连接使用连接路径 JSON 分享".into());
+            return Err(tr(
+                "Share this connection as connection path JSON",
+                "此连接使用连接路径 JSON 分享",
+            )
+            .into());
         }
         Connection::Http(value) => {
             tls(&value.security, &mut query)?;
@@ -361,7 +407,11 @@ pub fn link(source: &Connection, name: &str) -> Result<String> {
                 ],
             );
             match value.security {
-                Security::None => return Err("AnyTLS 分享链接使用 TLS".into()),
+                Security::None => {
+                    return Err(
+                        tr("AnyTLS share links require TLS", "AnyTLS 分享链接使用 TLS").into(),
+                    );
+                }
                 Security::Tls(_) => {
                     tls(&value.security, &mut query)?;
                     query.remove("security");
@@ -506,7 +556,13 @@ fn uot(query: &mut Map<String, Value>, version: Option<u8>) -> Result<()> {
         None => return Ok(()),
         Some(0 | 2) => "uot",
         Some(1) => "udp-over-tcp",
-        Some(_) => return Err("UDP over TCP 使用版本 1 或 2".into()),
+        Some(_) => {
+            return Err(tr(
+                "UDP over TCP requires version 1 or 2",
+                "UDP over TCP 使用版本 1 或 2",
+            )
+            .into());
+        }
     };
     query.insert(field.to_owned(), json!(true));
     Ok(())

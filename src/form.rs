@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{collections::BTreeMap, fmt::Display, str::FromStr};
 
 use termina::{
@@ -389,10 +390,7 @@ fn edit_group<T>(
                 .any(|group| group.fields.contains(&field.key())),
         });
         if let Some(flag) = enabled.as_deref_mut() {
-            fields.insert(
-                0,
-                field("use", crate::language::text("Enabled", "启用"), flag, false),
-            );
+            fields.insert(0, field("use", tr("Enabled", "启用"), flag, false));
         }
         let mut items: Vec<_> = fields.iter().map(|field| field.item()).collect();
         items.extend(
@@ -402,16 +400,16 @@ fn edit_group<T>(
         );
         let editing = pending;
         if editing {
-            let mut save = Item::new("apply", crate::language::text("Confirm", "确定").stylized());
+            let mut save = Item::new("apply", tr("Confirm", "确定").stylized());
             save.gap = true;
             items.push(save);
         }
         items.push(Item::new(
             "back",
             if editing {
-                crate::language::text("Cancel", "取消")
+                tr("Cancel", "取消")
             } else {
-                crate::language::text("Back", "返回")
+                tr("Back", "返回")
             }
             .stylized(),
         ));
@@ -420,12 +418,12 @@ fn edit_group<T>(
             heading: "",
             items: &items,
             help: if editing {
-                crate::language::text(
+                tr(
                     "Arrow keys to select\nEnter to edit\nDel to reset\nEsc to cancel",
                     "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 取消",
                 )
             } else {
-                crate::language::text(
+                tr(
                     "Arrow keys to select\nEnter to edit\nDel to reset\nEsc to go back",
                     "方向键 选择\n回车键 编辑\nDel 恢复默认\nEsc 返回",
                 )
@@ -489,9 +487,9 @@ where
     T::Err: Display,
 {
     let Some(edited) = screen.input(menu, selected, &value.to_string(), |text, _| {
-        let edited = text.parse().map_err(|error| {
-            crate::language::message!("Invalid value: {error}", "格式不正确：{error}")
-        })?;
+        let edited = text
+            .parse()
+            .map_err(|error| message!("Invalid value: {error}", "格式不正确：{error}"))?;
         Ok(edited)
     })?
     else {
@@ -517,9 +515,9 @@ scalar!(String, u8, u16, u32, u64, i32, i64, uuid::Uuid);
 impl Value for bool {
     fn text(&self) -> String {
         if *self {
-            crate::language::text("On", "开启")
+            tr("On", "开启")
         } else {
-            crate::language::text("Off", "关闭")
+            tr("Off", "关闭")
         }
         .to_owned()
     }
@@ -530,8 +528,8 @@ impl Value for bool {
 
     fn choices() -> Vec<(&'static str, &'static str, Self)> {
         vec![
-            ("on", crate::language::text("On", "开启"), true),
-            ("off", crate::language::text("Off", "关闭"), false),
+            ("on", tr("On", "开启"), true),
+            ("off", tr("Off", "关闭"), false),
         ]
     }
 
@@ -547,7 +545,7 @@ impl<T: Value> Value for Option<T> {
         if values.is_empty() {
             return Vec::new();
         }
-        std::iter::once(("default", crate::language::text("Default", "默认"), None))
+        std::iter::once(("default", tr("Default", "默认"), None))
             .chain(
                 values
                     .into_iter()
@@ -557,9 +555,9 @@ impl<T: Value> Value for Option<T> {
     }
     fn text(&self) -> String {
         self.as_ref().map_or_else(
-            || crate::language::text("Default", "默认").to_owned(),
+            || tr("Default", "默认").to_owned(),
             |value| match value.text() {
-                text if text.is_empty() => crate::language::text("Set", "已设置").to_owned(),
+                text if text.is_empty() => tr("Set", "已设置").to_owned(),
                 text => text,
             },
         )
@@ -572,14 +570,13 @@ impl<T: Value> Value for Option<T> {
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
         let choices = T::choices();
         if !choices.is_empty() {
-            let choices: Vec<_> =
-                std::iter::once(("default", crate::language::text("Default", "默认"), None))
-                    .chain(
-                        choices
-                            .into_iter()
-                            .map(|(key, label, value)| (key, label, Some(value))),
-                    )
-                    .collect();
+            let choices: Vec<_> = std::iter::once(("default", tr("Default", "默认"), None))
+                .chain(
+                    choices
+                        .into_iter()
+                        .map(|(key, label, value)| (key, label, Some(value))),
+                )
+                .collect();
             let current = match self.as_ref() {
                 None => 0,
                 Some(value) => choices
@@ -601,11 +598,11 @@ impl<T: Value> Value for Option<T> {
 impl<T: Value> Value for Vec<T> {
     fn text(&self) -> String {
         if self.is_empty() {
-            return crate::language::text("Empty", "空").to_owned();
+            return tr("Empty", "空").to_owned();
         }
         let values: Vec<_> = self.iter().map(Value::text).collect();
         if values.iter().any(String::is_empty) {
-            crate::language::message!("{} items", "{} 项", self.len())
+            message!("{} items", "{} 项", self.len())
         } else {
             values.join("、")
         }
@@ -629,18 +626,15 @@ impl<T: Value> Value for Vec<T> {
                     item
                 })
                 .collect();
-            let mut add = Item::new("add", crate::language::text("Add", "添加").stylized());
+            let mut add = Item::new("add", tr("Add", "添加").stylized());
             add.gap = !items.is_empty();
             items.push(add);
-            items.push(Item::new(
-                "back",
-                crate::language::text("Back", "返回").stylized(),
-            ));
+            items.push(Item::new("back", tr("Back", "返回").stylized()));
             let menu = Menu {
                 title: &title,
                 heading: "",
                 items: &items,
-                help: crate::language::text(
+                help: tr(
                     "Arrow keys to select\nEnter to edit\nDel to remove\nAlt+↑↓ to move\nEsc to go back",
                     "方向键 选择\n回车键 编辑\nDel 删除\nAlt+↑↓ 移动\nEsc 返回",
                 ),
@@ -693,7 +687,7 @@ impl<T: Value> Value for Vec<T> {
 impl<T: Value> Value for BTreeMap<String, T> {
     fn text(&self) -> String {
         if self.is_empty() {
-            crate::language::text("Empty", "空").to_owned()
+            tr("Empty", "空").to_owned()
         } else {
             self.keys().cloned().collect::<Vec<_>>().join("、")
         }
@@ -716,18 +710,15 @@ impl<T: Value> Value for BTreeMap<String, T> {
                     item
                 })
                 .collect();
-            let mut add = Item::new("add", crate::language::text("Add", "添加").stylized());
+            let mut add = Item::new("add", tr("Add", "添加").stylized());
             add.gap = !items.is_empty();
             items.push(add);
-            items.push(Item::new(
-                "back",
-                crate::language::text("Back", "返回").stylized(),
-            ));
+            items.push(Item::new("back", tr("Back", "返回").stylized()));
             let menu = Menu {
                 title: &title,
                 heading: "",
                 items: &items,
-                help: crate::language::text(
+                help: tr(
                     "Arrow keys to select\nEnter to edit\nDel to remove\nEsc to go back",
                     "方向键 选择\n回车键 编辑\nDel 删除\nEsc 返回",
                 ),
@@ -738,11 +729,9 @@ impl<T: Value> Value for BTreeMap<String, T> {
                 Action::Select if selected == self.len() => {
                     let Some(key) = screen.input(&menu, selected, "", |key, _| {
                         if self.contains_key(key) {
-                            return Err(crate::language::text(
-                                "This name is already in use",
-                                "这个名称已经存在",
-                            )
-                            .into());
+                            return Err(
+                                tr("This name is already in use", "这个名称已经存在").into()
+                            );
                         }
                         Ok(key.to_owned())
                     })?
@@ -766,10 +755,7 @@ impl<T: Value> Value for BTreeMap<String, T> {
                 }
                 Action::Select => self
                     .get_mut(&keys[selected])
-                    .ok_or(crate::language::text(
-                        "This item has been deleted",
-                        "项目已被删除",
-                    ))?
+                    .ok_or(tr("This item has been deleted", "项目已被删除"))?
                     .edit(screen, &menu, selected),
                 Action::Key(key) if key.code == KeyCode::Delete && selected < keys.len() => {
                     self.remove(&keys[selected]);
@@ -820,15 +806,12 @@ pub(crate) fn pick<T>(
     if let Some(index) = current {
         items[index].marker = "■";
     }
-    items.push(Item::new(
-        "back",
-        crate::language::text("Back", "返回").stylized(),
-    ));
+    items.push(Item::new("back", tr("Back", "返回").stylized()));
     let menu = Menu {
         title,
         heading: "",
         items: &items,
-        help: crate::language::text(
+        help: tr(
             "Arrow keys to select\nEnter to confirm\nEsc to go back",
             "方向键 选择\n回车键 确定\nEsc 返回",
         ),
@@ -844,7 +827,7 @@ pub(crate) fn pick<T>(
 }
 
 macro_rules! fields {
-    ($ty:ty { $($field:ident: $label:tt),* $(,)? } $(groups { $($key:ident: $group:literal => [$($member:ident),* $(,)?]),* $(,)? })?) => {
+    ($ty:ty { $($field:ident: $label:tt),* $(,)? } $(groups { $($key:ident: $group:tt => [$($member:ident),* $(,)?]),* $(,)? })?) => {
         impl $crate::form::Form for $ty {
             fn fields(&mut self, defaults: Self) -> $crate::form::Fields<'_> {
                 let Self { $($field,)* .. } = self;
@@ -861,7 +844,7 @@ macro_rules! fields {
                     .flatten()
                     .chain([$($($crate::form::Group {
                         key: stringify!($key),
-                        label: $group,
+                        label: $crate::language::label!($group),
                         fields: &[$(stringify!($member)),*],
                     }),*)?])
                     .collect()
@@ -872,12 +855,12 @@ macro_rules! fields {
     (@groups $field:expr, ..) => {
         $crate::form::Form::groups($field)
     };
-    (@groups $field:expr, $label:literal) => { Vec::<$crate::form::Group>::new() };
+    (@groups $field:expr, $label:tt) => { Vec::<$crate::form::Group>::new() };
     (@push $fields:ident, $field:ident, $default:expr, ..) => {
         $fields.extend($crate::form::Form::fields($field, $default));
     };
-    (@push $fields:ident, $field:ident, $default:expr, $label:literal) => {
-        $fields.push($crate::form::field(stringify!($field), $label, $field, $default));
+    (@push $fields:ident, $field:ident, $default:expr, $label:tt) => {
+        $fields.push($crate::form::field(stringify!($field), $crate::language::label!($label), $field, $default));
     };
 }
 
@@ -906,14 +889,14 @@ macro_rules! group {
 }
 
 macro_rules! choices {
-    ($ty:ty { $($variant:ident: $key:literal => $label:literal),* $(,)? }) => {
+    ($ty:ty { $($variant:ident: $key:literal => $label:tt),* $(,)? }) => {
         impl $crate::form::Value for $ty {
             fn text(&self) -> String {
-                match self { $(Self::$variant => $label.to_owned()),* }
+                match self { $(Self::$variant => $crate::language::label!($label).to_owned()),* }
             }
 
             fn choices() -> Vec<(&'static str, &'static str, Self)> {
-                vec![$(($key, $label, Self::$variant)),*]
+                vec![$(($key, $crate::language::label!($label), Self::$variant)),*]
             }
 
             fn edit(&mut self, screen: &mut $crate::tui::Screen, menu: &$crate::tui::Menu<'_>, selected: usize) -> $crate::Result<bool> {

@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::{IpAddr, Ipv6Addr},
@@ -63,14 +64,18 @@ impl Inbound {
 
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
-            return Err("入站名称不能为空".into());
+            return Err(tr("Enter an inbound name", "入站名称不能为空").into());
         }
         if self.listen.enabled && self.listen.host.trim().is_empty() {
-            return Err("连接地址不能为空".into());
+            return Err(tr("Enter a server address", "连接地址不能为空").into());
         }
         if !self.listen.host.is_empty() && !is_ip(&self.listen.host) {
-            url::Host::parse(&self.listen.host)
-                .map_err(|error| format!("连接地址格式不正确：{error}"))?;
+            url::Host::parse(&self.listen.host).map_err(|error| {
+                message!(
+                    "Invalid server address: {error}",
+                    "连接地址格式不正确：{error}"
+                )
+            })?;
         }
         let address = &self.listen.address;
         if self.listen.enabled
@@ -79,38 +84,59 @@ impl Inbound {
             && !Path::new(address).is_absolute()
             && !address.starts_with('@')
         {
-            return Err("监听地址需要填写 IP、localhost 或套接字路径".into());
+            return Err(tr(
+                "Expected an IP address, localhost, or socket path for the listener",
+                "监听地址需要填写 IP、localhost 或套接字路径",
+            )
+            .into());
         }
         self.ports()?;
         Stack::Inbound(&self.protocol)
             .check(self.core, self.security.index(), &self.transport)
-            .map_err(|error| format!("入站 {}：{error}", self.name))?;
+            .map_err(|error| message!("Inbound {}: {error}", "入站 {}：{error}", self.name))?;
         if let Some(tls) = self.security.tls() {
             if let Some(ech) = &tls.ech {
-                ech.key.validate("ECH 密钥")?;
+                ech.key.validate(tr("ECH key", "ECH 密钥"))?;
             }
             for cert in &tls.client_certificates {
-                cert.validate("客户端信任证书")?;
+                cert.validate(tr("Trusted client certificates", "客户端信任证书"))?;
             }
         }
         if let Transport::XHttp(x) = &self.transport
             && let Some(tls) = x.download.as_ref().and_then(|v| v.security.tls())
         {
-            tls.materials()
-                .map_err(|error| format!("XHTTP 下载连接：{error}"))?;
+            tls.materials().map_err(|error| {
+                message!(
+                    "XHTTP download connection: {error}",
+                    "XHTTP 下载连接：{error}"
+                )
+            })?;
         }
         let credential = self.protocol.credential();
         if self.users && !self.protocol.supports_users(self.core) {
-            return Err(format!("入站 {} 的协议设置不支持系统用户认证", self.name).into());
+            return Err(message!(
+                "Inbound {} does not support user authentication with these settings",
+                "入站 {} 的协议设置不支持系统用户认证",
+                self.name
+            )
+            .into());
         }
         if credential.is_none() && self.credentials.is_some() {
-            return Err(format!("入站 {} 的协议设置没有凭据认证", self.name).into());
+            return Err(message!(
+                "Inbound {} does not authenticate credentials with these settings",
+                "入站 {} 的协议设置没有凭据认证",
+                self.name
+            )
+            .into());
         }
         if let Some(credentials) = &self.credentials {
             if self.users {
-                return Err(
-                    format!("入站 {} 已使用系统用户，不能同时指定入口凭据", self.name).into(),
-                );
+                return Err(message!(
+                    "Inbound {} uses system users and cannot also specify inbound credentials",
+                    "入站 {} 已使用系统用户，不能同时指定入口凭据",
+                    self.name
+                )
+                .into());
             }
             if credential != Some(CredentialKind::Uuid) {
                 user::password(&credentials.password)?;
@@ -238,11 +264,11 @@ impl crate::core::Draft for Inbound {
         self.effective()
     }
     fn changes(&self, next: &Self, changes: &mut crate::core::Changes) {
-        changes.mode("握手", &self.security, &next.security);
+        changes.mode(tr("Handshake", "握手"), &self.security, &next.security);
         changes.transport(&self.transport, &next.transport);
-        changes.flag("用户支持", self.users, next.users);
+        changes.flag(tr("Use system users", "用户支持"), self.users, next.users);
         changes.flag(
-            "入口凭据",
+            tr("Inbound credentials", "入口凭据"),
             self.credentials.is_some(),
             next.credentials.is_some(),
         );
@@ -257,22 +283,34 @@ impl crate::core::Draft for Inbound {
                 b.encryption.is_some(),
             ),
             (Protocol::Shadowsocks(a), Protocol::Shadowsocks(b)) => {
-                changes.mode("Shadowsocks 算法", &a.cipher, &b.cipher);
-                changes.flag("TCP 接收", a.tcp, b.tcp);
-                changes.flag("入口共享密钥", a.password.is_some(), b.password.is_some());
+                changes.mode(
+                    tr("Shadowsocks cipher", "Shadowsocks 算法"),
+                    &a.cipher,
+                    &b.cipher,
+                );
+                changes.flag(tr("Accept TCP", "TCP 接收"), a.tcp, b.tcp);
+                changes.flag(
+                    tr("Shared inbound key", "入口共享密钥"),
+                    a.password.is_some(),
+                    b.password.is_some(),
+                );
                 if a.user_level != b.user_level {
                     changes.lines.push(if let Some(level) = b.user_level {
-                        format!("用户等级改为 {level}")
+                        message!("Set user level to {level}", "用户等级改为 {level}")
                     } else {
-                        "用户等级恢复默认".into()
+                        tr("Reset user level to default", "用户等级恢复默认").into()
                     });
                 }
                 changes.flag("S-Mux", a.multiplex.is_some(), b.multiplex.is_some());
             }
             (Protocol::Hysteria2(a), Protocol::Hysteria2(b)) => {
-                changes.flag("伪装响应", a.masquerade.is_some(), b.masquerade.is_some());
+                changes.flag(
+                    tr("Masquerade response", "伪装响应"),
+                    a.masquerade.is_some(),
+                    b.masquerade.is_some(),
+                );
                 if let (Some(a), Some(b)) = (&a.masquerade, &b.masquerade) {
-                    changes.fields("伪装响应的", a, b);
+                    changes.fields(tr("Masquerade ", "伪装响应的"), a, b);
                 }
             }
             _ => {}
@@ -285,11 +323,14 @@ impl crate::core::Draft for Inbound {
             if !active.core.ech_file(true)
                 && let Some(ech) = &mut tls.ech
             {
-                changes.inline("ECH 密钥", &mut ech.key);
+                changes.inline(tr("ECH key", "ECH 密钥"), &mut ech.key);
             }
             if active.core.inline_trust(true, &tls.client_certificates) {
                 for material in &mut tls.client_certificates {
-                    changes.inline("客户端信任证书", material);
+                    changes.inline(
+                        tr("Trusted client certificates", "客户端信任证书"),
+                        material,
+                    );
                 }
             }
         }
@@ -481,7 +522,7 @@ impl form::Form for Fallback {
         let address = matches!(self.target, Endpoint::Address(_));
         let mut fields = Vec::new();
         macro_rules! field {
-            ($name:ident, $label:literal) => {
+            ($name:ident, $label:expr) => {
                 fields.push(form::field(
                     stringify!($name),
                     $label,
@@ -490,13 +531,16 @@ impl form::Form for Fallback {
                 ));
             };
         }
-        field!(server_name, "服务名");
+        field!(server_name, tr("Server name", "服务名"));
         field!(alpn, "ALPN");
-        field!(path, "路径");
-        field!(target, "目标");
+        field!(path, tr("Path", "路径"));
+        field!(target, tr("Target", "目标"));
         if address {
-            field!(network, "网络类型");
-            field!(proxy_protocol, "PROXY protocol 版本");
+            field!(network, tr("Network type", "网络类型"));
+            field!(
+                proxy_protocol,
+                tr("PROXY protocol version", "PROXY protocol 版本")
+            );
         }
         fields
     }
@@ -728,14 +772,18 @@ fn edit(
         let mut active = inbound.effective();
         let changed = !existing || serde_json::to_vec(&active)? != initial;
         let title = if existing {
-            format!("入站 / {}", inbound.name)
+            message!("Inbound / {}", "入站 / {}", inbound.name)
         } else {
-            "创建入站".to_owned()
+            tr("Create inbound", "创建入站").to_owned()
         };
         let mut items: Vec<_> = [
-            ("name", "名称", inbound.name.clone()),
-            ("protocol", "协议", inbound.protocol.kind().text()),
-            ("core", "核心", inbound.core.text()),
+            ("name", tr("Name", "名称"), inbound.name.clone()),
+            (
+                "protocol",
+                tr("Protocol", "协议"),
+                inbound.protocol.kind().text(),
+            ),
+            ("core", tr("Core", "核心"), inbound.core.text()),
         ]
         .into_iter()
         .map(|(key, label, value)| {
@@ -745,13 +793,13 @@ fn edit(
         })
         .collect();
         if let Some(destination) = inbound.protocol.destination() {
-            let mut item = Item::new("outbound", "出站".stylized());
+            let mut item = Item::new("outbound", tr("Outbound", "出站").stylized());
             item.value = destination.text();
             items.push(item);
         }
         let credential = active.protocol.credential();
         if active.protocol.supports_users(active.core) {
-            let mut users = Item::new("users", "用户支持".stylized());
+            let mut users = Item::new("users", tr("Use system users", "用户支持").stylized());
             users.marker = inbound.users.marker();
             items.push(users);
         }
@@ -760,30 +808,30 @@ fn edit(
         {
             let (label, value) = match kind {
                 CredentialKind::Account => (
-                    "入口凭据",
+                    tr("Inbound credentials", "入口凭据"),
                     inbound.credentials.as_ref().map(|c| c.uuid.to_string()),
                 ),
                 CredentialKind::Uuid => (
-                    "入口 UUID",
+                    tr("Inbound UUID", "入口 UUID"),
                     inbound.credentials.as_ref().map(|c| c.uuid.to_string()),
                 ),
                 CredentialKind::Password => (
-                    "入口密码",
+                    tr("Inbound password", "入口密码"),
                     inbound.credentials.as_ref().map(|c| c.password.clone()),
                 ),
             };
             let mut credentials = Item::new("credentials", label.stylized());
-            credentials.value = value.unwrap_or_else(|| "无".to_owned());
+            credentials.value = value.unwrap_or_else(|| tr("None", "无").to_owned());
             if inbound.credentials.is_some() && !active.protocol.needs_credentials() {
-                credentials.detail = "Del 清除凭据".to_owned();
+                credentials.detail = tr("Del to clear credentials", "Del 清除凭据").to_owned();
             }
             items.push(credentials);
         }
-        let mut security = Item::new("security", "加密".stylized());
+        let mut security = Item::new("security", tr("Encryption", "加密").stylized());
         security.value = active.security.text();
-        let mut transport = Item::new("transport", "传输".stylized());
+        let mut transport = Item::new("transport", tr("Transport", "传输").stylized());
         transport.value = active.transport.text();
-        let mut listen = Item::new("listen", "监听".stylized());
+        let mut listen = Item::new("listen", tr("Listener", "监听").stylized());
         listen.value = match inbound.listen.text() {
             text if text.is_empty() => inbound.listen.enabled.text(),
             text => text,
@@ -795,9 +843,9 @@ fn edit(
         items.push(Item::new(
             "options",
             if matches!(inbound.protocol, Protocol::AnyTls(_)) {
-                "填充方案"
+                tr("Padding scheme", "填充方案")
             } else {
-                "协议参数"
+                tr("Protocol options", "协议参数")
             }
             .stylized(),
         ));
@@ -812,21 +860,35 @@ fn edit(
         }
         let actions = items.len();
         if !changed && inbound.listen.enabled {
-            items.push(Item::new("export", "连接资料".stylized()));
+            items.push(Item::new(
+                "export",
+                tr("Connection details", "连接资料").stylized(),
+            ));
         }
         if !changed && handshake.is_some() {
-            items.push(Item::new("handshake", "握手资料".stylized()));
+            items.push(Item::new(
+                "handshake",
+                tr("Handshake details", "握手资料").stylized(),
+            ));
         }
         items.push(if existing && changed {
-            Item::new("apply", "确定".stylized())
+            Item::new("apply", tr("Confirm", "确定").stylized())
         } else if existing {
-            Item::new("delete", "删除入站".foreground(AnsiColor::BrightRed))
+            Item::new(
+                "delete",
+                tr("Delete inbound", "删除入站").foreground(AnsiColor::BrightRed),
+            )
         } else {
-            Item::new("create", "创建".stylized())
+            Item::new("create", tr("Create", "创建").stylized())
         });
         items.push(Item::new(
             "back",
-            if changed { "取消" } else { "返回" }.stylized(),
+            if changed {
+                tr("Cancel", "取消")
+            } else {
+                tr("Back", "返回")
+            }
+            .stylized(),
         ));
         items[actions].gap = true;
         let menu = Menu {
@@ -834,9 +896,15 @@ fn edit(
             heading: "",
             items: &items,
             help: if changed {
-                "方向键 选择\n回车键 编辑\nEsc 取消"
+                tr(
+                    "Arrow keys to select\nEnter to edit\nEsc to cancel",
+                    "方向键 选择\n回车键 编辑\nEsc 取消",
+                )
             } else {
-                "方向键 选择\n回车键 编辑\nEsc 返回"
+                tr(
+                    "Arrow keys to select\nEnter to edit\nEsc to go back",
+                    "方向键 选择\n回车键 编辑\nEsc 返回",
+                )
             },
         };
         let action = screen.select(&menu, &mut selected, &notice)?;
@@ -864,7 +932,7 @@ fn edit(
                 "export" => crate::profile::copy(screen, store, Some(inbound.uuid), None),
                 "name" => edit!(name),
                 "core" => {
-                    let title = format!("{} / 核心", menu.title);
+                    let title = message!("{} / Core", "{} / 核心", menu.title);
                     crate::core::choose(&mut inbound, screen, &title, store).map(|_| ())
                 }
                 "users" => {
@@ -919,8 +987,11 @@ fn edit(
                     credentials.and_then(|mut credentials| {
                         let changed = match credential.expect("missing credential field") {
                             CredentialKind::Account => {
-                                form::edit(screen, "入口凭据", &mut credentials)?
-                                    || inbound.credentials.is_none()
+                                form::edit(
+                                    screen,
+                                    tr("Inbound credentials", "入口凭据"),
+                                    &mut credentials,
+                                )? || inbound.credentials.is_none()
                             }
                             CredentialKind::Uuid => {
                                 credentials.uuid.edit(screen, &menu, selected)?
@@ -943,7 +1014,7 @@ fn edit(
                     protocol => protocol.edit(screen, inbound.core),
                 },
                 "security" => {
-                    let title = format!("{} / 加密", menu.title);
+                    let title = message!("{} / Encryption", "{} / 加密", menu.title);
                     let mut security = if inbound.security.index() == active.security.index() {
                         inbound.security.clone()
                     } else {
@@ -1013,7 +1084,7 @@ fn edit(
                     keys.show(source, screen)
                 }
                 "create" | "apply" => {
-                    let result = screen.work("保存入站", &inbound.name, |progress| {
+                    let result = screen.work(tr("Saving inbound", "保存入站"), &inbound.name, |progress| {
                         store.update(progress, |config, _| {
                             let mut value = active.clone();
                             if value.name.trim().is_empty() {
@@ -1024,9 +1095,9 @@ fn edit(
                                     .inbounds
                                     .iter_mut()
                                     .find(|current| current.uuid == inbound.uuid)
-                                    .ok_or("入站已被删除")?;
+                                    .ok_or(tr("The inbound has been deleted", "入站已被删除"))?;
                                 if serde_json::to_vec(&*current)? != saved {
-                                    return Err("入站已在其他编辑中更改，请重新打开".into());
+                                    return Err(tr("The inbound was modified elsewhere. Reopen it to edit.", "入站已在其他编辑中更改，请重新打开").into());
                                 }
                                 *current = value;
                             } else {
@@ -1042,7 +1113,7 @@ fn edit(
                 }
                 "delete" => {
                     let result = screen.work(
-                        "删除入站",
+                        tr("Delete inbound", "删除入站"),
                         &format!(" -- {}", inbound.name),
                         |progress| {
                             store.update(progress, |config, _| {
@@ -1087,13 +1158,16 @@ pub fn select(
                 item
             })
             .collect();
-        items.push(Item::new("new", "创建入站".stylized()));
+        items.push(Item::new(
+            "new",
+            tr("Create inbound", "创建入站").stylized(),
+        ));
         let selected = inbounds
             .iter()
             .position(|inbound| Some(inbound.uuid) == current)
             .unwrap_or(0);
         let menu = Menu {
-            title: "选择入站",
+            title: tr("Select inbound", "选择入站"),
             heading: "",
             items: &items,
             help: "",
@@ -1143,14 +1217,17 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             })
             .collect();
         items.extend([
-            Item::new("new", "创建入站".stylized()),
-            Item::new("back", "返回".stylized()),
+            Item::new("new", tr("Create inbound", "创建入站").stylized()),
+            Item::new("back", tr("Back", "返回").stylized()),
         ]);
         let menu = Menu {
-            title: "入站",
+            title: tr("Inbound", "入站"),
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 确定\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to confirm\nEsc to go back",
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            ),
         };
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),
@@ -1183,7 +1260,7 @@ choices!(Kind {
     Shadowsocks: "shadowsocks" => "Shadowsocks",
     Hysteria2: "hysteria2" => "Hysteria 2",
     AnyTls: "anytls" => "AnyTLS",
-    Forward: "forward" => "TCP/UDP 转发",
+    Forward: "forward" => ("TCP/UDP forwarding", "TCP/UDP 转发"),
 });
 
 choices!(HttpVersion {
@@ -1193,102 +1270,104 @@ choices!(HttpVersion {
 });
 
 choices!(ClientAuth {
-    None: "none" => "不要求",
-    Request: "request" => "请求证书",
-    RequireAny: "require-any" => "要求提供证书",
-    VerifyIfGiven: "verify-if-given" => "提供时验证",
-    RequireAndVerify: "require-and-verify" => "要求提供并验证",
+    None: "none" => ("None", "不要求"),
+    Request: "request" => ("Request a certificate", "请求证书"),
+    RequireAny: "require-any" => ("Require a certificate", "要求提供证书"),
+    VerifyIfGiven: "verify-if-given" => ("Verify if provided", "提供时验证"),
+    RequireAndVerify: "require-and-verify" => ("Require and verify", "要求提供并验证"),
 });
 
 fields!(Credentials {
     uuid: "UUID",
-    password: "主密码",
+    password: ("Master password", "主密码"),
 });
 
 fields!(Mixed {
     http: "HTTP",
     socks: "SOCKS",
     udp: "UDP",
-    user_level: "用户等级",
+    user_level: ("User level", "用户等级"),
 });
 
 fields!(Http {
-    enabled: "启用",
-    versions: "版本",
-    transparent: "透明请求",
-    idle_timeout: "空闲超时",
-    keep_alive: "保活间隔",
-    stream_receive_window: "流接收窗口",
-    connection_receive_window: "连接接收窗口",
-    max_concurrent_streams: "并发流数",
-    initial_packet_size: "初始数据包大小",
-    disable_path_mtu_discovery: "关闭路径 MTU 探测",
+    enabled: ("Enabled", "启用"),
+    versions: ("Version", "版本"),
+    transparent: ("Transparent requests", "透明请求"),
+    idle_timeout: ("Idle timeout", "空闲超时"),
+    keep_alive: ("Keepalive interval", "保活间隔"),
+    stream_receive_window: ("Stream receive window", "流接收窗口"),
+    connection_receive_window: ("Connection receive window", "连接接收窗口"),
+    max_concurrent_streams: ("Concurrent streams", "并发流数"),
+    initial_packet_size: ("Initial packet size", "初始数据包大小"),
+    disable_path_mtu_discovery: ("Disable path MTU discovery", "关闭路径 MTU 探测"),
 });
 
 fields!(Socks {
-    enabled: "启用",
-    udp_address: "UDP 公布地址",
+    enabled: ("Enabled", "启用"),
+    udp_address: ("Advertised UDP address", "UDP 公布地址"),
 });
 
 fields!(Tls {
-    server_name: "服务名",
+    server_name: ("Server name", "服务名"),
     alpn: "ALPN",
-    min_version: "最低版本",
-    max_version: "最高版本",
-    cipher_suites: "密码套件",
-    curves: "曲线",
-    session_resumption: "会话复用",
-    reject_unknown_sni: "匹配 SNI",
-    client_auth: "客户端证书",
-    client_certificates: "客户端信任证书",
-    client_certificate_sha256: "客户端证书 SHA-256",
-    client_public_key_sha256: "客户端公钥 SHA-256",
-    handshake_timeout: "握手超时",
-    kernel_tx: "内核发送",
-    kernel_rx: "内核接收",
-    key_log: "密钥日志文件",
+    min_version: ("Minimum version", "最低版本"),
+    max_version: ("Maximum version", "最高版本"),
+    cipher_suites: ("Cipher suites", "密码套件"),
+    curves: ("Curves", "曲线"),
+    session_resumption: ("Session resumption", "会话复用"),
+    reject_unknown_sni: ("Match SNI", "匹配 SNI"),
+    client_auth: ("Client certificate", "客户端证书"),
+    client_certificates: ("Trusted client certificates", "客户端信任证书"),
+    client_certificate_sha256: ("Client certificate SHA-256", "客户端证书 SHA-256"),
+    client_public_key_sha256: ("Client public key SHA-256", "客户端公钥 SHA-256"),
+    handshake_timeout: ("Handshake timeout", "握手超时"),
+    kernel_tx: ("Kernel TLS transmit", "内核发送"),
+    kernel_rx: ("Kernel TLS receive", "内核接收"),
+    key_log: ("Key log file", "密钥日志文件"),
     ech: "ECH",
 } groups {
-    certificates: "客户端认证" => [client_auth, client_certificates, client_certificate_sha256, client_public_key_sha256],
-    protocol: "版本与密码" => [min_version, max_version, cipher_suites, curves],
-    handshake: "握手" => [session_resumption, reject_unknown_sni, handshake_timeout, kernel_tx, kernel_rx, key_log],
+    certificates: ("Client authentication", "客户端认证") => [client_auth, client_certificates, client_certificate_sha256, client_public_key_sha256],
+    protocol: ("Versions and ciphers", "版本与密码") => [min_version, max_version, cipher_suites, curves],
+    handshake: ("Handshake", "握手") => [session_resumption, reject_unknown_sni, handshake_timeout, kernel_tx, kernel_rx, key_log],
 });
 
-fields!(Ech { key: "密钥" });
+fields!(Ech {
+    key: ("Key", "密钥")
+});
 
 fields!(Listen {
-    host: "连接地址",
-    ports: "端口",
-    address: "绑定地址",
-    enabled: "启用",
+    host: ("Server address", "连接地址"),
+    ports: ("Port", "端口"),
+    address: ("Bind address", "绑定地址"),
+    enabled: ("Enabled", "启用"),
     socket: ..,
 });
 
 fields!(Socket {
-    interface: "接口",
-    routing_mark: "路由标记",
-    namespace: "网络命名空间",
-    reuse_address: "复用地址",
-    ipv6_only: "仅 IPv6",
-    tcp_fast_open: "TCP 快速打开",
-    tcp_multi_path: "多路径 TCP",
-    tcp_keep_alive: "TCP 保活",
-    tcp_keep_alive_idle: "TCP 保活起始时间",
-    tcp_keep_alive_interval: "TCP 保活间隔",
-    tcp_congestion: "TCP 拥塞算法",
-    tcp_window: "TCP 接收窗口",
-    tcp_max_segment: "TCP 最大分段",
-    tcp_user_timeout: "TCP 用户超时",
-    udp_fragment: "UDP 分片",
-    udp_timeout: "UDP 超时",
+    interface: ("Interface", "接口"),
+    routing_mark: ("Routing mark", "路由标记"),
+    namespace: ("Network namespace", "网络命名空间"),
+    reuse_address: ("Reuse address", "复用地址"),
+    ipv6_only: ("IPv6 only", "仅 IPv6"),
+    tcp_fast_open: ("TCP Fast Open", "TCP 快速打开"),
+    tcp_multi_path: ("Multipath TCP", "多路径 TCP"),
+    tcp_keep_alive: ("TCP keepalive", "TCP 保活"),
+    tcp_keep_alive_idle: ("TCP keepalive idle time", "TCP 保活起始时间"),
+    tcp_keep_alive_interval: ("TCP keepalive interval", "TCP 保活间隔"),
+    tcp_congestion: ("TCP congestion control", "TCP 拥塞算法"),
+    tcp_window: ("TCP receive window", "TCP 接收窗口"),
+    tcp_max_segment: ("TCP maximum segment size", "TCP 最大分段"),
+    tcp_user_timeout: ("TCP user timeout", "TCP 用户超时"),
+    udp_fragment: ("UDP fragmentation", "UDP 分片"),
+    udp_timeout: ("UDP timeout", "UDP 超时"),
     proxy_protocol: "PROXY protocol",
-    forwarded_sources: "转发来源",
-    socket_options: "自定义套接字选项",
+    forwarded_sources: ("Forwarded sources", "转发来源"),
+    socket_options: ("Custom socket options", "自定义套接字选项"),
 } groups {
     tcp: "TCP" => [tcp_fast_open, tcp_multi_path, tcp_keep_alive, tcp_keep_alive_idle, tcp_keep_alive_interval, tcp_congestion, tcp_window, tcp_max_segment, tcp_user_timeout],
     udp: "UDP" => [udp_fragment, udp_timeout],
-    binding: "绑定与路由" => [routing_mark, namespace, reuse_address, ipv6_only, socket_options],
-    forwarding: "来源信息" => [proxy_protocol, forwarded_sources],
+    binding: ("Binding and routing", "绑定与路由") => [routing_mark, namespace, reuse_address, ipv6_only, socket_options],
+    forwarding: ("Source information", "来源信息") => [proxy_protocol, forwarded_sources],
 });
 
 pub type Security = crate::security::Security<Tls, crate::reality::Server>;

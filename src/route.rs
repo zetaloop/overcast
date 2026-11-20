@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use serde::{Deserialize, Serialize};
 use termina::{
     Event,
@@ -50,7 +51,7 @@ impl Rule {
         for (index, child) in self.children.iter_mut().enumerate() {
             child
                 .prune(keep)
-                .map_err(|e| format!("子规则 {}：{e}", index + 1))?;
+                .map_err(|e| message!("Child rule {}: {e}", "子规则 {}：{e}", index + 1))?;
         }
         Ok(())
     }
@@ -80,13 +81,14 @@ impl Destination {
 
     fn name(self, config: &Config) -> String {
         match self {
-            Self::Block => "黑洞".to_owned(),
+            Self::Block => tr("Blackhole", "黑洞").to_owned(),
             Self::Outbound(uuid) => config
                 .outbounds
                 .iter()
                 .find(|outbound| outbound.uuid == uuid)
                 .map_or_else(|| uuid.to_string(), |outbound| outbound.name.clone()),
-            Self::Inbound(uuid) => format!(
+            Self::Inbound(uuid) => message!(
+                "Inbound / {}",
                 "入口 / {}",
                 config
                     .inbounds
@@ -126,8 +128,12 @@ impl Value for Destination {
 }
 
 fn get<'a>(rules: &'a [Rule], path: &[usize]) -> Result<&'a Rule> {
-    let (index, rest) = path.split_first().ok_or("找不到规则")?;
-    let rule = rules.get(*index).ok_or("找不到规则")?;
+    let (index, rest) = path
+        .split_first()
+        .ok_or(tr("Rule not found", "找不到规则"))?;
+    let rule = rules
+        .get(*index)
+        .ok_or(tr("Rule not found", "找不到规则"))?;
     if rest.is_empty() {
         Ok(rule)
     } else {
@@ -136,8 +142,12 @@ fn get<'a>(rules: &'a [Rule], path: &[usize]) -> Result<&'a Rule> {
 }
 
 fn get_mut<'a>(rules: &'a mut [Rule], path: &[usize]) -> Result<&'a mut Rule> {
-    let (index, rest) = path.split_first().ok_or("找不到规则")?;
-    let rule = rules.get_mut(*index).ok_or("找不到规则")?;
+    let (index, rest) = path
+        .split_first()
+        .ok_or(tr("Rule not found", "找不到规则"))?;
+    let rule = rules
+        .get_mut(*index)
+        .ok_or(tr("Rule not found", "找不到规则"))?;
     if rest.is_empty() {
         Ok(rule)
     } else {
@@ -174,7 +184,7 @@ fn rows(
                 .collect::<Vec<_>>()
                 .join(".");
             let label = match &rule.condition {
-                Condition::Always => "全部".to_owned(),
+                Condition::Always => tr("All", "全部").to_owned(),
                 condition => condition.text(config),
             };
             let last = index + 1 == rules.len();
@@ -226,8 +236,8 @@ fn select_user(screen: &mut Screen, store: &Store) -> Result<Option<Condition>> 
                 item
             })
             .collect();
-        items.push(Item::new("new", "新增用户".stylized()));
-        match screen.search("选择用户", &items, 0)? {
+        items.push(Item::new("new", tr("Add user", "新增用户").stylized()));
+        match screen.search(tr("Select user", "选择用户"), &items, 0)? {
             Some(index) if index < config.users.len() => {
                 return Ok(Some(Condition::User(config.users[index].uuid)));
             }
@@ -250,15 +260,15 @@ fn select_inbound(screen: &mut Screen, store: &Store) -> Result<Option<Condition
 
 fn select_target(screen: &mut Screen, store: &Store) -> Result<Option<Condition>> {
     let targets = [
-        ("domain", "域名"),
-        ("suffix", "域名及子域"),
-        ("keyword", "域名关键词"),
-        ("regex", "域名正则"),
-        ("ip", "IP 地址或网段"),
+        ("domain", tr("Domain", "域名")),
+        ("suffix", tr("Domain and subdomains", "域名及子域")),
+        ("keyword", tr("Domain keyword", "域名关键词")),
+        ("regex", tr("Domain regex", "域名正则")),
+        ("ip", tr("IP address or subnet", "IP 地址或网段")),
         ("site", "GeoSite"),
         ("geoip", "GeoIP"),
         ("asn", "ASN"),
-        ("back", "返回"),
+        ("back", tr("Back", "返回")),
     ];
     let mut items: Vec<_> = targets
         .iter()
@@ -266,10 +276,13 @@ fn select_target(screen: &mut Screen, store: &Store) -> Result<Option<Condition>
         .collect();
     items[5].gap = true;
     let menu = Menu {
-        title: "选择目标",
+        title: tr("Select target", "选择目标"),
         heading: "",
         items: &items,
-        help: "方向键 选择\n回车键 确定\nEsc 返回",
+        help: tr(
+            "Arrow keys to select\nEnter to confirm\nEsc to go back",
+            "方向键 选择\n回车键 确定\nEsc 返回",
+        ),
     };
     let mut selected = 0;
     let mut catalog = None;
@@ -286,10 +299,14 @@ fn select_target(screen: &mut Screen, store: &Store) -> Result<Option<Condition>
         if matches!(kind, "site" | "geoip" | "asn") {
             let catalog = match &catalog {
                 Some(value) => value,
-                None => catalog.insert(screen.work("读取规则数据", "", |progress| {
-                    let mut release = crate::resource::Resources::load(store)?.geodata;
-                    Catalog::ensure(store, &mut release, progress)
-                })?),
+                None => catalog.insert(screen.work(
+                    tr("Reading routing data", "读取规则数据"),
+                    "",
+                    |progress| {
+                        let mut release = crate::resource::Resources::load(store)?.geodata;
+                        Catalog::ensure(store, &mut release, progress)
+                    },
+                )?),
             };
             let choices: Vec<_> = match kind {
                 "asn" => catalog
@@ -386,15 +403,21 @@ pub(crate) fn destination(
                 item
             })
             .collect();
-        items.push(Item::new("new", "创建出站".stylized()));
+        items.push(Item::new(
+            "new",
+            tr("Create outbound", "创建出站").stylized(),
+        ));
         if routing {
-            items.push(Item::new("inbound", "创建入站".stylized()));
+            items.push(Item::new(
+                "inbound",
+                tr("Create inbound", "创建入站").stylized(),
+            ));
         }
         let menu = Menu {
             title: if routing {
-                "选择去向"
+                tr("Select destination", "选择去向")
             } else {
-                "选择出站"
+                tr("Select outbound", "选择出站")
             },
             heading: "",
             items: &items,
@@ -429,10 +452,10 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
     let mut selected: usize = 0;
     let mut notice = String::new();
     let items: Vec<_> = [
-        ("user", "用户"),
-        ("inbound", "入站"),
-        ("target", "目标"),
-        ("block", "黑洞"),
+        ("user", tr("User", "用户")),
+        ("inbound", tr("Inbound", "入站")),
+        ("target", tr("Target", "目标")),
+        ("block", tr("Blackhole", "黑洞")),
     ]
     .into_iter()
     .map(|(key, label)| {
@@ -442,7 +465,7 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
     })
     .collect();
     let apply = |text: &str, screen: &mut Screen| {
-        screen.work("编辑条件", text, |progress| {
+        screen.work(tr("Edit condition", "编辑条件"), text, |progress| {
             store.update(progress, |config, resources| {
                 let condition = Condition::parse(
                     text,
@@ -469,12 +492,12 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
     }
     while !screen.exiting {
         screen.prompt(
-            "编辑条件",
+            tr("Edit condition", "编辑条件"),
             &mut editor,
             items.iter(),
             selected.checked_sub(1),
             &notice,
-            "↑↓ 选择\n回车键 确定\nEsc 取消\nCtrl+A 全选\nCtrl+C 复制 / Ctrl+X 剪切",
+            tr("↑↓ to select\nEnter to confirm\nEsc to cancel\nCtrl+A to select all\nCtrl+C to copy / Ctrl+X to cut", "↑↓ 选择\n回车键 确定\nEsc 取消\nCtrl+A 全选\nCtrl+C 复制 / Ctrl+X 剪切"),
         )?;
         let Some(event) = screen.event(false)? else {
             continue;
@@ -528,7 +551,9 @@ fn condition(screen: &mut Screen, store: &Store, path: &[usize]) -> Result<()> {
 }
 
 fn relocate(rules: &mut Vec<Rule>, path: &mut Vec<usize>, direction: KeyCode) -> Result<()> {
-    let (&index, parent) = path.split_last().ok_or("找不到规则")?;
+    let (&index, parent) = path
+        .split_last()
+        .ok_or(tr("Rule not found", "找不到规则"))?;
     match direction {
         KeyCode::Up | KeyCode::Down => {
             let siblings = children(rules, parent)?;
@@ -574,12 +599,15 @@ fn move_rule(
         let selected = paths
             .iter()
             .position(|current| *current == path)
-            .ok_or("找不到规则")?;
+            .ok_or(tr("Rule not found", "找不到规则"))?;
         let menu = Menu {
-            title: "移动规则",
+            title: tr("Move rule", "移动规则"),
             heading: "",
             items: &items,
-            help: "方向键 移动\n回车键 确定\nEsc 取消",
+            help: tr(
+                "Arrow keys to move\nEnter to confirm\nEsc to cancel",
+                "方向键 移动\n回车键 确定\nEsc 取消",
+            ),
         };
         screen.menu(&menu, selected, &notice, None)?;
         let key = if let Some(argument) = screen.arguments.pop_front() {
@@ -591,7 +619,10 @@ fn move_rule(
                 "-" => KeyCode::Enter,
                 "back" => KeyCode::Escape,
                 _ => {
-                    notice = format!("找不到移动操作：{argument}");
+                    notice = message!(
+                        "Unknown move command: {argument}",
+                        "找不到移动操作：{argument}"
+                    );
                     screen.arguments.clear();
                     continue;
                 }
@@ -633,15 +664,18 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
         let config = store.load()?;
         let rule = get(&config.rules, &path)?;
         let mut items = vec![
-            Item::new("condition", "条件".stylized()),
-            Item::new("destination", "去向".stylized()),
-            Item::new("new", "新增子规则".stylized()),
-            Item::new("move", "移动规则".stylized()),
-            Item::new("delete", "删除规则".foreground(AnsiColor::BrightRed)),
-            Item::new("back", "返回".stylized()),
+            Item::new("condition", tr("Condition", "条件").stylized()),
+            Item::new("destination", tr("Destination", "去向").stylized()),
+            Item::new("new", tr("Add child rule", "新增子规则").stylized()),
+            Item::new("move", tr("Move rule", "移动规则").stylized()),
+            Item::new(
+                "delete",
+                tr("Delete rule", "删除规则").foreground(AnsiColor::BrightRed),
+            ),
+            Item::new("back", tr("Back", "返回").stylized()),
         ];
         items[0].value = if rule.condition == Condition::Always {
-            "全部".to_owned()
+            tr("All", "全部").to_owned()
         } else {
             rule.condition.text(&config)
         };
@@ -650,10 +684,13 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
         items[1].show_value = true;
         items[2].gap = true;
         let menu = Menu {
-            title: "编辑规则",
+            title: tr("Edit rule", "编辑规则"),
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to edit\nEsc to go back",
+                "方向键 选择\n回车键 编辑\nEsc 返回",
+            ),
         };
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(Some(path)),
@@ -697,10 +734,12 @@ fn edit(screen: &mut Screen, store: &Store, mut path: Vec<usize>) -> Result<Opti
                 "delete" => {
                     let result = screen.work(menu.title, "", |progress| {
                         store.update(progress, |config, _| {
-                            let (&index, parent) = path.split_last().ok_or("找不到规则")?;
+                            let (&index, parent) = path
+                                .split_last()
+                                .ok_or(tr("Rule not found", "找不到规则"))?;
                             let siblings = children(&mut config.rules, parent)?;
                             if index >= siblings.len() {
-                                return Err("找不到规则".into());
+                                return Err(tr("Rule not found", "找不到规则").into());
                             }
                             siblings.remove(index);
                             Ok(())
@@ -730,25 +769,28 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
         let coverage = crate::service::Deployment::load(store)?.coverage;
         let (paths, mut items) = rows(&config.rules, &config, Some(&coverage));
         if coverage.remainder {
-            let mut item = Item::new("", "其余流量".stylized());
+            let mut item = Item::new("", tr("Remaining traffic", "其余流量").stylized());
             item.branch = Some(String::new());
             item.value = Destination::Block.name(&config);
             item.inert = true;
             items.push(item);
         }
-        let mut create = Item::new("new", "创建规则".stylized());
+        let mut create = Item::new("new", tr("Create rule", "创建规则").stylized());
         create.gap = true;
         if let Some(path) = focus.take()
             && let Some(index) = paths.iter().position(|current| *current == path)
         {
             selected = index;
         }
-        items.extend([create, Item::new("back", "返回".stylized())]);
+        items.extend([create, Item::new("back", tr("Back", "返回").stylized())]);
         let menu = Menu {
-            title: "分流",
+            title: tr("Routing", "分流"),
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to edit\nEsc to go back",
+                "方向键 选择\n回车键 编辑\nEsc 返回",
+            ),
         };
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),

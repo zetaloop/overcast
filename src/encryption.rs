@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ml_kem::KeyExport;
 use serde::{Deserialize, Serialize};
@@ -94,7 +95,12 @@ impl Keys {
             previous.private_keys.clone()
         } else {
             let mut bytes = vec![0; source.authentication.unwrap_or_default().size()];
-            getrandom::fill(&mut bytes).map_err(|error| format!("生成加密材料失败：{error}"))?;
+            getrandom::fill(&mut bytes).map_err(|error| {
+                message!(
+                    "Could not generate encryption material: {error}",
+                    "生成加密材料失败：{error}"
+                )
+            })?;
             vec![URL_SAFE_NO_PAD.encode(bytes)]
         };
         let mut public_keys = Vec::new();
@@ -104,7 +110,11 @@ impl Keys {
                 .authentication
                 .is_some_and(|authentication| bytes.len() != authentication.size())
             {
-                return Err("私钥与认证算法不相符".into());
+                return Err(tr(
+                    "Private key does not match the authentication algorithm",
+                    "私钥与认证算法不相符",
+                )
+                .into());
             }
             public_keys.push(match bytes.len() {
                 32 => URL_SAFE_NO_PAD.encode(x25519_dalek::x25519(
@@ -116,7 +126,13 @@ impl Keys {
                     let key = ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_seed(seed.into());
                     URL_SAFE_NO_PAD.encode(key.encapsulation_key().to_bytes())
                 }
-                _ => return Err("VLESS 加密私钥需要包含 32 或 64 字节".into()),
+                _ => {
+                    return Err(tr(
+                        "VLESS encryption private keys must be 32 or 64 bytes",
+                        "VLESS 加密私钥需要包含 32 或 64 字节",
+                    )
+                    .into());
+                }
             });
         }
         Ok(Self {
@@ -132,15 +148,15 @@ choices!(Authentication {
 });
 
 choices!(Mode {
-    Native: "native" => "原生",
-    Xorpub: "xorpub" => "公钥混淆",
-    Random: "random" => "完全混淆",
+    Native: "native" => ("Native", "原生"),
+    Xorpub: "xorpub" => ("Public key obfuscation", "公钥混淆"),
+    Random: "random" => ("Full obfuscation", "完全混淆"),
 });
 
 fields!(Server {
-    authentication: "认证算法",
-    mode: "模式",
-    session: "会话时长",
-    padding: "填充参数",
-    private_keys: "私钥",
+    authentication: ("Authentication algorithm", "认证算法"),
+    mode: ("Mode", "模式"),
+    session: ("Session lifetime", "会话时长"),
+    padding: ("Padding parameters", "填充参数"),
+    private_keys: ("Private key", "私钥"),
 });

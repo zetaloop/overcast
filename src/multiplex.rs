@@ -47,22 +47,22 @@ choices!(Protocol {
 });
 
 fields!(Client {
-    protocol: "协议",
-    connections: "连接数",
-    min_streams: "最小并发流数",
-    max_streams: "最大并发流数",
-    padding: "填充",
-    tcp_only: "仅 TCP",
-    statistics: "底层连接统计",
+    protocol: ("Protocol", "协议"),
+    connections: ("Connections", "连接数"),
+    min_streams: ("Minimum concurrent streams", "最小并发流数"),
+    max_streams: ("Maximum concurrent streams", "最大并发流数"),
+    padding: ("Padding", "填充"),
+    tcp_only: ("TCP only", "仅 TCP"),
+    statistics: ("Underlying connection statistics", "底层连接统计"),
     brutal: "TCP Brutal",
 });
 
 fields!(Server {
-    padding: "填充",
+    padding: ("Padding", "填充"),
     brutal: "TCP Brutal",
 });
 
 fields!(Brutal {
-    upload: "上传字节/秒",
-    download: "下载字节/秒",
+    upload: ("Upload bytes per second", "上传字节/秒"),
+    download: ("Download bytes per second", "下载字节/秒"),
 });

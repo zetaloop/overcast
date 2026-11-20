@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
@@ -57,15 +58,35 @@ pub struct Keys {
 impl Keys {
     pub fn values(&self) -> Vec<(&'static str, &'static str, String)> {
         let mut values = vec![
-            ("public-key", "公钥", self.public_key.clone()),
-            ("short-ids", "短标识", self.short_ids.join(",")),
-            ("private-key", "私钥", self.private_key.clone()),
+            (
+                "public-key",
+                tr("Public key", "公钥"),
+                self.public_key.clone(),
+            ),
+            (
+                "short-ids",
+                tr("Short ID", "短标识"),
+                self.short_ids.join(","),
+            ),
+            (
+                "private-key",
+                tr("Private key", "私钥"),
+                self.private_key.clone(),
+            ),
         ];
         if let Some(value) = &self.signature_key {
-            values.push(("signature-key", "ML-DSA-65 公钥", value.clone()));
+            values.push((
+                "signature-key",
+                tr("ML-DSA-65 public key", "ML-DSA-65 公钥"),
+                value.clone(),
+            ));
         }
         if let Some(value) = &self.signature_seed {
-            values.push(("signature-seed", "签名种子", value.clone()));
+            values.push((
+                "signature-seed",
+                tr("Signing seed", "签名种子"),
+                value.clone(),
+            ));
         }
         values
     }
@@ -109,7 +130,11 @@ impl Keys {
                 None => URL_SAFE_NO_PAD.encode(random::<32>()?),
             };
             if seed == private_key {
-                return Err("REALITY 签名种子与握手私钥需要使用不同的值".into());
+                return Err(tr(
+                    "The REALITY signing seed and handshake private key must differ",
+                    "REALITY 签名种子与握手私钥需要使用不同的值",
+                )
+                .into());
             }
             let signing = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&key(&seed)?.into());
             let verifying: &ml_dsa::VerifyingKey<ml_dsa::MlDsa65> = signing.as_ref();
@@ -142,7 +167,11 @@ impl Client {
         if let Some(value) = &self.signature_key
             && URL_SAFE_NO_PAD.decode(value)?.len() != 1952
         {
-            return Err("ML-DSA-65 公钥需要包含 1952 字节".into());
+            return Err(tr(
+                "The ML-DSA-65 public key must be 1952 bytes",
+                "ML-DSA-65 公钥需要包含 1952 字节",
+            )
+            .into());
         }
         Ok(())
     }
@@ -174,14 +203,22 @@ impl Server {
 
     pub fn endpoint(&self) -> Result<Option<(String, u16)>> {
         if self.target.is_empty() {
-            return Err("请填写 REALITY 握手目标".into());
+            return Err(tr(
+                "Enter a REALITY handshake target",
+                "请填写 REALITY 握手目标",
+            )
+            .into());
         }
         if self.target.starts_with('@') || std::path::Path::new(&self.target).is_absolute() {
             return Ok(None);
         }
         if let Ok(port) = self.target.parse::<u16>() {
             if port == 0 {
-                return Err("REALITY 握手目标端口不能为零".into());
+                return Err(tr(
+                    "The REALITY handshake target port cannot be zero",
+                    "REALITY 握手目标端口不能为零",
+                )
+                .into());
             }
             return Ok(Some(("127.0.0.1".to_owned(), port)));
         }
@@ -195,16 +232,27 @@ impl Server {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            return Err("REALITY 握手目标需要填写主机与端口".into());
+            return Err(tr(
+                "Enter a host and port for the REALITY handshake target",
+                "REALITY 握手目标需要填写主机与端口",
+            )
+            .into());
         }
-        let host = match url.host().ok_or("REALITY 握手目标缺少主机名")? {
+        let host = match url.host().ok_or(tr(
+            "REALITY handshake target is missing a host",
+            "REALITY 握手目标缺少主机名",
+        ))? {
             url::Host::Domain(value) => value.to_owned(),
             url::Host::Ipv4(value) => value.to_string(),
             url::Host::Ipv6(value) => value.to_string(),
         };
         let port = url.port().unwrap_or(443);
         if port == 0 {
-            return Err("REALITY 握手目标端口不能为零".into());
+            return Err(tr(
+                "The REALITY handshake target port cannot be zero",
+                "REALITY 握手目标端口不能为零",
+            )
+            .into());
         }
         Ok(Some((host, port)))
     }
@@ -215,7 +263,10 @@ impl Server {
                 Some(name) => name.to_owned(),
                 None => {
                     self.endpoint()?
-                        .ok_or("Unix 握手目标需要指定 REALITY 服务名")?
+                        .ok_or(tr(
+                            "A Unix handshake target requires a REALITY server name",
+                            "Unix 握手目标需要指定 REALITY 服务名",
+                        ))?
                         .0
                 }
             }]
@@ -237,10 +288,13 @@ impl Server {
 }
 
 fn key(value: &str) -> Result<[u8; 32]> {
-    URL_SAFE_NO_PAD
-        .decode(value)?
-        .try_into()
-        .map_err(|_| "X25519 私钥、公钥及 ML-DSA 种子需要包含 32 字节".into())
+    URL_SAFE_NO_PAD.decode(value)?.try_into().map_err(|_| {
+        tr(
+            "X25519 keys and ML-DSA seeds must be 32 bytes",
+            "X25519 私钥、公钥及 ML-DSA 种子需要包含 32 字节",
+        )
+        .into()
+    })
 }
 
 fn short_id(value: &str) -> Result<()> {
@@ -248,56 +302,65 @@ fn short_id(value: &str) -> Result<()> {
         || !value.len().is_multiple_of(2)
         || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err("REALITY 短标识需要填写不超过 8 字节的十六进制字符串".into());
+        return Err(tr(
+            "The REALITY short ID must be a hexadecimal string of at most 8 bytes",
+            "REALITY 短标识需要填写不超过 8 字节的十六进制字符串",
+        )
+        .into());
     }
     Ok(())
 }
 
 fn random<const N: usize>() -> Result<[u8; N]> {
     let mut bytes = [0; N];
-    getrandom::fill(&mut bytes).map_err(|error| format!("生成握手材料失败：{error}"))?;
+    getrandom::fill(&mut bytes).map_err(|error| {
+        message!(
+            "Could not generate handshake material: {error}",
+            "生成握手材料失败：{error}"
+        )
+    })?;
     Ok(bytes)
 }
 
 fields!(Client {
     tls: "TLS",
-    public_key: "公钥",
-    short_id: "短标识",
-    signature_key: "ML-DSA-65 公钥",
-    spider_path: "探测路径",
-    hybrid_key_exchange: "混合密钥交换",
-    debug: "调试",
+    public_key: ("Public key", "公钥"),
+    short_id: ("Short ID", "短标识"),
+    signature_key: ("ML-DSA-65 public key", "ML-DSA-65 公钥"),
+    spider_path: ("Probe path", "探测路径"),
+    hybrid_key_exchange: ("Hybrid key exchange", "混合密钥交换"),
+    debug: ("Debug", "调试"),
 });
 
 fields!(Server {
     tls: ..,
-    target: "握手目标",
-    target_network: "目标网络类型",
-    network: "目标连接参数",
-    outbound: "经出站连接",
-    server_names: "服务名",
-    private_key: "私钥",
-    short_ids: "短标识",
-    max_time_difference: "时间偏差",
-    proxy_protocol: "PROXY protocol 版本",
-    min_client_version: "最低客户端版本",
-    max_client_version: "最高客户端版本",
-    signature: "ML-DSA-65 签名",
-    signature_seed: "签名种子",
-    upload: "回落上传",
-    download: "回落下载",
-    debug: "调试",
+    target: ("Handshake target", "握手目标"),
+    target_network: ("Target network type", "目标网络类型"),
+    network: ("Target connection settings", "目标连接参数"),
+    outbound: ("Connect via outbound", "经出站连接"),
+    server_names: ("Server name", "服务名"),
+    private_key: ("Private key", "私钥"),
+    short_ids: ("Short ID", "短标识"),
+    max_time_difference: ("Time difference", "时间偏差"),
+    proxy_protocol: ("PROXY protocol version", "PROXY protocol 版本"),
+    min_client_version: ("Minimum client version", "最低客户端版本"),
+    max_client_version: ("Maximum client version", "最高客户端版本"),
+    signature: ("ML-DSA-65 signature", "ML-DSA-65 签名"),
+    signature_seed: ("Signing seed", "签名种子"),
+    upload: ("Fallback upload", "回落上传"),
+    download: ("Fallback download", "回落下载"),
+    debug: ("Debug", "调试"),
 } groups {
-    authentication: "认证材料" => [private_key, short_ids, signature, signature_seed],
-    target_options: "目标连接" => [target_network, network, outbound, proxy_protocol],
-    clients: "客户端限制" => [min_client_version, max_client_version, max_time_difference],
-    fallback: "回落限速" => [upload, download],
+    authentication: ("Authentication material", "认证材料") => [private_key, short_ids, signature, signature_seed],
+    target_options: ("Target connection", "目标连接") => [target_network, network, outbound, proxy_protocol],
+    clients: ("Client restrictions", "客户端限制") => [min_client_version, max_client_version, max_time_difference],
+    fallback: ("Fallback rate limits", "回落限速") => [upload, download],
 });
 
 fields!(Limit {
-    after_bytes: "起始字节数",
-    bytes_per_second: "每秒字节数",
-    burst_bytes_per_second: "突发每秒字节数",
+    after_bytes: ("Initial bytes", "起始字节数"),
+    bytes_per_second: ("Bytes per second", "每秒字节数"),
+    burst_bytes_per_second: ("Burst bytes per second", "突发每秒字节数"),
 });
 
 impl crate::security::Handshake<crate::connection::Tls> for Client {

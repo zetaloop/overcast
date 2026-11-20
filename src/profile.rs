@@ -1,3 +1,4 @@
+use crate::language::text as tr;
 use std::collections::HashSet;
 
 use uuid::Uuid;
@@ -75,31 +76,39 @@ pub fn copy(
     inbound: Option<Uuid>,
     user: Option<Uuid>,
 ) -> Result<()> {
-    crate::share::copy(screen, "连接资料", |screen, links| {
-        screen.work("生成连接资料", "", |progress| {
-            let deployment = crate::service::Deployment::load(store)?;
-            let profiles = build(store, &deployment, inbound, user, progress)?;
-            if profiles.is_empty() {
-                return Err("当前没有可用的接入连接".into());
-            }
-            if links {
-                let mut links = Vec::new();
-                for profile in &profiles {
-                    progress.check()?;
-                    match crate::share::path(&profile.connections, &profile.name) {
-                        Ok(link) => links.push(link),
-                        Err(error) => progress.warn(&profile.name, &error.to_string()),
+    crate::share::copy(
+        screen,
+        tr("Connection details", "连接资料"),
+        |screen, links| {
+            screen.work(
+                tr("Generating connection details", "生成连接资料"),
+                "",
+                |progress| {
+                    let deployment = crate::service::Deployment::load(store)?;
+                    let profiles = build(store, &deployment, inbound, user, progress)?;
+                    if profiles.is_empty() {
+                        return Err(tr("No available connections", "当前没有可用的接入连接").into());
                     }
-                }
-                if links.is_empty() {
-                    return Err("没有可复制的节点链接".into());
-                }
-                Ok(links.join("\n"))
-            } else {
-                Ok(serde_json::to_string(&profiles)?)
-            }
-        })
-    })
+                    if links {
+                        let mut links = Vec::new();
+                        for profile in &profiles {
+                            progress.check()?;
+                            match crate::share::path(&profile.connections, &profile.name) {
+                                Ok(link) => links.push(link),
+                                Err(error) => progress.warn(&profile.name, &error.to_string()),
+                            }
+                        }
+                        if links.is_empty() {
+                            return Err(tr("No node links to copy", "没有可复制的节点链接").into());
+                        }
+                        Ok(links.join("\n"))
+                    } else {
+                        Ok(serde_json::to_string(&profiles)?)
+                    }
+                },
+            )
+        },
+    )
 }
 
 impl Builder<'_> {
@@ -242,9 +251,10 @@ impl Builder<'_> {
                 .encryption
                 .as_ref()
                 .map(|value| -> Result<String> {
-                    let keys = keys
-                        .and_then(|keys| keys.encryption.as_ref())
-                        .ok_or("缺少已保存的 VLESS 加密材料")?;
+                    let keys = keys.and_then(|keys| keys.encryption.as_ref()).ok_or(tr(
+                        "Missing saved VLESS encryption material",
+                        "缺少已保存的 VLESS 加密材料",
+                    ))?;
                     Ok(crate::native::encryption::client(value, keys))
                 })
                 .transpose()?,
@@ -394,7 +404,10 @@ fn peer_options(
                 server,
                 port,
                 password: password.to_owned(),
-                tls: security.tls().cloned().ok_or("Hysteria 2 入口使用 TLS")?,
+                tls: security.tls().cloned().ok_or(tr(
+                    "Hysteria 2 inbounds require TLS",
+                    "Hysteria 2 入口使用 TLS",
+                ))?,
                 hysteria: crate::hysteria::ClientOptions {
                     obfs: value.obfs.clone(),
                     quic: value.client.clone(),
@@ -495,7 +508,10 @@ impl Builder<'_> {
             .keys
             .get(&source.uuid)
             .and_then(|keys| keys.reality.as_ref())
-            .ok_or("缺少已保存的 REALITY 握手材料")?;
+            .ok_or(tr(
+                "Missing saved REALITY handshake material",
+                "缺少已保存的 REALITY 握手材料",
+            ))?;
         let client = crate::reality::Client {
             tls,
             public_key: keys.public_key.clone(),

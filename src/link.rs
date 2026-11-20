@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::collections::BTreeMap;
 
 use base64::{
@@ -35,7 +36,9 @@ pub fn vmess(text: &str) -> Result<crate::vmess::Client> {
             .decode_utf8()?
             .into_owned();
         client.server = host(&url)?;
-        client.port = url.port().ok_or("VMess 链接缺少端口")?;
+        client.port = url
+            .port()
+            .ok_or(tr("VMess URI is missing a port", "VMess 链接缺少端口"))?;
         client.uuid = percent_decode_str(url.username())
             .decode_utf8()?
             .into_owned();
@@ -53,7 +56,10 @@ pub fn vmess(text: &str) -> Result<crate::vmess::Client> {
             client.vmess.cipher = serde_json::from_value(json!(cipher))?;
         }
     } else {
-        let encoded = text.split_once("://").ok_or("链接缺少协议")?.1;
+        let encoded = text
+            .split_once("://")
+            .ok_or(tr("URI is missing a scheme", "链接缺少协议"))?
+            .1;
         let values: Map<String, Value> = serde_json::from_slice(&decode(encoded)?)?;
         query = BTreeMap::new();
         for (key, value) in values {
@@ -68,9 +74,18 @@ pub fn vmess(text: &str) -> Result<crate::vmess::Client> {
         }
         query.remove("v");
         client.name = query.remove("ps").unwrap_or_default();
-        client.server = query.remove("add").ok_or("VMess 链接缺少服务器地址")?;
-        client.port = query.remove("port").ok_or("VMess 链接缺少端口")?.parse()?;
-        client.uuid = query.remove("id").ok_or("VMess 链接缺少用户标识")?;
+        client.server = query.remove("add").ok_or(tr(
+            "VMess URI is missing a server address",
+            "VMess 链接缺少服务器地址",
+        ))?;
+        client.port = query
+            .remove("port")
+            .ok_or(tr("VMess URI is missing a port", "VMess 链接缺少端口"))?
+            .parse()?;
+        client.uuid = query.remove("id").ok_or(tr(
+            "VMess URI is missing a user ID",
+            "VMess 链接缺少用户标识",
+        ))?;
         if let Some(value) = query.remove("aid") {
             client.vmess.alter_id = Some(value.parse()?);
         }
@@ -124,7 +139,7 @@ pub fn vmess(text: &str) -> Result<crate::vmess::Client> {
     }
     client.security = security(&mut query, false)?;
     client.transport = transport(&mut query)?;
-    remaining(query.keys(), "链接参数")?;
+    remaining(query.keys(), tr("URI parameters", "链接参数"))?;
     Ok(client)
 }
 
@@ -138,7 +153,9 @@ pub fn vless(url: &Url) -> Result<Client> {
             .decode_utf8()?
             .into_owned(),
         server: host(url)?,
-        port: url.port().ok_or("VLESS 链接缺少端口")?,
+        port: url
+            .port()
+            .ok_or(tr("VLESS URI is missing a port", "VLESS 链接缺少端口"))?,
         uuid: percent_decode_str(url.username())
             .decode_utf8()?
             .into_owned(),
@@ -153,12 +170,18 @@ pub fn vless(url: &Url) -> Result<Client> {
     client.vless.flow = match query.remove("flow").as_deref() {
         None | Some("") => Flow::None,
         Some("xtls-rprx-vision" | "xtls-rprx-vision-udp443") => Flow::Vision,
-        Some(value) => return Err(format!("无法识别 VLESS 流模式：{value}").into()),
+        Some(value) => {
+            return Err(message!(
+                "Unknown VLESS flow: {value}",
+                "无法识别 VLESS 流模式：{value}"
+            )
+            .into());
+        }
     };
     client.vless.encryption = query.remove("encryption");
     client.security = security(&mut query, false)?;
     client.transport = transport(&mut query)?;
-    remaining(query.keys(), "链接参数")?;
+    remaining(query.keys(), tr("URI parameters", "链接参数"))?;
     Ok(client)
 }
 
@@ -178,13 +201,13 @@ pub fn trojan(url: &Url) -> Result<crate::trojan::Client> {
         transport: transport(&mut query)?,
         ..crate::trojan::Client::default()
     };
-    remaining(query.keys(), "链接参数")?;
+    remaining(query.keys(), tr("URI parameters", "链接参数"))?;
     Ok(client)
 }
 
 pub fn anytls(url: &Url) -> Result<crate::anytls::Client> {
     if !url.path().is_empty() && url.path() != "/" {
-        return Err("AnyTLS 链接中包含路径".into());
+        return Err(tr("Unexpected path in AnyTLS URI", "AnyTLS 链接中包含路径").into());
     }
     let mut query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
     let client = crate::anytls::Client {
@@ -206,26 +229,34 @@ pub fn anytls(url: &Url) -> Result<crate::anytls::Client> {
         },
         ..crate::anytls::Client::default()
     };
-    remaining(query.keys(), "链接参数")?;
+    remaining(query.keys(), tr("URI parameters", "链接参数"))?;
     Ok(client)
 }
 
 pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
     use crate::hysteria::{Obfs, ObfsKind};
 
-    let source = text.split_once("://").ok_or("链接缺少协议")?.1;
+    let source = text
+        .split_once("://")
+        .ok_or(tr("URI is missing a scheme", "链接缺少协议"))?
+        .1;
     let end = source.find(['/', '?', '#']).unwrap_or(source.len());
     let (authority, suffix) = source.split_at(end);
     let (auth, endpoint) = authority.rsplit_once('@').unwrap_or(("", authority));
     let (address, ports) = if endpoint.starts_with('[') {
-        let end = endpoint.find(']').ok_or("IPv6 地址缺少右括号")? + 1;
+        let end = endpoint.find(']').ok_or(tr(
+            "Missing closing bracket in IPv6 address",
+            "IPv6 地址缺少右括号",
+        ))? + 1;
         let (address, ports) = endpoint.split_at(end);
         (
             address,
             if ports.is_empty() {
                 "443"
             } else {
-                ports.strip_prefix(':').ok_or("连接端口格式不正确")?
+                ports
+                    .strip_prefix(':')
+                    .ok_or(tr("Invalid connection port", "连接端口格式不正确"))?
             },
         )
     } else {
@@ -239,12 +270,16 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
     };
     let url = Url::parse(&format!("hysteria2://{auth}{address}:{port}{suffix}"))?;
     if !url.path().is_empty() && url.path() != "/" {
-        return Err("Hysteria 2 链接中包含路径".into());
+        return Err(tr(
+            "Unexpected path in Hysteria 2 URI",
+            "Hysteria 2 链接中包含路径",
+        )
+        .into());
     }
     let mut query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
     let pin = query.remove("pinSHA256");
     let Security::Tls(mut tls) = security(&mut query, true)? else {
-        return Err("Hysteria 2 连接使用 TLS".into());
+        return Err(tr("Hysteria 2 requires TLS", "Hysteria 2 连接使用 TLS").into());
     };
     if let Some(pin) = pin {
         if tls.certificate_sha256.is_empty() {
@@ -252,7 +287,11 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
         } else if !crate::native::hex_hashes(&tls.certificate_sha256)?
             .contains(&crate::native::hex_hashes(&[pin])?[0])
         {
-            return Err("链接中的证书指纹参数相互冲突".into());
+            return Err(tr(
+                "Conflicting certificate fingerprints in URI",
+                "链接中的证书指纹参数相互冲突",
+            )
+            .into());
         }
     }
     let mut hysteria = crate::hysteria::ClientOptions {
@@ -268,7 +307,11 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
         let a = query.remove(key).map(|s| s.parse()).transpose()?;
         let b = query.remove(alias).map(|s| s.parse()).transpose()?;
         if a.is_some() && b.is_some() && a != b {
-            return Err(format!("Gecko 链接中的 {key} 与 {alias} 不一致").into());
+            return Err(message!(
+                "Gecko parameters {key} and {alias} disagree",
+                "Gecko 链接中的 {key} 与 {alias} 不一致"
+            )
+            .into());
         }
         Ok(a.or(b))
     };
@@ -282,7 +325,11 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
         Some(kind) => Some(serde_json::from_value(json!(kind))?),
     };
     if (min.is_some() || max.is_some()) && kind != Some(ObfsKind::Gecko) {
-        return Err("数据包大小需要使用 Gecko 混淆".into());
+        return Err(tr(
+            "Packet size requires Gecko obfuscation",
+            "数据包大小需要使用 Gecko 混淆",
+        )
+        .into());
     }
     hysteria.obfs = kind.map(|kind| Obfs {
         kind,
@@ -301,7 +348,7 @@ pub fn hysteria(text: &str) -> Result<crate::hysteria::Client> {
             bandwidth.get_or_insert(value);
         }
     }
-    remaining(query.keys(), "链接参数")?;
+    remaining(query.keys(), tr("URI parameters", "链接参数"))?;
     Ok(crate::hysteria::Client {
         name: percent_decode_str(url.fragment().unwrap_or_default())
             .decode_utf8()?
@@ -321,7 +368,7 @@ fn merge_ports(current: &mut String, ports: &str) -> Result<()> {
     } else if current != ports
         && crate::connection::ports(current)? != crate::connection::ports(ports)?
     {
-        return Err("链接中的跳跃端口不一致".into());
+        return Err(tr("Conflicting hopping ports in URI", "链接中的跳跃端口不一致").into());
     }
     Ok(())
 }
@@ -346,7 +393,9 @@ fn hysteria_mask(
                     have_obfs = true;
                     let mut obfs = Obfs {
                         password: serde_json::from_value(
-                            settings.remove("password").ok_or("混淆参数缺少密码")?,
+                            settings
+                                .remove("password")
+                                .ok_or(tr("Missing obfuscation password", "混淆参数缺少密码"))?,
                         )?,
                         ..Default::default()
                     };
@@ -356,7 +405,11 @@ fn hysteria_mask(
                         let (min, max) = (min.parse::<u16>()?, max.parse::<u16>()?);
                         if max > 0 {
                             if min == 0 {
-                                return Err("Gecko FinalMask 的最小数据包大小必须大于零".into());
+                                return Err(tr(
+                                    "Minimum Gecko FinalMask packet size must be positive",
+                                    "Gecko FinalMask 的最小数据包大小必须大于零",
+                                )
+                                .into());
                             }
                             obfs.kind = ObfsKind::Gecko;
                             obfs.min_packet_size = Some(min);
@@ -371,7 +424,11 @@ fn hysteria_mask(
                             || fields.min_packet_size.is_some() && min != sizes.0
                             || fields.max_packet_size.is_some() && max != sizes.1
                         {
-                            return Err("链接与 FinalMask 中的 Hysteria 2 混淆参数不一致".into());
+                            return Err(tr(
+                                "Hysteria 2 obfuscation settings differ between URI and FinalMask",
+                                "链接与 FinalMask 中的 Hysteria 2 混淆参数不一致",
+                            )
+                            .into());
                         }
                     }
                     options.obfs = Some(obfs);
@@ -386,7 +443,9 @@ fn hysteria_mask(
                 {
                     have_hop = true;
                     let ports: String = serde_json::from_value(
-                        settings.remove("remotePorts").ok_or("跳跃端口不能为空")?,
+                        settings
+                            .remove("remotePorts")
+                            .ok_or(tr("Enter at least one hopping port", "跳跃端口不能为空"))?,
                     )?;
                     merge_ports(&mut options.ports, &ports)?;
                     if let Some(value) = settings.remove("interval") {
@@ -403,7 +462,13 @@ fn hysteria_mask(
                         }
                     }
                 }
-                _ => return Err("此 FinalMask 无法转换为 Hysteria 2 连接".into()),
+                _ => {
+                    return Err(tr(
+                        "This FinalMask cannot be represented as a Hysteria 2 connection",
+                        "此 FinalMask 无法转换为 Hysteria 2 连接",
+                    )
+                    .into());
+                }
             }
             remaining(settings.keys(), "Hysteria 2 FinalMask")?;
             remaining(item.keys(), "Hysteria 2 FinalMask")?;
@@ -413,7 +478,10 @@ fn hysteria_mask(
 }
 
 pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {
-    let source = text.split_once("://").ok_or("链接缺少协议")?.1;
+    let source = text
+        .split_once("://")
+        .ok_or(tr("URI is missing a scheme", "链接缺少协议"))?
+        .1;
     let (source, tag) = source.split_once('#').unwrap_or((source, ""));
     let (source, query) = source.split_once('?').unwrap_or((source, ""));
     let (url, credentials) = if source.contains('@') {
@@ -431,20 +499,26 @@ pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {
         (url, credentials)
     } else {
         let decoded = String::from_utf8(decode(source.trim_end_matches('/'))?)?;
-        let (credentials, address) = decoded
-            .rsplit_once('@')
-            .ok_or("Shadowsocks 链接缺少服务器地址")?;
+        let (credentials, address) = decoded.rsplit_once('@').ok_or(tr(
+            "Shadowsocks URI is missing a server address",
+            "Shadowsocks 链接缺少服务器地址",
+        ))?;
         (
             Url::parse(&format!("ss://{address}"))?,
             credentials.to_owned(),
         )
     };
     if !url.path().is_empty() && url.path() != "/" {
-        return Err("Shadowsocks 链接中包含路径".into());
+        return Err(tr(
+            "Unexpected path in Shadowsocks URI",
+            "Shadowsocks 链接中包含路径",
+        )
+        .into());
     }
-    let (cipher, password) = credentials
-        .split_once(':')
-        .ok_or("Shadowsocks 链接缺少算法或密码")?;
+    let (cipher, password) = credentials.split_once(':').ok_or(tr(
+        "Shadowsocks URI is missing a cipher or password",
+        "Shadowsocks 链接缺少算法或密码",
+    ))?;
     let cipher = cipher.to_ascii_lowercase();
     let cipher = cipher
         .strip_prefix("aead_")
@@ -468,7 +542,10 @@ pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {
     let client = crate::shadowsocks::Client {
         name: percent_decode_str(tag).decode_utf8()?.into_owned(),
         server: host(&url)?,
-        port: url.port().ok_or("Shadowsocks 链接缺少端口")?,
+        port: url.port().ok_or(tr(
+            "Shadowsocks URI is missing a port",
+            "Shadowsocks 链接缺少端口",
+        ))?,
         password: password.to_owned(),
         shadowsocks: crate::shadowsocks::ClientOptions {
             cipher: serde_json::from_value(json!(cipher))?,
@@ -480,7 +557,7 @@ pub fn shadowsocks(text: &str) -> Result<crate::shadowsocks::Client> {
         transport: transport(&mut query)?,
         ..crate::shadowsocks::Client::default()
     };
-    remaining(query.keys(), "链接参数")?;
+    remaining(query.keys(), tr("URI parameters", "链接参数"))?;
     Ok(client)
 }
 
@@ -492,10 +569,10 @@ pub fn uot(query: &mut BTreeMap<String, String>) -> Result<Option<u8>> {
         (None, Some("true")) => Ok(Some(1)),
         (Some("true"), None) => Ok(Some(2)),
         (Some("1"), _) => Err(
-            "uot=1 只表示启用；Mihomo 默认使用 v1，Throne 默认使用 v2。请在连接参数中指定版本"
+            tr("uot=1 enables UoT without specifying a version. Mihomo defaults to v1 and Throne to v2. Select the version in connection settings.", "uot=1 只表示启用；Mihomo 默认使用 v1，Throne 默认使用 v2。请在连接参数中指定版本")
                 .into(),
         ),
-        _ => Err("无法确定链接中的 UDP over TCP 版本".into()),
+        _ => Err(tr("Cannot determine UDP over TCP version from URI", "无法确定链接中的 UDP over TCP 版本").into()),
     }
 }
 
@@ -512,7 +589,10 @@ fn credentials(url: &Url) -> Result<String> {
 
 pub fn host(url: &Url) -> Result<String> {
     Ok(
-        match Host::parse(url.host_str().ok_or("链接缺少服务器地址")?)? {
+        match Host::parse(
+            url.host_str()
+                .ok_or(tr("URI is missing a server address", "链接缺少服务器地址"))?,
+        )? {
             Host::Domain(value) => value,
             Host::Ipv4(value) => value.to_string(),
             Host::Ipv6(value) => value.to_string(),
@@ -525,7 +605,11 @@ pub fn security(query: &mut BTreeMap<String, String>, default: bool) -> Result<S
         .remove("security")
         .unwrap_or_else(|| if default { "tls" } else { "none" }.to_owned());
     if !matches!(security.as_str(), "none" | "" | "tls" | "reality") {
-        return Err(format!("无法识别握手类型：{security}").into());
+        return Err(message!(
+            "Unknown handshake type: {security}",
+            "无法识别握手类型：{security}"
+        )
+        .into());
     }
     let mut tls = Tls {
         server_name: query.remove("sni"),
@@ -585,10 +669,18 @@ pub fn security(query: &mut BTreeMap<String, String>, default: bool) -> Result<S
             let verify = match value.as_str() {
                 "1" | "true" => false,
                 "0" | "false" => true,
-                _ => return Err(format!("{key} 需要使用布尔值").into()),
+                _ => {
+                    return Err(
+                        message!("Expected a boolean for {key}", "{key} 需要使用布尔值").into(),
+                    );
+                }
             };
             if tls.verify_certificate.is_some_and(|value| value != verify) {
-                return Err("链接中的证书验证参数相互冲突".into());
+                return Err(tr(
+                    "Conflicting certificate verification settings in URI",
+                    "链接中的证书验证参数相互冲突",
+                )
+                .into());
             }
             tls.verify_certificate = Some(verify);
         }
@@ -703,7 +795,13 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
             let multi_mode = match query.remove("mode").as_deref() {
                 None | Some("" | "gun") => false,
                 Some("multi") => true,
-                Some(value) => return Err(format!("无法识别 gRPC 模式：{value}").into()),
+                Some(value) => {
+                    return Err(message!(
+                        "Unknown gRPC mode: {value}",
+                        "无法识别 gRPC 模式：{value}"
+                    )
+                    .into());
+                }
             };
             Ok(Transport::Grpc(Grpc {
                 service_name: query.remove("serviceName"),
@@ -730,7 +828,7 @@ pub fn transport(query: &mut BTreeMap<String, String>) -> Result<Transport> {
             }
             Ok(Transport::XHttp(Box::new(value)))
         }
-        _ => Err(format!("无法识别传输类型：{kind}").into()),
+        _ => Err(message!("Unknown transport: {kind}", "无法识别传输类型：{kind}").into()),
     };
     let mut value = value?;
     if let Some(mask) = mask {
@@ -790,7 +888,11 @@ fn finalmask(transport: &mut Transport, mut values: Map<String, Value>) -> Resul
         value.domain = None;
         for mut mask in serde_json::from_value::<Vec<Map<String, Value>>>(masks)? {
             if mask.remove("type").as_ref() != Some(&json!("mkcp-legacy")) {
-                return Err("当前 KCP 参数无法表达此 Finalmask".into());
+                return Err(tr(
+                    "This FinalMask cannot be represented by the KCP settings",
+                    "当前 KCP 参数无法表达此 Finalmask",
+                )
+                .into());
             }
             let mut settings: Map<String, Value> = mask
                 .remove("settings")
@@ -799,7 +901,11 @@ fn finalmask(transport: &mut Transport, mut values: Map<String, Value>) -> Resul
                 .unwrap_or_default();
             if let Some(header) = settings.remove("header") {
                 if value.header != Header::None {
-                    return Err("当前 KCP 参数使用单个数据包头".into());
+                    return Err(tr(
+                        "KCP accepts a single packet header",
+                        "当前 KCP 参数使用单个数据包头",
+                    )
+                    .into());
                 }
                 value.header = if header == "wechat" {
                     Header::WechatVideo
@@ -812,12 +918,16 @@ fn finalmask(transport: &mut Transport, mut values: Map<String, Value>) -> Resul
                     .transpose()?;
             } else if let Some(seed) = settings.remove("value") {
                 if value.seed.is_some() {
-                    return Err("当前 KCP 参数使用单个种子".into());
+                    return Err(tr("KCP accepts a single seed", "当前 KCP 参数使用单个种子").into());
                 }
                 value.seed = Some(serde_json::from_value(seed)?);
             } else {
                 if value.checksum {
-                    return Err("当前 KCP 参数使用单个校验层".into());
+                    return Err(tr(
+                        "KCP accepts a single checksum layer",
+                        "当前 KCP 参数使用单个校验层",
+                    )
+                    .into());
                 }
                 value.checksum = true;
             }
@@ -868,7 +978,7 @@ fn quic(mut values: Map<String, Value>) -> Result<Quic> {
             output.insert(source.to_owned(), json!(range(value, "s")?));
         }
     }
-    remaining(values.keys(), "QUIC 参数")?;
+    remaining(values.keys(), tr("QUIC parameters", "QUIC 参数"))?;
     Ok(serde_json::from_value(json!(output))?)
 }
 
@@ -887,7 +997,11 @@ fn xhttp(mut extra: Map<String, Value>) -> Result<XHttp> {
             && network != "xhttp"
             && network != "splithttp"
         {
-            return Err("XHTTP 下载连接需要使用 XHTTP 传输".into());
+            return Err(tr(
+                "The XHTTP download connection requires XHTTP transport",
+                "XHTTP 下载连接需要使用 XHTTP 传输",
+            )
+            .into());
         }
         if let Some(settings) = stream.remove("xhttpSettings") {
             download.http = http(serde_json::from_value(settings)?)?;
@@ -904,19 +1018,35 @@ fn xhttp(mut extra: Map<String, Value>) -> Result<XHttp> {
             }
             None if security == "tls" => Security::Tls(Tls::default()),
             None if security == "none" => Security::None,
-            None => return Err(format!("XHTTP 下载连接缺少 {security} 参数").into()),
+            None => {
+                return Err(message!(
+                    "Missing {security} parameters for XHTTP download",
+                    "XHTTP 下载连接缺少 {security} 参数"
+                )
+                .into());
+            }
         };
         if let Some(mask) = stream.remove("finalmask") {
             let mut mask: Map<String, Value> = serde_json::from_value(mask)?;
             if let Some(params) = mask.remove("quicParams") {
                 download.quic = quic(serde_json::from_value(params)?)?;
             }
-            remaining(mask.keys(), "XHTTP 下载 Finalmask")?;
+            remaining(
+                mask.keys(),
+                tr("XHTTP download FinalMask", "XHTTP 下载 Finalmask"),
+            )?;
         }
         if security != "tls" && security != "reality" && security != "none" {
-            return Err("无法识别 XHTTP 下载握手类型".into());
+            return Err(tr(
+                "Unknown XHTTP download handshake",
+                "无法识别 XHTTP 下载握手类型",
+            )
+            .into());
         }
-        remaining(stream.keys(), "XHTTP 下载连接")?;
+        remaining(
+            stream.keys(),
+            tr("XHTTP download connection", "XHTTP 下载连接"),
+        )?;
         value.download = Some(download);
     }
     value.http = http(extra)?;
@@ -1005,9 +1135,11 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Sec
                                 serde_json::from_value(path)?,
                             ))),
                             (None, None) => Ok(None),
-                            (Some(_), Some(_)) => {
-                                Err(format!("XHTTP 下载连接同时包含 {inline} 和 {file}").into())
-                            }
+                            (Some(_), Some(_)) => Err(message!(
+                                "XHTTP download specifies both {inline} and {file}",
+                                "XHTTP 下载连接同时包含 {inline} 和 {file}"
+                            )
+                            .into()),
                         }
                     };
                 let cert = material("certificate", "certificateFile")?;
@@ -1015,7 +1147,11 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Sec
                     trust.extend(cert);
                 } else if usage.is_none() || usage.as_ref() == Some(&json!("encipherment")) {
                     if output.contains_key("client_certificate") {
-                        return Err("XHTTP 下载连接使用一组客户端证书".into());
+                        return Err(tr(
+                            "XHTTP download accepts one client certificate pair",
+                            "XHTTP 下载连接使用一组客户端证书",
+                        )
+                        .into());
                     }
                     if let Some(cert) = cert {
                         output.insert("client_certificate".to_owned(), json!(cert));
@@ -1024,16 +1160,26 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Sec
                         output.insert("client_key".to_owned(), json!(key));
                     }
                 } else {
-                    return Err("无法识别 XHTTP 下载证书用途".into());
+                    return Err(tr(
+                        "Unknown XHTTP download certificate usage",
+                        "无法识别 XHTTP 下载证书用途",
+                    )
+                    .into());
                 }
-                remaining(certificate.keys(), "XHTTP 下载证书")?;
+                remaining(
+                    certificate.keys(),
+                    tr("XHTTP download certificate", "XHTTP 下载证书"),
+                )?;
             }
             if !trust.is_empty() {
                 output.insert("certificates".to_owned(), json!(trust));
             }
         }
     }
-    remaining(values.keys(), "XHTTP 下载握手")?;
+    remaining(
+        values.keys(),
+        tr("XHTTP download handshake", "XHTTP 下载握手"),
+    )?;
     let tls = serde_json::from_value(json!(output))?;
     Ok(if reality {
         options.insert("tls".to_owned(), json!(tls));
@@ -1119,7 +1265,7 @@ fn http(mut values: Map<String, Value>) -> Result<XHttpOptions> {
             json!(pool_options(serde_json::from_value(pool)?)?),
         );
     }
-    remaining(values.keys(), "XHTTP 参数")?;
+    remaining(values.keys(), tr("XHTTP parameters", "XHTTP 参数"))?;
     Ok(serde_json::from_value(json!(output))?)
 }
 
@@ -1137,7 +1283,10 @@ fn pool_options(mut values: Map<String, Value>) -> Result<Pool> {
             output.insert(source.to_owned(), json!(range(value, unit)?));
         }
     }
-    remaining(values.keys(), "XHTTP 连接复用")?;
+    remaining(
+        values.keys(),
+        tr("XHTTP connection reuse", "XHTTP 连接复用"),
+    )?;
     Ok(serde_json::from_value(json!(output))?)
 }
 
@@ -1145,7 +1294,13 @@ fn range(value: Value, unit: &str) -> Result<String> {
     let text = match value {
         Value::String(value) => value,
         Value::Number(value) => value.to_string(),
-        _ => return Err("整数区间需要使用数字或区间字符串".into()),
+        _ => {
+            return Err(tr(
+                "Expected an integer or a range string",
+                "整数区间需要使用数字或区间字符串",
+            )
+            .into());
+        }
     };
     if unit.is_empty() {
         return Ok(text);
@@ -1181,6 +1336,11 @@ pub fn remaining<'a>(keys: impl Iterator<Item = &'a String>, context: &str) -> R
     if fields.is_empty() {
         Ok(())
     } else {
-        Err(format!("{context} 包含无法转换的字段：{}", fields.join("、")).into())
+        Err(message!(
+            "Unsupported fields in {context}: {}",
+            "{context} 包含无法转换的字段：{}",
+            fields.join(tr(", ", "、"))
+        )
+        .into())
     }
 }

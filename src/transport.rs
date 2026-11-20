@@ -1,3 +1,4 @@
+use crate::language::text as tr;
 use std::{borrow::Cow, collections::BTreeMap};
 
 use serde::{Deserialize, Serialize};
@@ -351,7 +352,7 @@ impl Transport {
 impl Value for Transport {
     fn text(&self) -> String {
         match self {
-            Self::Default => "默认",
+            Self::Default => tr("Default", "默认"),
             Self::WebSocket(_) => "WebSocket",
             Self::HttpUpgrade(_) => "HTTPUpgrade",
             Self::Grpc(_) => "gRPC",
@@ -444,7 +445,7 @@ impl Transport {
             .iter()
             .map(|(key, value)| Item::new(*key, value.text().stylized()))
             .collect();
-        items.push(Item::new("back", "返回".stylized()));
+        items.push(Item::new("back", tr("Back", "返回").stylized()));
         if let Some(index) = current {
             items[index].marker = "■";
         }
@@ -453,7 +454,10 @@ impl Transport {
                 title: &title,
                 heading: "",
                 items: &items,
-                help: "方向键 选择\n回车键 编辑\nEsc 返回",
+                help: tr(
+                    "Arrow keys to select\nEnter to edit\nEsc to go back",
+                    "方向键 选择\n回车键 编辑\nEsc 返回",
+                ),
             };
             match screen.select(&menu, &mut selected, "")? {
                 Action::Back => return Ok(false),
@@ -482,213 +486,213 @@ impl Transport {
 }
 
 fields!(Http {
-    version: "版本",
-    host: "主机",
-    path: "路径",
-    method: "方法",
-    headers: "标头",
-    random_headers: "随机标头值",
-    idle_timeout: "空闲超时",
-    ping_timeout: "心跳超时",
+    version: ("Version", "版本"),
+    host: ("Host", "主机"),
+    path: ("Path", "路径"),
+    method: ("Method", "方法"),
+    headers: ("Headers", "标头"),
+    random_headers: ("Randomize header values", "随机标头值"),
+    idle_timeout: ("Idle timeout", "空闲超时"),
+    ping_timeout: ("Ping timeout", "心跳超时"),
 } groups {
-    headers: "请求头" => [headers, random_headers],
-    connection: "连接" => [idle_timeout, ping_timeout],
+    headers: ("Request headers", "请求头") => [headers, random_headers],
+    connection: ("Connection", "连接") => [idle_timeout, ping_timeout],
 });
 
 fields!(Kcp {
     mtu: "MTU",
-    interval: "发送间隔",
-    upload: "上传容量 MiB/s",
-    download: "下载容量 MiB/s",
-    window_multiplier: "拥塞窗口倍率",
-    congestion: "拥塞控制",
-    write_buffer: "写缓冲字节数",
-    read_buffer: "读缓冲字节数",
-    checksum: "帧校验",
-    seed: "加密种子",
-    header: "数据包伪装",
-    domain: "DNS 域名",
+    interval: ("Send interval", "发送间隔"),
+    upload: ("Upload capacity (MiB/s)", "上传容量 MiB/s"),
+    download: ("Download capacity (MiB/s)", "下载容量 MiB/s"),
+    window_multiplier: ("Congestion window multiplier", "拥塞窗口倍率"),
+    congestion: ("Congestion control", "拥塞控制"),
+    write_buffer: ("Write buffer size (bytes)", "写缓冲字节数"),
+    read_buffer: ("Read buffer size (bytes)", "读缓冲字节数"),
+    checksum: ("Frame checksum", "帧校验"),
+    seed: ("Encryption seed", "加密种子"),
+    header: ("Packet header", "数据包伪装"),
+    domain: ("DNS domain", "DNS 域名"),
 } groups {
-    packet: "数据包" => [mtu, interval, checksum, write_buffer, read_buffer],
-    congestion: "拥塞控制" => [upload, download, window_multiplier, congestion],
-    obfuscation: "伪装" => [seed, header, domain],
+    packet: ("Packet", "数据包") => [mtu, interval, checksum, write_buffer, read_buffer],
+    congestion: ("Congestion control", "拥塞控制") => [upload, download, window_multiplier, congestion],
+    obfuscation: ("Camouflage", "伪装") => [seed, header, domain],
 });
 
 choices!(Header {
-    None: "none" => "无",
+    None: "none" => ("None", "无"),
     Srtp: "srtp" => "SRTP",
     Utp: "utp" => "uTP",
-    WechatVideo: "wechat-video" => "微信视频",
+    WechatVideo: "wechat-video" => ("WeChat video", "微信视频"),
     Dtls: "dtls" => "DTLS",
     Wireguard: "wireguard" => "WireGuard",
     Dns: "dns" => "DNS",
 });
 fields!(WebSocket {
-    host: "主机名",
-    path: "路径",
-    headers: "请求头",
-    early_data: "握手数据上限",
-    early_data_header: "握手数据请求头",
-    heartbeat: "心跳间隔",
+    host: ("Hostname", "主机名"),
+    path: ("Path", "路径"),
+    headers: ("Request headers", "请求头"),
+    early_data: ("Maximum early data", "握手数据上限"),
+    early_data_header: ("Early data header", "握手数据请求头"),
+    heartbeat: ("Ping interval", "心跳间隔"),
 });
 
 fields!(HttpUpgrade {
-    host: "主机名",
-    path: "路径",
-    headers: "请求头",
-    early_data: "提前发送",
+    host: ("Hostname", "主机名"),
+    path: ("Path", "路径"),
+    headers: ("Request headers", "请求头"),
+    early_data: ("Send early data", "提前发送"),
 });
 
 fields!(Grpc {
-    authority: "主机名",
-    service_name: "服务名",
-    multi_mode: "多流模式",
-    keep_alive: "保活间隔",
-    ping_timeout: "保活响应超时",
-    permit_without_stream: "空闲连接保活",
-    receive_window: "接收窗口",
-    user_agent: "用户代理",
-    connections: "连接数",
-    min_streams: "最小并发流数",
-    max_streams: "最大并发流数",
+    authority: ("Hostname", "主机名"),
+    service_name: ("Server name", "服务名"),
+    multi_mode: ("Multi-stream mode", "多流模式"),
+    keep_alive: ("Keepalive interval", "保活间隔"),
+    ping_timeout: ("Keepalive response timeout", "保活响应超时"),
+    permit_without_stream: ("Keep idle connections alive", "空闲连接保活"),
+    receive_window: ("Receive window", "接收窗口"),
+    user_agent: ("User agent", "用户代理"),
+    connections: ("Connections", "连接数"),
+    min_streams: ("Minimum concurrent streams", "最小并发流数"),
+    max_streams: ("Maximum concurrent streams", "最大并发流数"),
 } groups {
-    streams: "多路复用" => [multi_mode, connections, min_streams, max_streams, receive_window],
-    keep_alive: "保活" => [keep_alive, ping_timeout, permit_without_stream],
+    streams: ("Multiplexing", "多路复用") => [multi_mode, connections, min_streams, max_streams, receive_window],
+    keep_alive: ("Keepalive", "保活") => [keep_alive, ping_timeout, permit_without_stream],
 });
 
 choices!(Mode {
-    Auto: "auto" => "自动",
-    PacketUp: "packet-up" => "分包上传",
-    StreamUp: "stream-up" => "双流传输",
-    StreamOne: "stream-one" => "单流传输",
+    Auto: "auto" => ("Automatic", "自动"),
+    PacketUp: "packet-up" => ("Packet uploads", "分包上传"),
+    StreamUp: "stream-up" => ("Separate upload and download streams", "双流传输"),
+    StreamOne: "stream-one" => ("Single stream", "单流传输"),
 });
 
 choices!(Placement {
-    Path: "path" => "路径",
+    Path: "path" => ("Path", "路径"),
     Cookie: "cookie" => "Cookie",
-    Header: "header" => "请求头",
-    Query: "query" => "查询参数",
+    Header: "header" => ("Request headers", "请求头"),
+    Query: "query" => ("Query parameter", "查询参数"),
 });
 
 choices!(PaddingPlacement {
-    QueryInHeader: "query-in-header" => "请求头内的查询参数",
+    QueryInHeader: "query-in-header" => ("Query inside header", "请求头内的查询参数"),
     Cookie: "cookie" => "Cookie",
-    Header: "header" => "请求头",
-    Query: "query" => "查询参数",
+    Header: "header" => ("Request headers", "请求头"),
+    Query: "query" => ("Query parameter", "查询参数"),
 });
 
 choices!(PaddingMethod {
-    RepeatX: "repeat-x" => "重复字符",
-    Tokenish: "tokenish" => "仿令牌",
+    RepeatX: "repeat-x" => ("Repeated characters", "重复字符"),
+    Tokenish: "tokenish" => ("Token-like", "仿令牌"),
 });
 
 choices!(Congestion {
-    Default: "default" => "默认",
+    Default: "default" => ("Default", "默认"),
     Bbr: "bbr" => "BBR",
     Reno: "reno" => "Reno",
-    ForceBrutal: "force-brutal" => "强制 Brutal",
+    ForceBrutal: "force-brutal" => ("Force Brutal", "强制 Brutal"),
     Brutal: "brutal" => "Brutal",
     Cubic: "cubic" => "Cubic",
 });
 
 choices!(BbrProfile {
-    Conservative: "conservative" => "保守",
-    Standard: "standard" => "标准",
-    Aggressive: "aggressive" => "积极",
+    Conservative: "conservative" => ("Conservative", "保守"),
+    Standard: "standard" => ("Standard", "标准"),
+    Aggressive: "aggressive" => ("Aggressive", "积极"),
 });
 
 choices!(DataPlacement {
-    Auto: "auto" => "自动",
-    Body: "body" => "正文",
+    Auto: "auto" => ("Automatic", "自动"),
+    Body: "body" => ("Inline", "正文"),
     Cookie: "cookie" => "Cookie",
-    Header: "header" => "请求头",
+    Header: "header" => ("Request headers", "请求头"),
 });
 
 fields!(XHttp {
     http: ..,
-    download: "下载连接",
+    download: ("Download connection", "下载连接"),
     quic: "QUIC",
 });
 
 fields!(XHttpOptions {
-    host: "主机名",
-    path: "路径",
-    mode: "模式",
-    headers: "请求头",
-    padding_size: "填充字节数",
-    padding_obfuscation: "填充混淆",
-    padding_key: "填充参数名",
-    padding_header: "填充请求头",
-    padding_placement: "填充位置",
-    padding_method: "填充方式",
-    upload_method: "上传方法",
-    session_placement: "会话标识位置",
-    session_key: "会话标识参数名",
-    session_alphabet: "会话标识字符集",
-    session_length: "会话标识长度",
-    sequence_placement: "序号位置",
-    sequence_key: "序号参数名",
-    data_placement: "上传数据位置",
-    data_key: "上传数据参数名",
-    chunk_size: "上传数据分块大小",
-    grpc_header: "gRPC 请求头",
-    sse_header: "SSE 响应头",
-    upload_size: "单次上传字节数",
-    upload_interval: "上传间隔",
-    buffered_uploads: "上传缓存数量",
-    stream_keep_alive: "流上传保活间隔",
-    header_limit: "请求头大小上限",
-    pool: "连接复用",
+    host: ("Hostname", "主机名"),
+    path: ("Path", "路径"),
+    mode: ("Mode", "模式"),
+    headers: ("Request headers", "请求头"),
+    padding_size: ("Padding bytes", "填充字节数"),
+    padding_obfuscation: ("Obfuscate padding", "填充混淆"),
+    padding_key: ("Padding parameter name", "填充参数名"),
+    padding_header: ("Padding header", "填充请求头"),
+    padding_placement: ("Padding placement", "填充位置"),
+    padding_method: ("Padding method", "填充方式"),
+    upload_method: ("Upload method", "上传方法"),
+    session_placement: ("Session ID placement", "会话标识位置"),
+    session_key: ("Session ID parameter name", "会话标识参数名"),
+    session_alphabet: ("Session ID alphabet", "会话标识字符集"),
+    session_length: ("Session ID length", "会话标识长度"),
+    sequence_placement: ("Sequence number placement", "序号位置"),
+    sequence_key: ("Sequence number parameter name", "序号参数名"),
+    data_placement: ("Upload data placement", "上传数据位置"),
+    data_key: ("Upload data parameter name", "上传数据参数名"),
+    chunk_size: ("Upload chunk size", "上传数据分块大小"),
+    grpc_header: ("gRPC request header", "gRPC 请求头"),
+    sse_header: ("SSE response header", "SSE 响应头"),
+    upload_size: ("Bytes per upload", "单次上传字节数"),
+    upload_interval: ("Upload interval", "上传间隔"),
+    buffered_uploads: ("Buffered uploads", "上传缓存数量"),
+    stream_keep_alive: ("Streaming upload keepalive interval", "流上传保活间隔"),
+    header_limit: ("Maximum header size", "请求头大小上限"),
+    pool: ("Connection reuse", "连接复用"),
 } groups {
-    request: "请求与会话" => [upload_method, session_placement, session_key, session_alphabet, session_length, sequence_placement, sequence_key, data_placement, data_key, chunk_size],
-    padding: "填充" => [padding_size, padding_obfuscation, padding_key, padding_header, padding_placement, padding_method],
-    upload: "上传" => [upload_size, upload_interval, buffered_uploads, stream_keep_alive],
-    protocol: "协议头" => [grpc_header, sse_header, header_limit],
+    request: ("Requests and sessions", "请求与会话") => [upload_method, session_placement, session_key, session_alphabet, session_length, sequence_placement, sequence_key, data_placement, data_key, chunk_size],
+    padding: ("Padding", "填充") => [padding_size, padding_obfuscation, padding_key, padding_header, padding_placement, padding_method],
+    upload: ("Upload", "上传") => [upload_size, upload_interval, buffered_uploads, stream_keep_alive],
+    protocol: ("Protocol headers", "协议头") => [grpc_header, sse_header, header_limit],
 });
 
 fields!(Pool {
-    concurrency: "并发流数",
-    connections: "连接数",
-    reuse_limit: "连接复用次数",
-    request_limit: "请求次数",
-    lifetime: "连接复用时限",
-    keep_alive: "保活间隔",
+    concurrency: ("Concurrent streams", "并发流数"),
+    connections: ("Connections", "连接数"),
+    reuse_limit: ("Connection reuse count", "连接复用次数"),
+    request_limit: ("Request count", "请求次数"),
+    lifetime: ("Connection reuse lifetime", "连接复用时限"),
+    keep_alive: ("Keepalive interval", "保活间隔"),
 });
 
 fields!(Download {
-    server: "地址",
-    port: "端口",
+    server: ("Address", "地址"),
+    port: ("Port", "端口"),
     http: "XHTTP",
-    security: "加密",
-    network: "网络",
+    security: ("Encryption", "加密"),
+    network: ("Network", "网络"),
     quic: "QUIC",
 });
 
 fields!(Quic {
-    congestion: "拥塞算法",
-    debug: "调试",
-    bbr_profile: "BBR 策略",
-    upload_bandwidth: "上传带宽",
-    download_bandwidth: "下载带宽",
-    loss_compensation: "丢包补偿",
-    initial_stream_window: "初始流接收窗口",
-    max_stream_window: "最大流接收窗口",
-    initial_connection_window: "初始连接接收窗口",
-    max_connection_window: "最大连接接收窗口",
-    idle_timeout: "空闲超时",
-    keep_alive: "保活间隔",
-    path_mtu_discovery: "路径 MTU 探测",
-    chrome_fingerprint: "Chrome 指纹",
-    gso: "分段卸载",
-    incoming_streams: "入站流数",
-    stateless_reset: "无状态重置",
-    initial_packet_size: "初始数据包",
-    handshake_timeout: "握手超时",
+    congestion: ("Congestion algorithm", "拥塞算法"),
+    debug: ("Debug", "调试"),
+    bbr_profile: ("BBR profile", "BBR 策略"),
+    upload_bandwidth: ("Upload bandwidth", "上传带宽"),
+    download_bandwidth: ("Download bandwidth", "下载带宽"),
+    loss_compensation: ("Packet loss compensation", "丢包补偿"),
+    initial_stream_window: ("Initial stream receive window", "初始流接收窗口"),
+    max_stream_window: ("Maximum stream receive window", "最大流接收窗口"),
+    initial_connection_window: ("Initial connection receive window", "初始连接接收窗口"),
+    max_connection_window: ("Maximum connection receive window", "最大连接接收窗口"),
+    idle_timeout: ("Idle timeout", "空闲超时"),
+    keep_alive: ("Keepalive interval", "保活间隔"),
+    path_mtu_discovery: ("Path MTU discovery", "路径 MTU 探测"),
+    chrome_fingerprint: ("Chrome fingerprint", "Chrome 指纹"),
+    gso: ("Segmentation offload", "分段卸载"),
+    incoming_streams: ("Incoming streams", "入站流数"),
+    stateless_reset: ("Stateless reset", "无状态重置"),
+    initial_packet_size: ("Initial packet", "初始数据包"),
+    handshake_timeout: ("Handshake timeout", "握手超时"),
     udp_mtu: "UDP MTU",
-    cwnd: "拥塞窗口",
+    cwnd: ("Congestion window", "拥塞窗口"),
 } groups {
-    congestion: "拥塞控制" => [congestion, bbr_profile, upload_bandwidth, download_bandwidth, loss_compensation, cwnd],
-    windows: "接收窗口" => [initial_stream_window, max_stream_window, initial_connection_window, max_connection_window, incoming_streams, initial_packet_size],
-    connection: "连接参数" => [idle_timeout, keep_alive, path_mtu_discovery, gso, handshake_timeout, udp_mtu],
-    protocol: "协议选项" => [debug, chrome_fingerprint, stateless_reset],
+    congestion: ("Congestion control", "拥塞控制") => [congestion, bbr_profile, upload_bandwidth, download_bandwidth, loss_compensation, cwnd],
+    windows: ("Receive window", "接收窗口") => [initial_stream_window, max_stream_window, initial_connection_window, max_connection_window, incoming_streams, initial_packet_size],
+    connection: ("Connection settings", "连接参数") => [idle_timeout, keep_alive, path_mtu_discovery, gso, handshake_timeout, udp_mtu],
+    protocol: ("Protocol options", "协议选项") => [debug, chrome_fingerprint, stateless_reset],
 });

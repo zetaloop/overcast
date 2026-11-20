@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 pub(crate) mod editor;
 pub(crate) use editor::client_fields;
 
@@ -196,9 +197,10 @@ impl Connection {
                 } else {
                     String::from_utf8(crate::link::decode(&username)?)?
                 };
-                let (username, password) = credentials
-                    .split_once(':')
-                    .ok_or("SOCKS 链接的认证信息格式不正确")?;
+                let (username, password) = credentials.split_once(':').ok_or(tr(
+                    "Invalid credentials in SOCKS URI",
+                    "SOCKS 链接的认证信息格式不正确",
+                ))?;
                 proxy.username = Some(username.to_owned());
                 proxy.password = Some(password.to_owned());
             } else {
@@ -229,7 +231,11 @@ impl Connection {
                     let fields: Vec<_> = headers.split(',').collect();
                     let (pairs, tail) = fields.as_chunks::<2>();
                     if !tail.is_empty() {
-                        return Err("HTTP 请求头需要成对的名称和值".into());
+                        return Err(tr(
+                            "HTTP headers need name and value pairs",
+                            "HTTP 请求头需要成对的名称和值",
+                        )
+                        .into());
                     }
                     for &[key, value] in pairs {
                         http.headers
@@ -248,7 +254,7 @@ impl Connection {
             }
             "socks" | "socks4" | "socks4a" | "socks5" | "socks5+tls" => {
                 if !url.path().is_empty() && url.path() != "/" {
-                    return Err("SOCKS 链接中包含路径".into());
+                    return Err(tr("Unexpected path in SOCKS URI", "SOCKS 链接中包含路径").into());
                 }
                 Self::Socks(Socks {
                     proxy,
@@ -267,9 +273,15 @@ impl Connection {
                     multiplex: None,
                 })
             }
-            protocol => return Err(format!("不支持的连接链接：{protocol}").into()),
+            protocol => {
+                return Err(message!(
+                    "Unsupported URI scheme: {protocol}",
+                    "不支持的连接链接：{protocol}"
+                )
+                .into());
+            }
         };
-        crate::link::remaining(query.keys(), "链接参数")?;
+        crate::link::remaining(query.keys(), tr("URI parameters", "链接参数"))?;
         connection.validate()?;
         Ok(connection)
     }
@@ -350,7 +362,7 @@ impl Connection {
             return self.name().to_owned();
         }
         match self {
-            Self::Direct(_) => "直连".to_owned(),
+            Self::Direct(_) => tr("Direct", "直连").to_owned(),
             Self::Http(value) => format!("HTTP {}", value.proxy.address()),
             Self::Socks(value) => format!("SOCKS {}", value.proxy.address()),
             Self::Vless(value) => format!("VLESS {}", address(&value.server, value.port)),
@@ -396,7 +408,12 @@ impl Connection {
                 Self::Warp(value) => value.controls(store),
             },
             &[("core", &|source, screen, menu, _| {
-                crate::core::choose(source, screen, &format!("{} / 核心", menu.title), store)
+                crate::core::choose(
+                    source,
+                    screen,
+                    &message!("{} / Core", "{} / 核心", menu.title),
+                    store,
+                )
             })],
         )
         .map(|_| ())
@@ -413,8 +430,12 @@ impl Connection {
         if let Some(Transport::XHttp(x)) = self.transport()
             && let Some(tls) = x.download.as_ref().and_then(|v| v.security.tls())
         {
-            tls.materials()
-                .map_err(|error| format!("XHTTP 下载连接：{error}"))?;
+            tls.materials().map_err(|error| {
+                message!(
+                    "XHTTP download connection: {error}",
+                    "XHTTP 下载连接：{error}"
+                )
+            })?;
         }
         let (server, port) = match self {
             Self::Direct(_) => return Ok(()),
@@ -422,19 +443,19 @@ impl Connection {
             Self::Socks(value) => (value.proxy.server.as_str(), value.proxy.port),
             Self::Vless(value) => {
                 if value.uuid.is_empty() {
-                    return Err("请填写 VLESS 用户标识".into());
+                    return Err(tr("Enter a VLESS user ID", "请填写 VLESS 用户标识").into());
                 }
                 (value.server.as_str(), value.port)
             }
             Self::Vmess(value) => {
                 if value.uuid.is_empty() {
-                    return Err("请填写 VMess 用户标识".into());
+                    return Err(tr("Enter a VMess user ID", "请填写 VMess 用户标识").into());
                 }
                 (value.server.as_str(), value.port)
             }
             Self::Trojan(value) => {
                 if value.password.is_empty() {
-                    return Err("请填写 Trojan 密码".into());
+                    return Err(tr("Enter a Trojan password", "请填写 Trojan 密码").into());
                 }
                 (value.server.as_str(), value.port)
             }
@@ -442,7 +463,9 @@ impl Connection {
                 if value.shadowsocks.cipher != crate::shadowsocks::Cipher::None
                     && value.password.is_empty()
                 {
-                    return Err("请填写 Shadowsocks 密码".into());
+                    return Err(
+                        tr("Enter a Shadowsocks password", "请填写 Shadowsocks 密码").into(),
+                    );
                 }
                 value.shadowsocks.cipher.password(&value.password)?;
                 (value.server.as_str(), value.port)
@@ -457,10 +480,14 @@ impl Connection {
             }
             Self::AnyTls(value) => {
                 if value.password.is_empty() {
-                    return Err("请填写 AnyTLS 密码".into());
+                    return Err(tr("Enter an AnyTLS password", "请填写 AnyTLS 密码").into());
                 }
                 if matches!(value.security, Security::None) {
-                    return Err("AnyTLS 连接需要 TLS 或 REALITY 握手".into());
+                    return Err(tr(
+                        "AnyTLS requires TLS or REALITY",
+                        "AnyTLS 连接需要 TLS 或 REALITY 握手",
+                    )
+                    .into());
                 }
                 (value.server.as_str(), value.port)
             }
@@ -470,10 +497,10 @@ impl Connection {
             }
         };
         if server.trim().is_empty() {
-            return Err("连接地址不能为空".into());
+            return Err(tr("Enter a server address", "连接地址不能为空").into());
         }
         if port == 0 {
-            return Err("请填写连接端口".into());
+            return Err(tr("Enter a port", "请填写连接端口").into());
         }
         Ok(())
     }
@@ -490,15 +517,21 @@ pub fn create(screen: &mut Screen, store: &Store) -> Result<Option<Connection>> 
         Item::new("hysteria2", "Hysteria 2".stylized()),
         Item::new("anytls", "AnyTLS".stylized()),
         Item::new("warp", "WARP".stylized()),
-        Item::new("forward", "TCP/UDP 转发".stylized()),
-        Item::new("direct", "直连".stylized()),
-        Item::new("back", "返回".stylized()),
+        Item::new(
+            "forward",
+            tr("TCP/UDP forwarding", "TCP/UDP 转发").stylized(),
+        ),
+        Item::new("direct", tr("Direct", "直连").stylized()),
+        Item::new("back", tr("Back", "返回").stylized()),
     ];
     let menu = Menu {
-        title: "添加连接",
+        title: tr("Add connection", "添加连接"),
         heading: "",
         items: &items,
-        help: "方向键 选择\n回车键 确定\nEsc 返回",
+        help: tr(
+            "Arrow keys to select\nEnter to confirm\nEsc to go back",
+            "方向键 选择\n回车键 确定\nEsc 返回",
+        ),
     };
     let mut selected = 0;
     loop {
@@ -560,13 +593,17 @@ pub(crate) fn ports(text: &str) -> Result<BTreeSet<u16>> {
         let first: u16 = first
             .trim()
             .parse()
-            .map_err(|error| format!("端口格式不正确：{error}"))?;
+            .map_err(|error| message!("Invalid port: {error}", "端口格式不正确：{error}"))?;
         let last: u16 = last
             .trim()
             .parse()
-            .map_err(|error| format!("端口格式不正确：{error}"))?;
+            .map_err(|error| message!("Invalid port: {error}", "端口格式不正确：{error}"))?;
         if first == 0 || last < first {
-            return Err("端口需要在 1～65535 之间，范围按从小到大填写".into());
+            return Err(tr(
+                "Use ports from 1 to 65535 and list ranges in ascending order",
+                "端口需要在 1～65535 之间，范围按从小到大填写",
+            )
+            .into());
         }
         ports.extend(first..=last);
     }
@@ -657,8 +694,8 @@ pub enum PacketEncoding {
 }
 
 choices!(PacketEncoding {
-    Default: "default" => "默认",
-    Packet: "packet" => "原生数据包",
+    Default: "default" => ("Default", "默认"),
+    Packet: "packet" => ("Native packets", "原生数据包"),
     PacketAddr: "packetaddr" => "PacketAddr",
     Xudp: "xudp" => "XUDP",
 });
@@ -745,14 +782,17 @@ pub struct Ech {
 impl Tls {
     pub(crate) fn materials(&self) -> Result<()> {
         if let Some(v) = self.ech.as_ref().and_then(|v| v.config.as_ref()) {
-            v.validate("ECH 公共参数")?;
+            v.validate(tr("ECH public configuration", "ECH 公共参数"))?;
         }
         for cert in &self.certificates {
-            cert.validate("信任证书")?;
+            cert.validate(tr("Trusted certificates", "信任证书"))?;
         }
         for (name, material) in [
-            ("客户端证书", &self.client_certificate),
-            ("客户端私钥", &self.client_key),
+            (
+                tr("Client certificate", "客户端证书"),
+                &self.client_certificate,
+            ),
+            (tr("Client private key", "客户端私钥"), &self.client_key),
         ] {
             if let Some(v) = material {
                 v.validate(name)?;
@@ -778,8 +818,8 @@ impl Default for FastOpen {
 impl Value for FastOpen {
     fn alternatives() -> Vec<(&'static str, &'static str, Self)> {
         vec![
-            ("on", "开启", Self::Enabled(true)),
-            ("off", "关闭", Self::Enabled(false)),
+            ("on", tr("On", "开启"), Self::Enabled(true)),
+            ("off", tr("Off", "关闭"), Self::Enabled(false)),
         ]
     }
 
@@ -793,10 +833,10 @@ impl Value for FastOpen {
     fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let mut items = [
-            Item::new("on", "开启".stylized()),
-            Item::new("off", "关闭".stylized()),
-            Item::new("queue", "队列长度".stylized()),
-            Item::new("back", "返回".stylized()),
+            Item::new("on", tr("On", "开启").stylized()),
+            Item::new("off", tr("Off", "关闭").stylized()),
+            Item::new("queue", tr("Queue length", "队列长度").stylized()),
+            Item::new("back", tr("Back", "返回").stylized()),
         ];
         let queue = match self {
             Self::Queue(value) => *value,
@@ -807,7 +847,10 @@ impl Value for FastOpen {
             title: &title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 确定\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to confirm\nEsc to go back",
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            ),
         };
         let mut selected = match self {
             Self::Enabled(true) => 0,
@@ -825,9 +868,12 @@ impl Value for FastOpen {
                     2 => {
                         if let Some(value) =
                             screen.input(&menu, selected, &queue.to_string(), |value, _| {
-                                let value = value
-                                    .parse()
-                                    .map_err(|error| format!("队列长度格式不正确：{error}"))?;
+                                let value = value.parse().map_err(|error| {
+                                    message!(
+                                        "Invalid queue length: {error}",
+                                        "队列长度格式不正确：{error}"
+                                    )
+                                })?;
                                 Ok(value)
                             })?
                         {
@@ -914,7 +960,7 @@ pub struct SocketOption {
 }
 
 choices!(Core {
-    Auto: "auto" => "自动",
+    Auto: "auto" => ("Automatic", "自动"),
     Xray: "xray" => "Xray",
     SingBox: "sing-box" => "sing-box",
     Mihomo: "mihomo" => "Mihomo",
@@ -927,35 +973,45 @@ choices!(SocksVersion {
 });
 
 choices!(HttpVersion {
-    Auto: "auto" => "自动",
+    Auto: "auto" => ("Automatic", "自动"),
     Http1: "http1" => "HTTP/1.1",
     Http2: "http2" => "HTTP/2",
     Http3: "http3" => "HTTP/3",
 });
 
 choices!(AddressStrategy {
-    AsIs: "as-is" => "按需解析",
-    Resolve: "resolve" => "解析为 IP",
-    Ipv4Only: "ipv4-only" => "仅 IPv4",
-    Ipv6Only: "ipv6-only" => "仅 IPv6",
-    PreferIpv4: "prefer-ipv4" => "优先 IPv4",
-    PreferIpv6: "prefer-ipv6" => "优先 IPv6",
-    TryIp: "try-ip" => "尝试解析为 IP",
-    TryIpv4: "try-ipv4" => "尝试 IPv4",
-    TryIpv6: "try-ipv6" => "尝试 IPv6",
-    TryIpv4Ipv6: "try-ipv4-ipv6" => "依次尝试 IPv4、IPv6",
-    TryIpv6Ipv4: "try-ipv6-ipv4" => "依次尝试 IPv6、IPv4",
+    AsIs: "as-is" => ("Resolve when needed", "按需解析"),
+    Resolve: "resolve" => ("Resolve to IP", "解析为 IP"),
+    Ipv4Only: "ipv4-only" => ("IPv4 only", "仅 IPv4"),
+    Ipv6Only: "ipv6-only" => ("IPv6 only", "仅 IPv6"),
+    PreferIpv4: "prefer-ipv4" => ("Prefer IPv4", "优先 IPv4"),
+    PreferIpv6: "prefer-ipv6" => ("Prefer IPv6", "优先 IPv6"),
+    TryIp: "try-ip" => ("Try IP resolution", "尝试解析为 IP"),
+    TryIpv4: "try-ipv4" => ("Try IPv4", "尝试 IPv4"),
+    TryIpv6: "try-ipv6" => ("Try IPv6", "尝试 IPv6"),
+    TryIpv4Ipv6: "try-ipv4-ipv6" => ("Try IPv4, then IPv6", "依次尝试 IPv4、IPv6"),
+    TryIpv6Ipv4: "try-ipv6-ipv4" => ("Try IPv6, then IPv4", "依次尝试 IPv6、IPv4"),
 });
 
 impl Proxy {
     fn fields(&mut self, d: Self) -> form::Fields<'_> {
         vec![
-            form::field("name", "名称", &mut self.name, d.name),
-            form::field("server", "地址", &mut self.server, d.server),
-            form::field("port", "端口", &mut self.port, d.port),
-            form::field("username", "用户名", &mut self.username, d.username),
-            form::field("password", "密码", &mut self.password, d.password),
-            form::field("core", "核心", &mut self.core, d.core),
+            form::field("name", tr("Name", "名称"), &mut self.name, d.name),
+            form::field("server", tr("Address", "地址"), &mut self.server, d.server),
+            form::field("port", tr("Port", "端口"), &mut self.port, d.port),
+            form::field(
+                "username",
+                tr("Username", "用户名"),
+                &mut self.username,
+                d.username,
+            ),
+            form::field(
+                "password",
+                tr("Password", "密码"),
+                &mut self.password,
+                d.password,
+            ),
+            form::field("core", tr("Core", "核心"), &mut self.core, d.core),
         ]
     }
 }
@@ -964,11 +1020,11 @@ client_fields!(
     Http,
     Http {
         proxy: ..,
-        security: "加密",
+        security: ("Encryption", "加密"),
         http: "HTTP",
-        transport: "传输",
-        multiplex: "多路复用",
-        network: "网络",
+        transport: ("Transport", "传输"),
+        multiplex: ("Multiplexing", "多路复用"),
+        network: ("Network", "网络"),
     }
 );
 
@@ -976,137 +1032,137 @@ client_fields!(
     Socks,
     Socks {
         proxy: ..,
-        security: "加密",
+        security: ("Encryption", "加密"),
         socks: "SOCKS",
-        transport: "传输",
-        multiplex: "多路复用",
-        network: "网络",
+        transport: ("Transport", "传输"),
+        multiplex: ("Multiplexing", "多路复用"),
+        network: ("Network", "网络"),
     }
 );
 
 client_fields!(
     Direct,
     Direct {
-        name: "名称",
-        core: "核心",
-        network: "网络",
+        name: ("Name", "名称"),
+        core: ("Core", "核心"),
+        network: ("Network", "网络"),
     }
 );
 
 fields!(SocksOptions {
-    version: "版本",
+    version: ("Version", "版本"),
     tcp: "TCP",
     udp: "UDP",
     udp_over_tcp: "UDP over TCP",
-    user_level: "用户等级",
-    user_label: "用户标识",
+    user_level: ("User level", "用户等级"),
+    user_label: ("User ID", "用户标识"),
 });
 
 fields!(HttpOptions {
-    version: "版本",
-    fixed_version: "固定版本",
-    path: "路径",
-    headers: "请求头",
-    idle_timeout: "空闲超时",
-    keep_alive: "保活间隔",
-    stream_receive_window: "流接收窗口",
-    connection_receive_window: "连接接收窗口",
-    max_concurrent_streams: "并发流数",
-    initial_packet_size: "初始数据包大小",
-    disable_path_mtu_discovery: "关闭路径 MTU 探测",
-    user_level: "用户等级",
-    user_label: "用户标识",
+    version: ("Version", "版本"),
+    fixed_version: ("Require selected version", "固定版本"),
+    path: ("Path", "路径"),
+    headers: ("Request headers", "请求头"),
+    idle_timeout: ("Idle timeout", "空闲超时"),
+    keep_alive: ("Keepalive interval", "保活间隔"),
+    stream_receive_window: ("Stream receive window", "流接收窗口"),
+    connection_receive_window: ("Connection receive window", "连接接收窗口"),
+    max_concurrent_streams: ("Concurrent streams", "并发流数"),
+    initial_packet_size: ("Initial packet size", "初始数据包大小"),
+    disable_path_mtu_discovery: ("Disable path MTU discovery", "关闭路径 MTU 探测"),
+    user_level: ("User level", "用户等级"),
+    user_label: ("User ID", "用户标识"),
 });
 
 fields!(Tls {
-    server_name: "服务名",
-    send_sni: "发送 SNI",
-    verify_certificate: "验证证书",
-    verify_names: "证书名称",
+    server_name: ("Server name", "服务名"),
+    send_sni: ("Send SNI", "发送 SNI"),
+    verify_certificate: ("Verify certificate", "验证证书"),
+    verify_names: ("Certificate names", "证书名称"),
     alpn: "ALPN",
-    min_version: "最低版本",
-    max_version: "最高版本",
-    cipher_suites: "密码套件",
-    curves: "曲线",
-    fingerprint: "指纹",
-    engine: "实现",
-    system_roots: "系统证书",
-    certificates: "信任证书",
-    certificate_sha256: "证书 SHA-256",
-    public_key_sha256: "公钥 SHA-256",
-    client_certificate: "客户端证书",
-    client_key: "客户端私钥",
-    handshake_timeout: "握手超时",
-    session_resumption: "会话复用",
-    kernel_tx: "内核发送",
-    kernel_rx: "内核接收",
-    fragment: "握手分片",
-    fragment_delay: "分片延迟",
-    record_fragment: "记录分片",
-    spoof: "伪装内容",
-    spoof_method: "伪装方式",
-    key_log: "密钥日志文件",
+    min_version: ("Minimum version", "最低版本"),
+    max_version: ("Maximum version", "最高版本"),
+    cipher_suites: ("Cipher suites", "密码套件"),
+    curves: ("Curves", "曲线"),
+    fingerprint: ("Fingerprint", "指纹"),
+    engine: ("Implementation", "实现"),
+    system_roots: ("System certificates", "系统证书"),
+    certificates: ("Trusted certificates", "信任证书"),
+    certificate_sha256: ("Certificate SHA-256", "证书 SHA-256"),
+    public_key_sha256: ("Public key SHA-256", "公钥 SHA-256"),
+    client_certificate: ("Client certificate", "客户端证书"),
+    client_key: ("Client private key", "客户端私钥"),
+    handshake_timeout: ("Handshake timeout", "握手超时"),
+    session_resumption: ("Session resumption", "会话复用"),
+    kernel_tx: ("Kernel TLS transmit", "内核发送"),
+    kernel_rx: ("Kernel TLS receive", "内核接收"),
+    fragment: ("Handshake fragmentation", "握手分片"),
+    fragment_delay: ("Fragment delay", "分片延迟"),
+    record_fragment: ("Record fragmentation", "记录分片"),
+    spoof: ("Spoofed payload", "伪装内容"),
+    spoof_method: ("Spoofing method", "伪装方式"),
+    key_log: ("Key log file", "密钥日志文件"),
     ech: "ECH",
 } groups {
-    certificates: "证书" => [verify_names, system_roots, certificates, certificate_sha256, public_key_sha256, client_certificate, client_key],
-    protocol: "版本与密码" => [min_version, max_version, cipher_suites, curves, fingerprint, engine],
-    handshake: "握手" => [handshake_timeout, session_resumption, kernel_tx, kernel_rx, fragment, fragment_delay, record_fragment, spoof, spoof_method, key_log],
+    certificates: ("Certificates", "证书") => [verify_names, system_roots, certificates, certificate_sha256, public_key_sha256, client_certificate, client_key],
+    protocol: ("Versions and ciphers", "版本与密码") => [min_version, max_version, cipher_suites, curves, fingerprint, engine],
+    handshake: ("Handshake", "握手") => [handshake_timeout, session_resumption, kernel_tx, kernel_rx, fragment, fragment_delay, record_fragment, spoof, spoof_method, key_log],
 });
 
 fields!(Ech {
-    config: "ECH 公共参数",
-    query_name: "查询名称",
+    config: ("ECH public configuration", "ECH 公共参数"),
+    query_name: ("Query name", "查询名称"),
 });
 
 fields!(Network {
-    interface: "接口",
-    source_ipv4: "源 IPv4",
-    source_ipv6: "源 IPv6",
-    bind_address_no_port: "延后分配端口",
-    reuse_address: "复用地址",
-    routing_mark: "路由标记",
-    namespace: "网络命名空间",
-    protect_path: "保护套接字",
-    connect_timeout: "连接超时",
-    address_strategy: "地址策略",
-    address_port_strategy: "地址端口策略",
-    ipv6_only: "仅 IPv6",
-    tcp_fast_open: "TCP 快速打开",
-    tcp_multi_path: "多路径 TCP",
-    tcp_keep_alive: "TCP 保活",
-    tcp_keep_alive_idle: "TCP 保活起始时间",
-    tcp_keep_alive_interval: "TCP 保活间隔",
-    tcp_congestion: "TCP 拥塞算法",
-    tcp_window: "TCP 接收窗口",
-    tcp_max_segment: "TCP 最大分段",
-    tcp_user_timeout: "TCP 用户超时",
-    udp_fragment: "UDP 分片",
-    happy_eyeballs: "双栈连接",
-    network_strategy: "接口策略",
-    network_types: "接口类型",
-    fallback_network_types: "备用接口类型",
-    fallback_delay: "备用连接延迟",
-    socket_options: "自定义套接字选项",
+    interface: ("Interface", "接口"),
+    source_ipv4: ("Source IPv4", "源 IPv4"),
+    source_ipv6: ("Source IPv6", "源 IPv6"),
+    bind_address_no_port: ("Defer port allocation", "延后分配端口"),
+    reuse_address: ("Reuse address", "复用地址"),
+    routing_mark: ("Routing mark", "路由标记"),
+    namespace: ("Network namespace", "网络命名空间"),
+    protect_path: ("Protect socket", "保护套接字"),
+    connect_timeout: ("Connection timeout", "连接超时"),
+    address_strategy: ("Address strategy", "地址策略"),
+    address_port_strategy: ("Address and port strategy", "地址端口策略"),
+    ipv6_only: ("IPv6 only", "仅 IPv6"),
+    tcp_fast_open: ("TCP Fast Open", "TCP 快速打开"),
+    tcp_multi_path: ("Multipath TCP", "多路径 TCP"),
+    tcp_keep_alive: ("TCP keepalive", "TCP 保活"),
+    tcp_keep_alive_idle: ("TCP keepalive idle time", "TCP 保活起始时间"),
+    tcp_keep_alive_interval: ("TCP keepalive interval", "TCP 保活间隔"),
+    tcp_congestion: ("TCP congestion control", "TCP 拥塞算法"),
+    tcp_window: ("TCP receive window", "TCP 接收窗口"),
+    tcp_max_segment: ("TCP maximum segment size", "TCP 最大分段"),
+    tcp_user_timeout: ("TCP user timeout", "TCP 用户超时"),
+    udp_fragment: ("UDP fragmentation", "UDP 分片"),
+    happy_eyeballs: ("Dual-stack connections", "双栈连接"),
+    network_strategy: ("Interface strategy", "接口策略"),
+    network_types: ("Interface types", "接口类型"),
+    fallback_network_types: ("Fallback interface types", "备用接口类型"),
+    fallback_delay: ("Fallback delay", "备用连接延迟"),
+    socket_options: ("Custom socket options", "自定义套接字选项"),
 } groups {
-    binding: "绑定与路由" => [bind_address_no_port, reuse_address, routing_mark, namespace, protect_path, network_strategy, network_types, fallback_network_types, fallback_delay, socket_options],
+    binding: ("Binding and routing", "绑定与路由") => [bind_address_no_port, reuse_address, routing_mark, namespace, protect_path, network_strategy, network_types, fallback_network_types, fallback_delay, socket_options],
     tcp: "TCP" => [tcp_fast_open, tcp_multi_path, tcp_keep_alive, tcp_keep_alive_idle, tcp_keep_alive_interval, tcp_congestion, tcp_window, tcp_max_segment, tcp_user_timeout],
-    address: "地址选择" => [connect_timeout, address_port_strategy, ipv6_only, happy_eyeballs],
+    address: ("Address selection", "地址选择") => [connect_timeout, address_port_strategy, ipv6_only, happy_eyeballs],
 });
 
 fields!(HappyEyeballs {
-    prefer_ipv6: "优先 IPv6",
-    delay: "尝试间隔",
-    interleave: "交错数量",
-    concurrency: "并发尝试数",
+    prefer_ipv6: ("Prefer IPv6", "优先 IPv6"),
+    delay: ("Attempt interval", "尝试间隔"),
+    interleave: ("Interleave count", "交错数量"),
+    concurrency: ("Concurrent attempts", "并发尝试数"),
 });
 
 fields!(SocketOption {
-    system: "系统",
-    network: "网络",
-    level: "级别",
-    option: "选项",
-    value: "值",
-    kind: "类型",
+    system: ("System", "系统"),
+    network: ("Network", "网络"),
+    level: ("Level", "级别"),
+    option: ("Option", "选项"),
+    value: ("Value", "值"),
+    kind: ("Type", "类型"),
 });
 
 pub type Security = crate::security::Security<Tls, crate::reality::Client>;

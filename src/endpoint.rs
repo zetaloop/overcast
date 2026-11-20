@@ -1,3 +1,4 @@
+use crate::language::text as tr;
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
 use uuid::Uuid;
@@ -49,16 +50,19 @@ impl Value for Endpoint {
         let mut notice = String::new();
         loop {
             let items = vec![
-                Item::new("block", "黑洞".stylized()),
-                Item::new("address", "地址".stylized()),
-                Item::new("inbound", "入口".stylized()),
-                Item::new("back", "返回".stylized()),
+                Item::new("block", tr("Blackhole", "黑洞").stylized()),
+                Item::new("address", tr("Address", "地址").stylized()),
+                Item::new("inbound", tr("Inbound", "入口").stylized()),
+                Item::new("back", tr("Back", "返回").stylized()),
             ];
             let menu = Menu {
                 title: &title,
                 heading: "",
                 items: &items,
-                help: "方向键 选择\n回车键 编辑\nEsc 返回",
+                help: tr(
+                    "Arrow keys to select\nEnter to edit\nEsc to go back",
+                    "方向键 选择\n回车键 编辑\nEsc 返回",
+                ),
             };
             let result = match screen.select(&menu, &mut selected, &notice)? {
                 Action::Back => return Ok(false),

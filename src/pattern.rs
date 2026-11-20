@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::fmt::Write;
 
 use icu_properties::{
@@ -20,7 +21,11 @@ pub fn parse(text: &str) -> Result<Hir> {
                 regex_syntax::Error::Translate(error) => error.kind().to_string(),
                 _ => error.to_string(),
             };
-            format!("正则表达式格式不正确：{message}").into()
+            message!(
+                "Invalid regular expression: {message}",
+                "正则表达式格式不正确：{message}"
+            )
+            .into()
         })
 }
 
@@ -41,7 +46,11 @@ impl Normalizer<'_> {
             };
             if let Some(repetition) = repetition {
                 if repeated {
-                    return Err("正则表达式中有连续的重复符".into());
+                    return Err(tr(
+                        "Consecutive repetition operators in regular expression",
+                        "正则表达式中有连续的重复符",
+                    )
+                    .into());
                 }
                 output.push_str(&repetition);
                 if self.take("?") {
@@ -127,7 +136,11 @@ impl Normalizer<'_> {
             low
         };
         if high < low {
-            return Err("正则表达式的字符范围需要按从小到大填写".into());
+            return Err(tr(
+                "Character ranges must be in ascending order",
+                "正则表达式的字符范围需要按从小到大填写",
+            )
+            .into());
         }
         output.push_str(&range(low, high));
         Ok(())
@@ -151,10 +164,10 @@ impl Normalizer<'_> {
     fn unicode(&mut self) -> Result<String> {
         let mut negative = self.next()? == 'P';
         let name = if self.take("{") {
-            let (name, rest) = self
-                .text
-                .split_once('}')
-                .ok_or("Unicode 字符类缺少右花括号")?;
+            let (name, rest) = self.text.split_once('}').ok_or(tr(
+                "Missing closing brace in Unicode character class",
+                "Unicode 字符类缺少右花括号",
+            ))?;
             self.text = rest;
             name.to_owned()
         } else {
@@ -173,7 +186,11 @@ impl Normalizer<'_> {
             "assigned" => "Assigned".to_owned(),
             _ => {
                 if name.chars().any(|c| c.is_ascii_whitespace() && c != ' ') {
-                    return Err(format!("找不到 Unicode 字符类：{name}").into());
+                    return Err(message!(
+                        "Unknown Unicode character class: {name}",
+                        "找不到 Unicode 字符类：{name}"
+                    )
+                    .into());
                 }
                 if PropertyParser::<GeneralCategoryGroup>::new()
                     .get_loose(name)
@@ -191,7 +208,11 @@ impl Normalizer<'_> {
                 {
                     format!("sc={long}")
                 } else {
-                    return Err(format!("找不到 Unicode 字符类：{name}").into());
+                    return Err(message!(
+                        "Unknown Unicode character class: {name}",
+                        "找不到 Unicode 字符类：{name}"
+                    )
+                    .into());
                 }
             }
         };
@@ -209,9 +230,13 @@ impl Normalizer<'_> {
             let (name, rest) = self
                 .text
                 .split_once('>')
-                .ok_or("正则表达式的命名组缺少 >")?;
+                .ok_or(tr("Missing > in named group", "正则表达式的命名组缺少 >"))?;
             if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                return Err(format!("正则表达式的分组名称不正确：{name}").into());
+                return Err(message!(
+                    "Invalid group name: {name}",
+                    "正则表达式的分组名称不正确：{name}"
+                )
+                .into());
             }
             self.text = rest;
             return Ok("(?:".to_owned());
@@ -251,7 +276,13 @@ impl Normalizer<'_> {
                         format!("(?{set}{character}")
                     });
                 }
-                _ => return Err(format!("正则表达式不支持分组选项：{character}").into()),
+                _ => {
+                    return Err(message!(
+                        "Unsupported group option: {character}",
+                        "正则表达式不支持分组选项：{character}"
+                    )
+                    .into());
+                }
             }
         }
     }
@@ -273,24 +304,32 @@ impl Normalizer<'_> {
                     .take_while(|c| matches!(c, '0'..='7'))
                     .collect();
                 if character != '0' && digits.is_empty() {
-                    return Err("正则表达式不支持反向引用".into());
+                    return Err(tr(
+                        "Backreferences are not supported",
+                        "正则表达式不支持反向引用",
+                    )
+                    .into());
                 }
                 self.text = &self.text[digits.len()..];
                 u32::from_str_radix(&format!("{character}{digits}"), 8)?
             }
             'x' => {
                 let digits = if self.take("{") {
-                    let (digits, rest) = self
-                        .text
-                        .split_once('}')
-                        .ok_or("十六进制转义缺少右花括号")?;
+                    let (digits, rest) = self.text.split_once('}').ok_or(tr(
+                        "Missing closing brace in hexadecimal escape",
+                        "十六进制转义缺少右花括号",
+                    ))?;
                     self.text = rest;
                     digits.to_owned()
                 } else {
                     format!("{}{}", self.next()?, self.next()?)
                 };
                 if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return Err("正则表达式的十六进制转义不正确".into());
+                    return Err(tr(
+                        "Invalid hexadecimal escape",
+                        "正则表达式的十六进制转义不正确",
+                    )
+                    .into());
                 }
                 let digits = digits.trim_start_matches('0');
                 let rune = if digits.is_empty() {
@@ -299,12 +338,22 @@ impl Normalizer<'_> {
                     u32::from_str_radix(digits, 16)?
                 };
                 if rune > char::MAX as u32 {
-                    return Err("正则表达式的字符超出 Unicode 范围".into());
+                    return Err(tr(
+                        "Character outside the Unicode range",
+                        "正则表达式的字符超出 Unicode 范围",
+                    )
+                    .into());
                 }
                 rune
             }
             c if c.is_ascii() && !c.is_ascii_alphanumeric() => c as u32,
-            _ => return Err(format!("正则表达式不支持转义：\\{character}").into()),
+            _ => {
+                return Err(message!(
+                    "Unsupported escape: \\{character}",
+                    "正则表达式不支持转义：\\{character}"
+                )
+                .into());
+            }
         })
     }
 
@@ -333,7 +382,11 @@ impl Normalizer<'_> {
     }
 
     fn next(&mut self) -> Result<char> {
-        let character = self.text.chars().next().ok_or("正则表达式不完整")?;
+        let character = self
+            .text
+            .chars()
+            .next()
+            .ok_or(tr("Incomplete regular expression", "正则表达式不完整"))?;
         self.text = &self.text[character.len_utf8()..];
         Ok(character)
     }

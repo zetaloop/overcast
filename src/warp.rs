@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
@@ -146,40 +147,59 @@ pub struct Registration {
 
 impl Registration {
     pub fn public_key(&self) -> Result<String> {
-        let key = SubjectPublicKeyInfoOwned::from_pem(&self.endpoint_pub_key)
-            .map_err(|error| format!("WARP 对端公钥格式不正确：{error}"))?;
+        let key = SubjectPublicKeyInfoOwned::from_pem(&self.endpoint_pub_key).map_err(|error| {
+            message!(
+                "Invalid WARP peer public key: {error}",
+                "WARP 对端公钥格式不正确：{error}"
+            )
+        })?;
         Ok(STANDARD.encode(key.to_der()?))
     }
 
     pub fn addresses(&self) -> Result<Vec<String>> {
         let mut addresses = Vec::new();
         if !self.ipv4.is_empty() {
-            let address = self
-                .ipv4
-                .parse::<Ipv4Addr>()
-                .map_err(|error| format!("WARP IPv4 地址格式不正确：{error}"))?;
+            let address = self.ipv4.parse::<Ipv4Addr>().map_err(|error| {
+                message!(
+                    "Invalid WARP IPv4 address: {error}",
+                    "WARP IPv4 地址格式不正确：{error}"
+                )
+            })?;
             addresses.push(format!("{address}/32"));
         }
         if !self.ipv6.is_empty() {
-            let address = self
-                .ipv6
-                .parse::<Ipv6Addr>()
-                .map_err(|error| format!("WARP IPv6 地址格式不正确：{error}"))?;
+            let address = self.ipv6.parse::<Ipv6Addr>().map_err(|error| {
+                message!(
+                    "Invalid WARP IPv6 address: {error}",
+                    "WARP IPv6 地址格式不正确：{error}"
+                )
+            })?;
             addresses.push(format!("{address}/128"));
         }
         if addresses.is_empty() {
-            return Err("WARP 资料缺少分配地址".into());
+            return Err(tr(
+                "No assigned address in WARP registration",
+                "WARP 资料缺少分配地址",
+            )
+            .into());
         }
         Ok(addresses)
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.private_key.is_empty() {
-            return Err("请注册或导入 WARP 资料".into());
+            return Err(tr(
+                "Register or import WARP credentials",
+                "请注册或导入 WARP 资料",
+            )
+            .into());
         }
-        STANDARD
-            .decode(&self.private_key)
-            .map_err(|error| format!("WARP 私钥格式不正确：{error}"))?;
+        STANDARD.decode(&self.private_key).map_err(|error| {
+            message!(
+                "Invalid WARP private key: {error}",
+                "WARP 私钥格式不正确：{error}"
+            )
+        })?;
         self.public_key()?;
         self.addresses()?;
         Ok(())
@@ -211,7 +231,7 @@ fn register(store: &Store, progress: &Progress) -> Result<Registration> {
         .join(Uuid::new_v4().to_string());
     store.create_dir(&directory)?;
     let file = directory.join("config.json");
-    let step = progress.activity("登记 WARP");
+    let step = progress.activity(tr("Registering with WARP", "登记 WARP"));
     let output = Command::new(program)
         .arg("--config")
         .arg(&file)
@@ -219,10 +239,11 @@ fn register(store: &Store, progress: &Progress) -> Result<Registration> {
         .output()?;
     if file.try_exists()? {
         OpenOptions::new().write(true).open(&file)?.sync_all()?;
-        progress.record("登记资料", &file.to_string_lossy());
+        progress.record(tr("Registration", "登记资料"), &file.to_string_lossy());
     }
     if !output.status.success() {
-        return Err(format!(
+        return Err(message!(
+            "WARP registration failed: {}{}",
             "WARP 登记失败：{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
@@ -239,9 +260,9 @@ fn register(store: &Store, progress: &Progress) -> Result<Registration> {
 impl form::Value for Registration {
     fn text(&self) -> String {
         if self.private_key.is_empty() {
-            "未配置".to_owned()
+            tr("Not configured", "未配置").to_owned()
         } else if self.id.is_empty() {
-            "已配置".to_owned()
+            tr("Configured", "已配置").to_owned()
         } else {
             self.id.clone()
         }
@@ -250,18 +271,24 @@ impl form::Value for Registration {
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool> {
         let title = format!("{} / {}", menu.title, menu.items[selected].label.content);
         let mut items = vec![
-            Item::new("register", "注册 WARP".stylized()),
-            Item::new("import", "导入资料".stylized()),
+            Item::new("register", tr("Register with WARP", "注册 WARP").stylized()),
+            Item::new("import", tr("Import registration", "导入资料").stylized()),
         ];
         if !self.private_key.is_empty() {
-            items.push(Item::new("copy", "复制资料".stylized()));
+            items.push(Item::new(
+                "copy",
+                tr("Copy registration", "复制资料").stylized(),
+            ));
         }
-        items.push(Item::new("back", "返回".stylized()));
+        items.push(Item::new("back", tr("Back", "返回").stylized()));
         let menu = Menu {
             title: &title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 确定\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to confirm\nEsc to go back",
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            ),
         };
         let mut selected = 0;
         loop {
@@ -270,8 +297,11 @@ impl form::Value for Registration {
                 Action::Select => match items[selected].key.as_str() {
                     "register" => {
                         let store = Store::open(None)?;
-                        let edited = screen
-                            .work("注册 WARP", "", |progress| register(&store, progress))?;
+                        let edited = screen.work(
+                            tr("Register with WARP", "注册 WARP"),
+                            "",
+                            |progress| register(&store, progress),
+                        )?;
                         *self = edited;
                         return Ok(true);
                     }
@@ -282,8 +312,13 @@ impl form::Value for Registration {
                             serde_json::to_string_pretty(self)?
                         };
                         let edited = screen.input(&menu, selected, &current, |text, _| {
-                            let registration: Registration = serde_json::from_str(text)
-                                .map_err(|error| format!("WARP 资料格式不正确：{error}"))?;
+                            let registration: Registration =
+                                serde_json::from_str(text).map_err(|error| {
+                                    message!(
+                                        "Invalid WARP registration: {error}",
+                                        "WARP 资料格式不正确：{error}"
+                                    )
+                                })?;
                             registration.validate()?;
                             Ok(registration)
                         })?;
@@ -304,37 +339,37 @@ impl form::Value for Registration {
 crate::connection::client_fields!(
     Warp,
     Client {
-        name: "名称",
-        registration: "登记资料",
-        server: "地址",
-        port: "端口",
-        core: "核心",
+        name: ("Name", "名称"),
+        registration: ("Registration", "登记资料"),
+        server: ("Address", "地址"),
+        port: ("Port", "端口"),
+        core: ("Core", "核心"),
         warp: "MASQUE",
-        network: "网络",
+        network: ("Network", "网络"),
     }
 );
 
 fields!(ClientOptions {
-    mode: "承载",
+    mode: ("Carrier", "承载"),
     tcp: "TCP",
     udp: "UDP",
-    server_name: "服务器名称",
-    verify_certificate: "验证对端公钥",
-    fingerprint: "TLS 指纹",
-    host: "HTTP 主机名",
-    path: "HTTP 路径",
-    headers: "请求头",
+    server_name: ("Server name", "服务器名称"),
+    verify_certificate: ("Verify peer public key", "验证对端公钥"),
+    fingerprint: ("TLS fingerprint", "TLS 指纹"),
+    host: ("HTTP host", "HTTP 主机名"),
+    path: ("HTTP path", "HTTP 路径"),
+    headers: ("Request headers", "请求头"),
     mtu: "MTU",
-    handshake_timeout: "握手超时",
-    keep_alive: "保活间隔",
-    remote_dns: "远端 DNS",
+    handshake_timeout: ("Handshake timeout", "握手超时"),
+    keep_alive: ("Keepalive interval", "保活间隔"),
+    remote_dns: ("Remote DNS", "远端 DNS"),
     quic: "QUIC",
-    stack: "IP 协议栈",
+    stack: ("IP stack", "IP 协议栈"),
 });
 
 fields!(Stack {
-    mode: "实现",
-    congestion: "TCP 拥塞控制",
+    mode: ("Implementation", "实现"),
+    congestion: ("TCP congestion control", "TCP 拥塞控制"),
 });
 
 choices!(Mode {
@@ -343,7 +378,7 @@ choices!(Mode {
 });
 
 choices!(StackMode {
-    Auto: "auto" => "自动",
+    Auto: "auto" => ("Automatic", "自动"),
     Mips: "mips" => "MIPS",
     Gvisor: "gvisor" => "gVisor",
 });

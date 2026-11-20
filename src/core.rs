@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::{fs, path::Path};
 
 use crate::{
@@ -86,19 +87,31 @@ impl Changes<'_> {
             && !core.ech_file(false)
             && let Some(material) = tls.ech.as_mut().and_then(|v| v.config.as_mut())
         {
-            self.inline(&format!("{prefix}ECH 公共参数"), material);
+            self.inline(
+                &message!("{prefix}ECH public configuration", "{prefix}ECH 公共参数"),
+                material,
+            );
         }
         if core.inline_trust(false, &tls.certificates) {
             for material in &mut tls.certificates {
-                self.inline(&format!("{prefix}信任证书"), material);
+                self.inline(
+                    &message!("{prefix}trusted certificates", "{prefix}信任证书"),
+                    material,
+                );
             }
         }
         if core.paired_identity()
             && let (Some(cert), Some(key)) = (&mut tls.client_certificate, &mut tls.client_key)
             && cert.inline().is_some() != key.inline().is_some()
         {
-            self.inline(&format!("{prefix}客户端证书"), cert);
-            self.inline(&format!("{prefix}客户端私钥"), key);
+            self.inline(
+                &message!("{prefix}client certificate", "{prefix}客户端证书"),
+                cert,
+            );
+            self.inline(
+                &message!("{prefix}client private key", "{prefix}客户端私钥"),
+                key,
+            );
         }
     }
 
@@ -109,17 +122,22 @@ impl Changes<'_> {
             } else {
                 ""
             };
-            self.lines.push(format!(
-                "{}{space}{name}",
-                if new { "开启" } else { "关闭" }
-            ));
+            self.lines.push(if new {
+                message!("Enable {name}", "开启{space}{name}")
+            } else {
+                message!("Disable {name}", "关闭{space}{name}")
+            });
         }
     }
 
     pub fn mode<T: Value>(&mut self, name: &str, old: &T, new: &T) {
         if old.text() != new.text() {
-            self.lines
-                .push(format!("{name}从 {} 改为 {}", old.text(), new.text()));
+            self.lines.push(message!(
+                "Change {name} from {} to {}",
+                "{name}从 {} 改为 {}",
+                old.text(),
+                new.text()
+            ));
         }
     }
 
@@ -140,15 +158,18 @@ impl Changes<'_> {
                 if let (Some(a), Some(b)) = (a.as_bool(), b.as_bool()) {
                     self.flag(&name, a, b);
                 } else if b.is_null() || b.as_array().is_some_and(Vec::is_empty) {
-                    self.lines.push(format!("清除{name}"));
+                    self.lines.push(message!("Clear {name}", "清除{name}"));
                 } else if a.is_null() || a.as_array().is_some_and(Vec::is_empty) {
-                    self.lines.push(format!("恢复{name}"));
+                    self.lines.push(message!("Restore {name}", "恢复{name}"));
                 } else if defaults.get(key) == Some(b) {
-                    self.lines.push(format!("{name}恢复默认"));
+                    self.lines
+                        .push(message!("Reset {name} to default", "{name}恢复默认"));
                 } else if a.is_object() || b.is_object() {
-                    self.lines.push(format!("恢复{name}设置"));
+                    self.lines
+                        .push(message!("Restore {name} settings", "恢复{name}设置"));
                 } else {
-                    self.lines.push(format!("{name}改为{}", item.value));
+                    self.lines
+                        .push(message!("Set {name} to {}", "{name}改为{}", item.value));
                 }
             }
         }
@@ -158,14 +179,17 @@ impl Changes<'_> {
         if let (Transport::Grpc(a), Transport::Grpc(b)) = (old, new) {
             self.fields("gRPC ", a, b);
         } else {
-            self.mode("传输", old, new);
+            self.mode(tr("Transport", "传输"), old, new);
         }
     }
 
     pub fn inline(&mut self, name: &str, value: &mut Material) {
         let Material::File(file) = value else { return };
         let Some(directory) = self.directory else {
-            let text = format!("{name}从文件路径改为正文");
+            let text = message!(
+                "Use inline {name} instead of a file",
+                "{name}从文件路径改为正文"
+            );
             if !self.lines.contains(&text) {
                 self.lines.push(text);
             }
@@ -175,8 +199,11 @@ impl Changes<'_> {
         *value = Material::Inline(match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) => {
-                self.errors
-                    .push(format!("无法读取 {}：{error}", path.display()));
+                self.errors.push(message!(
+                    "Could not read {}: {error}",
+                    "无法读取 {}：{error}",
+                    path.display()
+                ));
                 String::new()
             }
         });

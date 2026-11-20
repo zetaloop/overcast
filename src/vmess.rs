@@ -100,47 +100,47 @@ impl Cipher {
 }
 
 choices!(Cipher {
-    Auto: "auto" => "自动",
+    Auto: "auto" => ("Automatic", "自动"),
     Aes128Gcm: "aes-128-gcm" => "AES-128-GCM",
     Chacha20Poly1305: "chacha20-poly1305" => "ChaCha20-Poly1305",
     Aes128Cfb: "aes-128-cfb" => "AES-128-CFB",
-    None: "none" => "明文",
-    Zero: "zero" => "明文透传",
+    None: "none" => ("Plaintext", "明文"),
+    Zero: "zero" => ("Plaintext passthrough", "明文透传"),
 });
 
 crate::connection::client_fields!(
     Vmess,
     Client {
-        name: "名称",
-        server: "地址",
-        port: "端口",
+        name: ("Name", "名称"),
+        server: ("Address", "地址"),
+        port: ("Port", "端口"),
         uuid: "UUID",
-        core: "核心",
+        core: ("Core", "核心"),
         vmess: "VMess",
-        security: "加密",
-        transport: "传输",
-        multiplex: "多路复用",
-        network: "网络",
+        security: ("Encryption", "加密"),
+        transport: ("Transport", "传输"),
+        multiplex: ("Multiplexing", "多路复用"),
+        network: ("Network", "网络"),
     }
 );
 
 fields!(ClientOptions {
-    cipher: "加密算法",
-    alter_id: "额外标识数量",
-    global_padding: "全局填充",
-    authenticated_length: "长度认证",
-    termination_signal: "终止信号",
-    packet_encoding: "UDP 封装",
-    udp_concurrency: "UDP 并发流数",
+    cipher: ("Encryption algorithm", "加密算法"),
+    alter_id: ("Additional IDs", "额外标识数量"),
+    global_padding: ("Global padding", "全局填充"),
+    authenticated_length: ("Authenticated lengths", "长度认证"),
+    termination_signal: ("Termination signal", "终止信号"),
+    packet_encoding: ("UDP packet encoding", "UDP 封装"),
+    udp_concurrency: ("UDP concurrency", "UDP 并发流数"),
     tcp: "TCP",
     udp: "UDP",
-    user_level: "用户等级",
-    user_label: "用户标识",
+    user_level: ("User level", "用户等级"),
+    user_label: ("User ID", "用户标识"),
 });
 
 fields!(Server {
-    alter_id: "额外标识数量",
-    user_level: "用户等级",
-    default_user_level: "动态用户等级",
+    alter_id: ("Additional IDs", "额外标识数量"),
+    user_level: ("User level", "用户等级"),
+    default_user_level: ("Dynamic user level", "动态用户等级"),
     multiplex: "S-Mux",
 });

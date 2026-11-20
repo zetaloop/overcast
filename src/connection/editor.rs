@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::rc::Rc;
 
 use crate::{
@@ -126,13 +127,13 @@ impl crate::core::Draft for Connection {
         if let (Some(old), Some(new)) = (self.transport(), next.transport()) {
             changes.transport(old, new);
         }
-        let modes = ["无", "TLS", "REALITY"];
+        let modes = [tr("None", "无"), "TLS", "REALITY"];
         let (a, b) = (self.security_mode(), next.security_mode());
         if a != b {
             changes.lines.push(if b == 0 {
-                format!("关闭 {}", modes[a])
+                message!("Disable {}", "关闭 {}", modes[a])
             } else {
-                format!("握手改用 {}", modes[b])
+                message!("Switch to {} for the handshake", "握手改用 {}", modes[b])
             });
         }
         if let (Self::Vless(a), Self::Vless(b)) = (self, next) {
@@ -162,7 +163,7 @@ impl crate::core::Draft for Connection {
                 && let Some(download) = &mut x.download
                 && let Some(tls) = download.security.tls_mut()
             {
-                changes.client_tls(tls, core, true, "下载连接的");
+                changes.client_tls(tls, core, true, tr("Download ", "下载连接的"));
             }
         }
     }
@@ -394,64 +395,69 @@ impl Choices {
         let requested = self.source.core();
         form::control(
             "network",
-            "网络",
+            tr("Network", "网络"),
             value,
             default,
             None,
             move |net, screen, menu, _| {
-                form::scoped(screen, &format!("{} / 网络", menu.title), net, |raw| {
-                    let mut active = raw.clone();
-                    if requested != Core::Auto
-                        && let Some(core) = requested.candidates(None).next()
-                    {
-                        active.fit(core);
-                    }
-                    let candidates =
-                        |net: &Network| context.candidates(|c| *c.network_mut() = net.clone());
-                    let available = candidates(&active);
-                    let mut fields = available
-                        .iter()
-                        .flat_map(|core| core.network_fields())
-                        .collect::<std::collections::BTreeSet<_>>();
-                    let selected = crate::native::options::Options::new(&active)
-                        .expect("network options serialize");
-                    for core in requested.candidates(None) {
-                        let declared = core.network_fields();
-                        fields.extend(
-                            selected
-                                .keys()
-                                .filter(|key| declared.contains(*key))
-                                .map(str::to_owned),
-                        );
-                    }
-                    let mut choices = AddressStrategy::choices();
-                    choices.retain(|(_, _, s)| {
-                        active.address_strategy = Some(*s);
-                        !candidates(&active).is_empty()
-                    });
-                    let sources = (raw.source_ipv4.is_some(), raw.source_ipv6.is_some());
-                    let mut bindings = form::Form::fields(raw, Network::default());
-                    for field in &mut bindings {
-                        match field.key() {
-                            "address_strategy" => field.restrict(&|key| {
-                                key == "default" || choices.iter().any(|(k, _, _)| *k == key)
-                            }),
-                            "tcp_fast_open" if !available.contains(&Engine::Xray) => {
-                                field.restrict(&|_| true)
-                            }
-                            _ => {}
+                form::scoped(
+                    screen,
+                    &message!("{} / Network", "{} / 网络", menu.title),
+                    net,
+                    |raw| {
+                        let mut active = raw.clone();
+                        if requested != Core::Auto
+                            && let Some(core) = requested.candidates(None).next()
+                        {
+                            active.fit(core);
                         }
-                    }
-                    bindings.retain(|f| {
-                        fields.contains(f.key())
-                            && match (requested, f.key()) {
-                                (Core::Xray, "source_ipv6") => !sources.0,
-                                (Core::Xray, "source_ipv4") => sources.0 || !sources.1,
-                                _ => true,
+                        let candidates =
+                            |net: &Network| context.candidates(|c| *c.network_mut() = net.clone());
+                        let available = candidates(&active);
+                        let mut fields = available
+                            .iter()
+                            .flat_map(|core| core.network_fields())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let selected = crate::native::options::Options::new(&active)
+                            .expect("network options serialize");
+                        for core in requested.candidates(None) {
+                            let declared = core.network_fields();
+                            fields.extend(
+                                selected
+                                    .keys()
+                                    .filter(|key| declared.contains(*key))
+                                    .map(str::to_owned),
+                            );
+                        }
+                        let mut choices = AddressStrategy::choices();
+                        choices.retain(|(_, _, s)| {
+                            active.address_strategy = Some(*s);
+                            !candidates(&active).is_empty()
+                        });
+                        let sources = (raw.source_ipv4.is_some(), raw.source_ipv6.is_some());
+                        let mut bindings = form::Form::fields(raw, Network::default());
+                        for field in &mut bindings {
+                            match field.key() {
+                                "address_strategy" => field.restrict(&|key| {
+                                    key == "default" || choices.iter().any(|(k, _, _)| *k == key)
+                                }),
+                                "tcp_fast_open" if !available.contains(&Engine::Xray) => {
+                                    field.restrict(&|_| true)
+                                }
+                                _ => {}
                             }
-                    });
-                    bindings
-                })
+                        }
+                        bindings.retain(|f| {
+                            fields.contains(f.key())
+                                && match (requested, f.key()) {
+                                    (Core::Xray, "source_ipv6") => !sources.0,
+                                    (Core::Xray, "source_ipv4") => sources.0 || !sources.1,
+                                    _ => true,
+                                }
+                        });
+                        bindings
+                    },
+                )
             },
         )
     }
@@ -619,26 +625,26 @@ macro_rules! client_fields {
     (@push $f:ident, $c:ident, $s:ident, $d:ident, proxy, ..) => {
         $f.extend($s.proxy.fields($d.proxy));
     };
-    (@push $f:ident, $c:ident, $s:ident, $d:ident, core, $label:literal) => {
-        $f.push($crate::form::field("core", $label, &mut $s.core, $d.core));
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, core, $label:tt) => {
+        $f.push($crate::form::field("core", $crate::language::label!($label), &mut $s.core, $d.core));
     };
-    (@push $f:ident, $c:ident, $s:ident, $d:ident, security, $label:literal) => {
-        $f.extend($c.handshake($label, &mut $s.security, $d.security));
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, security, $label:tt) => {
+        $f.extend($c.handshake($crate::language::label!($label), &mut $s.security, $d.security));
     };
-    (@push $f:ident, $c:ident, $s:ident, $d:ident, transport, $label:literal) => {
-        $f.extend($c.carrier($label, &mut $s.transport, $d.transport));
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, transport, $label:tt) => {
+        $f.extend($c.carrier($crate::language::label!($label), &mut $s.transport, $d.transport));
     };
-    (@push $f:ident, $c:ident, $s:ident, $d:ident, network, $label:literal) => {
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, network, $label:tt) => {
         $f.push($c.network(&mut $s.network, $d.network));
     };
-    (@push $f:ident, $c:ident, $s:ident, $d:ident, tls, $label:literal) => {
-        $f.push($c.tls($label, &mut $s.tls, $d.tls));
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, tls, $label:tt) => {
+        $f.push($c.tls($crate::language::label!($label), &mut $s.tls, $d.tls));
     };
-    (@push $f:ident, $c:ident, $s:ident, $d:ident, vless, $label:literal) => {
-        $f.push($c.vless($label, &mut $s.vless, $d.vless));
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, vless, $label:tt) => {
+        $f.push($c.vless($crate::language::label!($label), &mut $s.vless, $d.vless));
     };
-    (@push $f:ident, $c:ident, $s:ident, $d:ident, $key:ident, $label:literal) => {
-        $f.push($crate::form::field(stringify!($key), $label, &mut $s.$key, $d.$key));
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, $key:ident, $label:tt) => {
+        $f.push($crate::form::field(stringify!($key), $crate::language::label!($label), &mut $s.$key, $d.$key));
     };
 }
 

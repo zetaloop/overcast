@@ -59,28 +59,28 @@ pub struct Server {
 crate::connection::client_fields!(
     Trojan,
     Client {
-        name: "名称",
-        server: "地址",
-        port: "端口",
-        password: "密码",
-        core: "核心",
+        name: ("Name", "名称"),
+        server: ("Address", "地址"),
+        port: ("Port", "端口"),
+        password: ("Password", "密码"),
+        core: ("Core", "核心"),
         trojan: "Trojan",
-        security: "加密",
-        transport: "传输",
-        multiplex: "多路复用",
-        network: "网络",
+        security: ("Encryption", "加密"),
+        transport: ("Transport", "传输"),
+        multiplex: ("Multiplexing", "多路复用"),
+        network: ("Network", "网络"),
     }
 );
 
 fields!(ClientOptions {
     tcp: "TCP",
     udp: "UDP",
-    user_level: "用户等级",
-    user_label: "用户标识",
+    user_level: ("User level", "用户等级"),
+    user_label: ("User ID", "用户标识"),
 });
 
 fields!(Server {
-    user_level: "用户等级",
-    fallbacks: "回落",
+    user_level: ("User level", "用户等级"),
+    fallbacks: ("Fallbacks", "回落"),
     multiplex: "S-Mux",
 });

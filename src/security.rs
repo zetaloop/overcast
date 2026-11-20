@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
 
@@ -25,10 +26,10 @@ impl Material {
     pub(crate) fn validate(&self, label: &str) -> Result<()> {
         match self {
             Self::Inline(text) if text.trim().is_empty() => {
-                Err(format!("请填写{label}正文").into())
+                Err(message!("Enter the contents of {label}", "请填写{label}正文").into())
             }
             Self::File(path) if path.trim().is_empty() => {
-                Err(format!("请填写{label}文件路径").into())
+                Err(message!("Enter a file path for {label}", "请填写{label}文件路径").into())
             }
             _ => Ok(()),
         }
@@ -52,18 +53,22 @@ impl Material {
 impl Value for Material {
     fn text(&self) -> String {
         match self {
-            Self::File(path) if path.is_empty() => "文件路径".into(),
+            Self::File(path) if path.is_empty() => tr("File path", "文件路径").into(),
             Self::File(path) => path.clone(),
-            Self::Inline(text) => text.lines().next().unwrap_or("正文").to_owned(),
+            Self::Inline(text) => text
+                .lines()
+                .next()
+                .unwrap_or(tr("Inline", "正文"))
+                .to_owned(),
         }
     }
 
     fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let mut items = [
-            Item::new("inline", "正文".stylized()),
-            Item::new("file", "文件路径".stylized()),
-            Item::new("back", "返回".stylized()),
+            Item::new("inline", tr("Inline", "正文").stylized()),
+            Item::new("file", tr("File path", "文件路径").stylized()),
+            Item::new("back", tr("Back", "返回").stylized()),
         ];
         let current = usize::from(matches!(self, Self::File(_)));
         let mut selected = current;
@@ -72,7 +77,10 @@ impl Value for Material {
             title: &title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to edit\nEsc to go back",
+                "方向键 选择\n回车键 编辑\nEsc 返回",
+            ),
         };
         loop {
             match screen.select(&menu, &mut selected, "")? {
@@ -154,7 +162,7 @@ impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
         edit_tls: impl FnOnce(&mut Screen, &str, &mut T) -> Result<bool>,
         edit_reality: impl FnOnce(&mut Screen, &str, &mut R) -> Result<bool>,
     ) -> Result<bool> {
-        let labels = ["无", "TLS", "REALITY"];
+        let labels = [tr("None", "无"), "TLS", "REALITY"];
         let mut items: Vec<_> = modes
             .iter()
             .map(|&mode| Item::new(["none", "tls", "reality"][mode], labels[mode].stylized()))
@@ -162,12 +170,15 @@ impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
         if let Some(current) = modes.iter().position(|&mode| mode == self.index()) {
             items[current].marker = "■";
         }
-        items.push(Item::new("back", "返回".stylized()));
+        items.push(Item::new("back", tr("Back", "返回").stylized()));
         let menu = Menu {
             title,
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 编辑\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to edit\nEsc to go back",
+                "方向键 选择\n回车键 编辑\nEsc 返回",
+            ),
         };
         let mut selected = modes
             .iter()
@@ -204,7 +215,7 @@ impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
 
 impl<T: Form, R: Form + Handshake<T>> Value for Security<T, R> {
     fn text(&self) -> String {
-        ["无", "TLS", "REALITY"][self.index()].to_owned()
+        [tr("None", "无"), "TLS", "REALITY"][self.index()].to_owned()
     }
 
     fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {

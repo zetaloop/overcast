@@ -82,44 +82,44 @@ pub enum Flow {
 }
 
 choices!(Flow {
-    None: "none" => "默认",
+    None: "none" => ("Default", "默认"),
     Vision: "vision" => "Vision",
 });
 
 crate::connection::client_fields!(
     Vless,
     Client {
-        name: "名称",
-        server: "地址",
-        port: "端口",
+        name: ("Name", "名称"),
+        server: ("Address", "地址"),
+        port: ("Port", "端口"),
         uuid: "UUID",
-        core: "核心",
+        core: ("Core", "核心"),
         vless: "VLESS",
-        security: "加密",
-        transport: "传输",
-        multiplex: "多路复用",
-        network: "网络",
+        security: ("Encryption", "加密"),
+        transport: ("Transport", "传输"),
+        multiplex: ("Multiplexing", "多路复用"),
+        network: ("Network", "网络"),
     }
 );
 
 fields!(ClientOptions {
-    flow: "流模式",
-    encryption: "加密",
-    packet_encoding: "UDP 封装",
-    udp_concurrency: "UDP 并发流数",
+    flow: ("Flow", "流模式"),
+    encryption: ("Encryption", "加密"),
+    packet_encoding: ("UDP packet encoding", "UDP 封装"),
+    udp_concurrency: ("UDP concurrency", "UDP 并发流数"),
     tcp: "TCP",
     udp: "UDP",
-    user_level: "用户等级",
-    user_label: "用户标识",
-    preconnect: "预连接数量",
-    padding: "Vision 填充参数",
+    user_level: ("User level", "用户等级"),
+    user_label: ("User ID", "用户标识"),
+    preconnect: ("Preconnections", "预连接数量"),
+    padding: ("Vision padding parameters", "Vision 填充参数"),
 });
 
 fields!(Server {
-    flow: "流模式",
-    encryption: "加密",
-    user_level: "用户等级",
-    padding: "Vision 填充参数",
-    fallbacks: "回落",
+    flow: ("Flow", "流模式"),
+    encryption: ("Encryption", "加密"),
+    user_level: ("User level", "用户等级"),
+    padding: ("Vision padding parameters", "Vision 填充参数"),
+    fallbacks: ("Fallbacks", "回落"),
     multiplex: "S-Mux",
 });

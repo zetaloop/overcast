@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -114,13 +115,17 @@ pub enum MasqueradeKind {
 
 pub fn password(value: &str) -> Result<()> {
     if value.is_empty() {
-        return Err("请填写 Hysteria 2 认证密码".into());
+        return Err(tr("Enter a Hysteria 2 password", "请填写 Hysteria 2 认证密码").into());
     }
     if value
         .bytes()
         .any(|value| value < 32 && value != b'\t' || value == 127)
     {
-        return Err("Hysteria 2 认证密码需要符合 HTTP 字段值格式".into());
+        return Err(tr(
+            "The Hysteria 2 password must be a valid HTTP field value",
+            "Hysteria 2 认证密码需要符合 HTTP 字段值格式",
+        )
+        .into());
     }
     Ok(())
 }
@@ -128,14 +133,14 @@ pub fn password(value: &str) -> Result<()> {
 crate::connection::client_fields!(
     Hysteria2,
     Client {
-        name: "名称",
-        server: "地址",
-        port: "端口",
-        password: "密码",
-        core: "核心",
+        name: ("Name", "名称"),
+        server: ("Address", "地址"),
+        port: ("Port", "端口"),
+        password: ("Password", "密码"),
+        core: ("Core", "核心"),
         hysteria: "Hysteria 2",
         tls: "TLS",
-        network: "网络",
+        network: ("Network", "网络"),
     }
 );
 
@@ -148,7 +153,7 @@ fn mode<T: Form, K: Value + Copy + PartialEq>(
     edit: impl FnOnce(&mut T, &mut Screen, &str) -> Result<bool>,
 ) -> Result<bool> {
     let previous = value.as_mut().map(|v| *kind(v));
-    let choices: Vec<_> = std::iter::once(("none", "无", None))
+    let choices: Vec<_> = std::iter::once(("none", tr("None", "无"), None))
         .chain(kinds.into_iter().map(|(key, name, k)| (key, name, Some(k))))
         .collect();
     let mut selected = previous.filter(|k| choices.iter().any(|(_, _, v)| *v == Some(*k)));
@@ -171,13 +176,16 @@ fn mode<T: Form, K: Value + Copy + PartialEq>(
 impl Obfs {
     pub fn validate(&self) -> Result<()> {
         if self.password.len() < 4 {
-            return Err("HY2 混淆密码至少需要 4 个 UTF-8 字节".into());
+            return Err(tr(
+                "The HY2 obfuscation password must be at least 4 UTF-8 bytes",
+                "HY2 混淆密码至少需要 4 个 UTF-8 字节",
+            )
+            .into());
         }
         if self.kind == ObfsKind::Gecko {
             let (min, max) = self.packet_sizes();
             if min > max || max > 2048 {
-                return Err(format!(
-                    "Gecko 数据包范围 {min}–{max} 无效：需要 1 ≤ 最小值 ≤ 最大值 ≤ 2048 字节"
+                return Err(message!("Invalid Gecko packet sizes {min}–{max}: the minimum must not exceed the maximum and both must be between 1 and 2048 bytes", "Gecko 数据包范围 {min}–{max} 无效：需要 1 ≤ 最小值 ≤ 最大值 ≤ 2048 字节"
                 )
                 .into());
             }
@@ -195,10 +203,10 @@ impl Obfs {
     fn field(slot: &mut Option<Self>) -> Box<dyn form::Field + '_> {
         let text = slot
             .as_ref()
-            .map_or_else(|| "无".to_owned(), |v| v.kind.text());
+            .map_or_else(|| tr("None", "无").to_owned(), |v| v.kind.text());
         form::control(
             "obfs",
-            "混淆",
+            tr("Obfuscation", "混淆"),
             slot,
             None,
             Some(text),
@@ -206,7 +214,7 @@ impl Obfs {
                 mode(
                     value,
                     screen,
-                    "混淆",
+                    tr("Obfuscation", "混淆"),
                     ObfsKind::choices(),
                     |obfs| &mut obfs.kind,
                     |obfs, screen, title| {
@@ -216,7 +224,7 @@ impl Obfs {
                         } else {
                             let items = [crate::tui::Item::new(
                                 "password",
-                                termina::style::StyleExt::stylized("密码"),
+                                termina::style::StyleExt::stylized(tr("Password", "密码")),
                             )];
                             obfs.password.edit(
                                 screen,
@@ -299,12 +307,12 @@ impl Form for ServerPage {
             .masquerade
             .as_ref()
             .filter(|mask| mask.kind != MasqueradeKind::String || core != ServerCore::Mihomo)
-            .map_or_else(|| "无".to_owned(), |mask| mask.kind.text());
+            .map_or_else(|| tr("None", "无").to_owned(), |mask| mask.kind.text());
         vec![
             Obfs::field(&mut v.obfs),
             form::control(
                 "masquerade",
-                "伪装响应",
+                tr("Masquerade response", "伪装响应"),
                 &mut v.masquerade,
                 None,
                 Some(text),
@@ -318,7 +326,7 @@ impl Form for ServerPage {
                     mode(
                         slot,
                         screen,
-                        "伪装响应",
+                        tr("Masquerade response", "伪装响应"),
                         kinds,
                         |v| &mut v.kind,
                         |mask, screen, title| {
@@ -328,15 +336,30 @@ impl Form for ServerPage {
                     )
                 },
             ),
-            form::field("quic", "服务端 QUIC", &mut v.quic, d.quic),
-            form::field("client", "客户端 QUIC", &mut v.client, d.client),
+            form::field(
+                "quic",
+                tr("Server QUIC", "服务端 QUIC"),
+                &mut v.quic,
+                d.quic,
+            ),
+            form::field(
+                "client",
+                tr("Client QUIC", "客户端 QUIC"),
+                &mut v.client,
+                d.client,
+            ),
             form::field(
                 "ignore_client_bandwidth",
-                "忽略客户端带宽",
+                tr("Ignore client bandwidth", "忽略客户端带宽"),
                 &mut v.ignore_client_bandwidth,
                 d.ignore_client_bandwidth,
             ),
-            form::field("user_level", "用户等级", &mut v.user_level, d.user_level),
+            form::field(
+                "user_level",
+                tr("User level", "用户等级"),
+                &mut v.user_level,
+                d.user_level,
+            ),
         ]
     }
 }
@@ -345,16 +368,21 @@ impl Form for ClientOptions {
     fn fields(&mut self, d: Self) -> form::Fields<'_> {
         vec![
             Obfs::field(&mut self.obfs),
-            form::field("ports", "跳跃端口", &mut self.ports, d.ports),
+            form::field(
+                "ports",
+                tr("Hopping ports", "跳跃端口"),
+                &mut self.ports,
+                d.ports,
+            ),
             form::field(
                 "hop_interval",
-                "跳跃间隔",
+                tr("Hop interval", "跳跃间隔"),
                 &mut self.hop_interval,
                 d.hop_interval,
             ),
             form::field(
                 "hop_interval_max",
-                "最大跳跃间隔",
+                tr("Maximum hop interval", "最大跳跃间隔"),
                 &mut self.hop_interval_max,
                 d.hop_interval_max,
             ),
@@ -367,22 +395,22 @@ impl Form for ClientOptions {
 form::group!(ClientOptions);
 
 fields!(Obfs {
-    kind: "类型",
-    password: "密码",
-    min_packet_size: "最小数据包",
-    max_packet_size: "最大数据包",
+    kind: ("Type", "类型"),
+    password: ("Password", "密码"),
+    min_packet_size: ("Minimum packet size", "最小数据包"),
+    max_packet_size: ("Maximum packet size", "最大数据包"),
 });
 
 fields!(Masquerade {
-    kind: "类型",
-    directory: "文件目录",
-    url: "反代目标",
-    rewrite_host: "改写主机名",
-    forwarded: "转发来源信息",
-    verify_certificate: "验证上游证书",
-    status_code: "响应状态",
-    headers: "响应头",
-    content: "响应内容",
+    kind: ("Type", "类型"),
+    directory: ("Directory", "文件目录"),
+    url: ("Reverse proxy upstream", "反代目标"),
+    rewrite_host: ("Rewrite host", "改写主机名"),
+    forwarded: ("Forward client information", "转发来源信息"),
+    verify_certificate: ("Verify upstream certificate", "验证上游证书"),
+    status_code: ("Response status", "响应状态"),
+    headers: ("Response headers", "响应头"),
+    content: ("Response body", "响应内容"),
 });
 
 choices!(ObfsKind {
@@ -391,7 +419,7 @@ choices!(ObfsKind {
 });
 
 choices!(MasqueradeKind {
-    File: "file" => "文件",
-    Proxy: "proxy" => "HTTP 反代",
-    String: "string" => "固定响应",
+    File: "file" => ("File", "文件"),
+    Proxy: "proxy" => ("HTTP reverse proxy", "HTTP 反代"),
+    String: "string" => ("Static response", "固定响应"),
 });

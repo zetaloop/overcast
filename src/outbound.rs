@@ -1,3 +1,4 @@
+use crate::language::{message, text as tr};
 use serde::{Deserialize, Serialize};
 use termina::{
     event::{KeyCode, Modifiers},
@@ -37,7 +38,7 @@ impl Outbound {
                 &Uuid::NAMESPACE_URL,
                 b"https://github.com/zetaloop/overcast/direct",
             ),
-            name: "直连".to_owned(),
+            name: tr("Direct", "直连").to_owned(),
             connections: vec![Connection::Direct(connection::Direct::default())],
         }
     }
@@ -52,15 +53,15 @@ impl Outbound {
 
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
-            return Err("出站名称不能为空".into());
+            return Err(tr("Enter an outbound name", "出站名称不能为空").into());
         }
         if self.connections.is_empty() {
-            return Err("出站中没有连接".into());
+            return Err(tr("Outbound has no connections", "出站中没有连接").into());
         }
         for (index, connection) in self.connections.iter().enumerate() {
-            connection
-                .validate()
-                .map_err(|error| format!("第 {} 段连接：{error}", index + 1))?;
+            connection.validate().map_err(|error| {
+                message!("Connection {}: {error}", "第 {} 段连接：{error}", index + 1)
+            })?;
         }
         Ok(())
     }
@@ -104,7 +105,7 @@ impl Selection {
                     if value.get("connections").is_some() {
                         value
                             .as_object_mut()
-                            .ok_or("出站配置的格式不正确")?
+                            .ok_or(tr("Invalid outbound configuration", "出站配置的格式不正确"))?
                             .remove("uuid");
                         Ok(serde_json::from_value(value)?)
                     } else {
@@ -123,13 +124,13 @@ impl Selection {
                 .iter()
                 .any(|selection| selection.connections.is_empty())
         {
-            return Err("粘贴内容中没有连接".into());
+            return Err(tr("No connections in pasted text", "粘贴内容中没有连接").into());
         }
         for selection in &selections {
             for (index, connection) in selection.connections.iter().enumerate() {
-                connection
-                    .check_stack()
-                    .map_err(|error| format!("第 {} 段连接：{error}", index + 1))?;
+                connection.check_stack().map_err(|error| {
+                    message!("Connection {}: {error}", "第 {} 段连接：{error}", index + 1)
+                })?;
             }
         }
         Ok(selections)
@@ -195,15 +196,18 @@ fn copy_connections(screen: &mut Screen, outbound: &Outbound) -> Result<()> {
             })
             .collect();
         items.extend([
-            Item::new("all", "全选".stylized()),
-            Item::new("copy", "复制所选".stylized()),
-            Item::new("back", "返回".stylized()),
+            Item::new("all", tr("Select all", "全选").stylized()),
+            Item::new("copy", tr("Copy selected", "复制所选").stylized()),
+            Item::new("back", tr("Back", "返回").stylized()),
         ]);
         let menu = Menu {
-            title: "复制连接",
+            title: tr("Copy connections", "复制连接"),
             heading: &outbound.name,
             items: &items,
-            help: "方向键 选择\n回车键 确定\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to confirm\nEsc to go back",
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            ),
         };
         match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),
@@ -229,7 +233,7 @@ fn copy_connections(screen: &mut Screen, outbound: &Outbound) -> Result<()> {
                             .collect(),
                     };
                     if selection.connections.is_empty() {
-                        notice = "请选择连接".to_owned();
+                        notice = tr("Select at least one connection", "请选择连接").to_owned();
                     } else {
                         selection.copy(screen)?;
                         return Ok(());
@@ -256,11 +260,11 @@ fn edit(
         let active = outbound.effective();
         let changed = !existing || serde_json::to_vec(&active)? != initial;
         let title = if existing {
-            format!("出站 / {}", outbound.name)
+            message!("Outbound / {}", "出站 / {}", outbound.name)
         } else {
-            "创建出站".to_owned()
+            tr("Create outbound", "创建出站").to_owned()
         };
-        let mut items = vec![Item::new("name", "名称".stylized())];
+        let mut items = vec![Item::new("name", tr("Name", "名称").stylized())];
         items[0].value = outbound.name.clone();
         items.extend(
             outbound
@@ -278,27 +282,41 @@ fn edit(
                     item
                 }),
         );
-        items.push(Item::new("add", "添加连接".stylized()));
+        items.push(Item::new(
+            "add",
+            tr("Add connection", "添加连接").stylized(),
+        ));
         let actions = items.len();
         if changed {
             items.push(if existing {
-                Item::new("apply", "确定".stylized())
+                Item::new("apply", tr("Confirm", "确定").stylized())
             } else {
-                Item::new("create", "创建".stylized())
+                Item::new("create", tr("Create", "创建").stylized())
             });
         } else {
-            items.push(Item::new("export", "连接资料".stylized()));
+            items.push(Item::new(
+                "export",
+                tr("Connection details", "连接资料").stylized(),
+            ));
             if outbound.connections.len() > 1 {
-                items.push(Item::new("select", "复制部分连接".stylized()));
+                items.push(Item::new(
+                    "select",
+                    tr("Copy part of path", "复制部分连接").stylized(),
+                ));
             }
             items.push(Item::new(
                 "delete",
-                "删除出站".foreground(AnsiColor::BrightRed),
+                tr("Delete outbound", "删除出站").foreground(AnsiColor::BrightRed),
             ));
         }
         items.push(Item::new(
             "back",
-            if changed { "取消" } else { "返回" }.stylized(),
+            if changed {
+                tr("Cancel", "取消")
+            } else {
+                tr("Back", "返回")
+            }
+            .stylized(),
         ));
         items[actions].gap = true;
         let menu = Menu {
@@ -306,9 +324,15 @@ fn edit(
             heading: "",
             items: &items,
             help: if changed {
-                "方向键 选择\n回车键 编辑\nEsc 取消"
+                tr(
+                    "Arrow keys to select\nEnter to edit\nEsc to cancel",
+                    "方向键 选择\n回车键 编辑\nEsc 取消",
+                )
             } else {
-                "方向键 选择\n回车键 编辑\nEsc 返回"
+                tr(
+                    "Arrow keys to select\nEnter to edit\nEsc to go back",
+                    "方向键 选择\n回车键 编辑\nEsc 返回",
+                )
             },
         };
         let action = screen.select(&menu, &mut selected, &notice)?;
@@ -377,17 +401,21 @@ fn edit(
                     }
                     Ok(())
                 }
-                "export" => crate::share::copy(screen, "连接资料", |_, links| {
-                    if links {
-                        crate::share::path(&active.connections, &active.name)
-                    } else {
-                        Ok(serde_json::to_string(&active.selection())?)
-                    }
-                }),
+                "export" => crate::share::copy(
+                    screen,
+                    tr("Connection details", "连接资料"),
+                    |_, links| {
+                        if links {
+                            crate::share::path(&active.connections, &active.name)
+                        } else {
+                            Ok(serde_json::to_string(&active.selection())?)
+                        }
+                    },
+                ),
                 "select" => copy_connections(screen, &active),
                 "create" | "apply" => {
                     let result = screen.work(
-                        "保存出站",
+                        tr("Saving outbound", "保存出站"),
                         &format!(" -- {}", outbound.name),
                         |progress| {
                             store.update(progress, |config, _| {
@@ -400,9 +428,9 @@ fn edit(
                                         .outbounds
                                         .iter_mut()
                                         .find(|current| current.uuid == outbound.uuid)
-                                        .ok_or("出站已被删除")?;
+                                        .ok_or(tr("The outbound has been deleted", "出站已被删除"))?;
                                     if serde_json::to_vec(&*current)? != saved {
-                                        return Err("出站已在其他编辑中更改，请重新打开".into());
+                                        return Err(tr("The outbound was modified elsewhere. Reopen it to edit.", "出站已在其他编辑中更改，请重新打开").into());
                                     }
                                     *current = value;
                                 } else {
@@ -419,7 +447,7 @@ fn edit(
                 }
                 "delete" => {
                     screen.work(
-                        "删除出站",
+                        tr("Delete outbound", "删除出站"),
                         &format!(" -- {}", outbound.name),
                         |progress| {
                             store.update(progress, |config, _| {
@@ -462,20 +490,23 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
             })
             .collect();
         items.extend([
-            Item::new("new", "创建出站".stylized()),
-            Item::new("back", "返回".stylized()),
+            Item::new("new", tr("Create outbound", "创建出站").stylized()),
+            Item::new("back", tr("Back", "返回").stylized()),
         ]);
         let menu = Menu {
-            title: "出站",
+            title: tr("Outbound", "出站"),
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 确定\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to confirm\nEsc to go back",
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            ),
         };
         let result = match screen.select(&menu, &mut selected, &notice)? {
             Action::Back => return Ok(()),
             Action::Paste(text) => Selection::parse(&text)
                 .and_then(|selection| {
-                    screen.work("保存出站", "", |progress| {
+                    screen.work(tr("Saving outbound", "保存出站"), "", |progress| {
                         paste(store, selection, progress)
                     })
                 })

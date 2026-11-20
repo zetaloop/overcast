@@ -1,3 +1,4 @@
+use crate::language::text as tr;
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
 
@@ -65,7 +66,11 @@ impl Keys {
     pub fn show(&self, source: &Inbound, screen: &mut Screen) -> Result<()> {
         let mut values = Vec::new();
         if let Some(keys) = &self.shadowsocks {
-            values.push(("password", "入口共享密钥", keys.password.clone()));
+            values.push((
+                "password",
+                tr("Shared inbound key", "入口共享密钥"),
+                keys.password.clone(),
+            ));
         }
         if let Some(keys) = &self.reality {
             values.extend(keys.values());
@@ -78,12 +83,12 @@ impl Keys {
             encryption.private_keys = keys.private_keys.clone();
             values.push((
                 "encryption",
-                "客户端加密参数",
+                tr("Client encryption settings", "客户端加密参数"),
                 crate::native::encryption::client(&encryption, keys),
             ));
             values.push((
                 "decryption",
-                "服务端解密参数",
+                tr("Server decryption settings", "服务端解密参数"),
                 crate::native::encryption::server(&encryption)?,
             ));
         }
@@ -95,12 +100,15 @@ impl Keys {
                 item
             })
             .collect();
-        items.push(Item::new("back", "返回".stylized()));
+        items.push(Item::new("back", tr("Back", "返回").stylized()));
         let menu = Menu {
-            title: "握手资料",
+            title: tr("Handshake details", "握手资料"),
             heading: "",
             items: &items,
-            help: "方向键 选择\n回车键 复制\nEsc 返回",
+            help: tr(
+                "Arrow keys to select\nEnter to copy\nEsc to go back",
+                "方向键 选择\n回车键 复制\nEsc 返回",
+            ),
         };
         let mut selected = 0;
         loop {
