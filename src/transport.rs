@@ -369,12 +369,49 @@ impl Value for Transport {
             parent,
             field,
             &Self::variants(),
-            &crate::native::parameters::Peers::client(crate::native::stack::CORES),
+            |value, screen, title| {
+                let peers = crate::native::parameters::Peers::client(crate::native::stack::CORES);
+                value.edit(screen, title, &peers, None)
+            },
         )
     }
 }
 
+impl Grpc {
+    pub(crate) fn fit(&mut self, core: crate::inbound::Core, inbound: bool) {
+        let names = core.grpc_fields(inbound);
+        form::retain(self, |key| names.contains(key));
+    }
+
+    pub(crate) fn edit(
+        &mut self,
+        screen: &mut Screen,
+        title: &str,
+        peers: &crate::native::parameters::Peers,
+        fixed_client: Option<crate::inbound::Core>,
+    ) -> Result<bool> {
+        form::scoped(screen, title, self, |raw| {
+            let mut active = raw.clone();
+            if let Some(core) = peers.server.or(fixed_client) {
+                active.fit(core, peers.server.is_some());
+            }
+            let names = peers.grpc_fields(&active);
+            let mut fields = form::Form::fields(raw, Self::default());
+            fields.retain(|field| names.contains(field.key()));
+            fields
+        })
+    }
+}
+
 impl Transport {
+    pub(crate) fn draft(&self, effective: &Self) -> Self {
+        if std::mem::discriminant(self) == std::mem::discriminant(effective) {
+            self.clone()
+        } else {
+            effective.clone()
+        }
+    }
+
     pub(crate) fn variants() -> [(&'static str, Self); 8] {
         [
             ("default", Self::Default),
@@ -394,7 +431,7 @@ impl Transport {
         parent: &Menu<'_>,
         field: usize,
         choices: &[(&str, Self)],
-        peers: &crate::native::parameters::Peers,
+        grpc: impl FnOnce(&mut Grpc, &mut Screen, &str) -> Result<bool>,
     ) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let current = choices
@@ -429,12 +466,7 @@ impl Transport {
                         Self::Default | Self::Quic => false,
                         Self::WebSocket(value) => form::edit(screen, &title, value)?,
                         Self::HttpUpgrade(value) => form::edit(screen, &title, value)?,
-                        Self::Grpc(value) => form::scoped(screen, &title, value, |value| {
-                            let names = peers.grpc_fields(value);
-                            let mut fields = form::Form::fields(value, Grpc::default());
-                            fields.retain(|field| names.contains(field.key()));
-                            fields
-                        })?,
+                        Self::Grpc(value) => grpc(value, screen, &title)?,
                         Self::XHttp(value) => form::edit(screen, &title, value.as_mut())?,
                         Self::Http(value) => form::edit(screen, &title, value)?,
                         Self::Kcp(value) => form::edit(screen, &title, value)?,

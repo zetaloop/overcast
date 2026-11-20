@@ -1,107 +1,109 @@
+use std::rc::Rc;
+
 use crate::{
+    config::Store,
     form::{self, Field, Value},
-    native::stack::Stack,
+    native::{parameters::Peers, stack::Stack},
     transport::Transport,
 };
 
-use super::{AddressStrategy, Connection, Core, FastOpen, Network, Security, Tls};
+use super::{AddressStrategy, Connection, Core, FastOpen, Network, Security};
 use crate::inbound::Core as Engine;
 
 impl Connection {
     pub(crate) fn fit(&mut self) {
-        let choices = Choices::new(self);
-        if self.core() != Core::Auto
-            && let Some(core) = self.core().candidates(None).next()
+        let requested = self.core();
+        let stack = Stack::Outbound(self);
+        let modes = stack.modes(requested.candidates(None));
+        let current = self.security_mode();
+        let mode = if modes.contains(&current) {
+            current
+        } else {
+            modes.first().copied().unwrap_or(current)
+        };
+        let transport_supported = self.transport().is_none_or(|value| {
+            requested
+                .candidates(None)
+                .any(|core| stack.transport(core, mode, value))
+        });
+        if requested != Core::Auto
+            && let Some(core) = requested.candidates(None).next()
         {
             self.network_mut().fit(core);
         }
-        let (security, transport) = match self {
-            Self::Vless(v) => (&mut v.security, &mut v.transport),
-            Self::Vmess(v) => (&mut v.security, &mut v.transport),
-            Self::Trojan(v) => (&mut v.security, &mut v.transport),
-            Self::Shadowsocks(v) => (&mut v.security, &mut v.transport),
-            Self::Http(v) => (&mut v.security, &mut v.transport),
-            Self::Socks(v) => (&mut v.security, &mut v.transport),
-            Self::Forward(v) => (&mut v.security, &mut v.transport),
-            Self::AnyTls(v) => {
-                v.security = choices.security(&v.security);
-                return;
+        if let Self::Hysteria2(v) = self
+            && let Some(obfs) = &mut v.hysteria.obfs
+        {
+            obfs.fit();
+        }
+        let (security, transport) = self.stream();
+        if current != mode
+            && let Some(security) = security
+        {
+            *security = handshake(mode);
+        }
+        if let Some(transport) = transport {
+            if !transport_supported {
+                *transport = Transport::Default;
+            } else if let Transport::Grpc(value) = transport
+                && requested != Core::Auto
+                && let Some(core) = requested.candidates(None).next()
+            {
+                value.fit(core, false);
             }
-            Self::Hysteria2(v) => {
-                if let Some(obfs) = &mut v.hysteria.obfs {
-                    obfs.fit();
-                }
-                return;
-            }
-            Self::Direct(_) | Self::Warp(_) => return,
-        };
-        *security = choices.security(security);
-        *transport = choices.transport(transport);
+        }
+    }
+
+    fn stream(&mut self) -> (Option<&mut Security>, Option<&mut Transport>) {
+        match self {
+            Self::Vless(v) => (Some(&mut v.security), Some(&mut v.transport)),
+            Self::Vmess(v) => (Some(&mut v.security), Some(&mut v.transport)),
+            Self::Trojan(v) => (Some(&mut v.security), Some(&mut v.transport)),
+            Self::Shadowsocks(v) => (Some(&mut v.security), Some(&mut v.transport)),
+            Self::Http(v) => (Some(&mut v.security), Some(&mut v.transport)),
+            Self::Socks(v) => (Some(&mut v.security), Some(&mut v.transport)),
+            Self::Forward(v) => (Some(&mut v.security), Some(&mut v.transport)),
+            Self::AnyTls(v) => (Some(&mut v.security), None),
+            Self::Hysteria2(_) | Self::Direct(_) | Self::Warp(_) => (None, None),
+        }
     }
 }
 
+fn handshake(mode: usize) -> Security {
+    match mode {
+        0 => Security::None,
+        1 => Security::Tls(Default::default()),
+        2 => Security::Reality(Box::default()),
+        _ => unreachable!(),
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct Choices {
-    cores: Vec<Core>,
-    modes: Vec<usize>,
-    mode: usize,
-    transports: Vec<(&'static str, Transport)>,
-    network_cores: Vec<Engine>,
-    requested: Core,
-    grpc: crate::native::parameters::Peers,
+    source: Rc<Connection>,
+    store: Store,
 }
 
 impl Choices {
-    pub(crate) fn new(connection: &Connection) -> Self {
-        let stack = Stack::Outbound(connection);
-        let requested = connection.core();
-        let cores = Core::choices()
-            .into_iter()
-            .filter(|(_, _, choice)| choice.candidates(None).any(|core| stack.implements(core)))
-            .map(|(_, _, choice)| choice)
-            .collect();
-        let modes = stack.modes(requested.candidates(None));
-        let mode = connection.security_mode();
-        let mode = if modes.contains(&mode) {
-            mode
-        } else {
-            modes.first().copied().unwrap_or(mode)
-        };
-        let current = connection.transport().unwrap_or(&Transport::Default);
-        let current = if requested == Core::Auto
-            || requested
-                .candidates(None)
-                .any(|core| stack.transport(core, mode, current))
-        {
-            current
-        } else {
-            &Transport::Default
-        };
-        let network_cores = requested
-            .candidates(None)
-            .filter(|&core| stack.transport(core, mode, current))
-            .collect();
-        let transports = Transport::variants()
-            .into_iter()
-            .filter(|(_, t)| {
-                requested
-                    .candidates(None)
-                    .any(|core| stack.transport(core, mode, t))
-            })
-            .collect();
-        let grpc =
-            crate::native::parameters::Peers::client(requested.candidates(None).filter(|&core| {
-                stack.transport(core, mode, &Transport::Grpc(Default::default()))
-                    && (requested != Core::Auto || core.network(connection.network()).is_ok())
-            }));
+    pub(crate) fn new(mut source: Connection, store: &Store) -> Self {
+        source.fit();
         Self {
-            cores,
-            modes,
-            mode,
-            transports,
-            network_cores,
-            requested,
-            grpc,
+            source: Rc::new(source),
+            store: store.clone(),
         }
+    }
+
+    pub(crate) fn candidates(&self, change: impl FnOnce(&mut Connection)) -> Vec<Engine> {
+        let mut source = (*self.source).clone();
+        change(&mut source);
+        source
+            .core()
+            .candidates(None)
+            .filter(|&core| {
+                core.parameters(&source, &self.store, Default::default())
+                    .is_ok()
+            })
+            .collect()
     }
 
     pub(crate) fn network<'a>(
@@ -109,8 +111,8 @@ impl Choices {
         value: &'a mut Network,
         default: Network,
     ) -> Box<dyn Field + 'a> {
-        let candidates = self.network_cores.clone();
-        let requested = self.requested;
+        let context = self.clone();
+        let requested = self.source.core();
         form::control(
             "network",
             "网络",
@@ -125,18 +127,16 @@ impl Choices {
                     {
                         active.fit(core);
                     }
-                    let available: Vec<_> = candidates
-                        .iter()
-                        .copied()
-                        .filter(|core| core.network(&active).is_ok())
-                        .collect();
+                    let candidates =
+                        |net: &Network| context.candidates(|c| *c.network_mut() = net.clone());
+                    let available = candidates(&active);
                     let mut fields = available
                         .iter()
                         .flat_map(|core| core.network_fields())
                         .collect::<std::collections::BTreeSet<_>>();
                     let selected = crate::native::options::Options::new(&active)
                         .expect("network options serialize");
-                    for core in &candidates {
+                    for core in requested.candidates(None) {
                         let declared = core.network_fields();
                         fields.extend(
                             selected
@@ -148,7 +148,7 @@ impl Choices {
                     let mut choices = AddressStrategy::choices();
                     choices.retain(|(_, _, s)| {
                         active.address_strategy = Some(*s);
-                        candidates.iter().any(|core| core.network(&active).is_ok())
+                        !candidates(&active).is_empty()
                     });
                     let sources = (raw.source_ipv4.is_some(), raw.source_ipv6.is_some());
                     let mut bindings = form::Form::fields(raw, Network::default());
@@ -178,18 +178,11 @@ impl Choices {
     }
 
     pub(crate) fn core<'a>(&self, value: &'a mut Core, default: Core) -> Box<dyn Field + 'a> {
-        let cores = self.cores.clone();
-        form::choice_field("core", "核心", value, default, move |v| cores.contains(v))
-    }
-
-    pub(crate) fn security(&self, current: &Security) -> Security {
-        if self.mode == current.index() {
-            return current.clone();
-        }
-        match self.mode {
-            1 => Security::Tls(Tls::default()),
-            _ => Security::None,
-        }
+        let source = Rc::clone(&self.source);
+        form::choice_field("core", "核心", value, default, move |v| {
+            v.candidates(None)
+                .any(|core| Stack::Outbound(&source).implements(core))
+        })
     }
 
     pub(crate) fn handshake<'a>(
@@ -198,11 +191,17 @@ impl Choices {
         value: &'a mut Security,
         default: Security,
     ) -> Option<Box<dyn Field + 'a>> {
-        if self.modes.iter().all(|&mode| mode == 0) {
+        let modes = Stack::Outbound(&self.source).modes(self.source.core().candidates(None));
+        if modes.iter().all(|&mode| mode == 0) {
             return None;
         }
-        let modes = self.modes.clone();
-        let mut active = self.security(value);
+        let context = self.clone();
+        let current = self.source.security_mode();
+        let mut active = if current == value.index() {
+            value.clone()
+        } else {
+            handshake(current)
+        };
         Some(form::control(
             "security",
             label,
@@ -210,6 +209,18 @@ impl Choices {
             default,
             Some(active.text()),
             move |slot, screen, menu, _| {
+                let modes: Vec<_> = modes
+                    .iter()
+                    .copied()
+                    .filter(|&mode| {
+                        mode == current
+                            || !context
+                                .candidates(|c| {
+                                    *c.stream().0.unwrap() = handshake(mode);
+                                })
+                                .is_empty()
+                    })
+                    .collect();
                 let changed = active.choose(
                     screen,
                     &format!("{} / {label}", menu.title),
@@ -224,16 +235,17 @@ impl Choices {
         ))
     }
 
-    pub(crate) fn transport(&self, current: &Transport) -> Transport {
-        if self
-            .transports
-            .iter()
-            .any(|(_, t)| std::mem::discriminant(t) == std::mem::discriminant(current))
-        {
-            current.clone()
-        } else {
-            Transport::Default
-        }
+    pub(crate) fn transports(&self) -> Vec<(&'static str, Transport)> {
+        let current = self.source.transport();
+        Transport::variants()
+            .into_iter()
+            .filter(|(_, value)| {
+                current.is_some_and(|t| std::mem::discriminant(value) == std::mem::discriminant(t))
+                    || !self
+                        .candidates(|c| *c.stream().1.unwrap() = value.clone())
+                        .is_empty()
+            })
+            .collect()
     }
 
     pub(crate) fn carrier<'a>(
@@ -242,12 +254,19 @@ impl Choices {
         value: &'a mut Transport,
         default: Transport,
     ) -> Option<Box<dyn Field + 'a>> {
-        if self.transports.iter().all(|(_, t)| t.is_default()) {
+        let stack = Stack::Outbound(&self.source);
+        if !Transport::variants().iter().any(|(_, t)| {
+            !t.is_default()
+                && self
+                    .source
+                    .core()
+                    .candidates(None)
+                    .any(|core| stack.transport(core, self.source.security_mode(), t))
+        }) {
             return None;
         }
-        let choices = self.transports.clone();
-        let peers = self.grpc.clone();
-        let mut active = self.transport(value);
+        let context = self.clone();
+        let mut active = value.draft(self.source.transport()?);
         Some(form::control(
             "transport",
             label,
@@ -255,7 +274,16 @@ impl Choices {
             default,
             Some(active.text()),
             move |slot, screen, menu, field| {
-                let changed = active.select(screen, menu, field, &choices, &peers)?;
+                let choices = context.transports();
+                let changed =
+                    active.select(screen, menu, field, &choices, |value, screen, title| {
+                        let peers = Peers::client(context.candidates(|c| {
+                            *c.stream().1.unwrap() = Transport::Grpc(Default::default())
+                        }));
+                        let requested = context.source.core();
+                        let fixed = requested.candidates(None).find(|_| requested != Core::Auto);
+                        value.edit(screen, title, &peers, fixed)
+                    })?;
                 if changed {
                     *slot = active.clone();
                 }
@@ -267,10 +295,11 @@ impl Choices {
 
 macro_rules! client_fields {
     ($variant:ident, $ty:ty { $($key:ident: $label:tt),* $(,)? }) => {
-        impl $crate::form::Form for $ty {
-            fn fields(&mut self, d: Self) -> $crate::form::Fields<'_> {
+        impl $ty {
+            pub(crate) fn controls(&mut self, store: &$crate::config::Store) -> $crate::form::Fields<'_> {
+                let d = Self::default();
                 let choices = $crate::connection::editor::Choices::new(
-                    &$crate::connection::Connection::$variant(self.clone())
+                    $crate::connection::Connection::$variant(self.clone()), store
                 );
                 let mut fields: $crate::form::Fields<'_> = Vec::new();
                 $($crate::connection::client_fields!(@push fields, choices, self, d, $key, $label);)*

@@ -132,6 +132,8 @@ impl Inbound {
         }
         if !value.supports_transport(&value.transport) {
             value.transport = Transport::default();
+        } else if let Transport::Grpc(grpc) = &mut value.transport {
+            grpc.fit(value.core, true);
         }
         if let Protocol::Hysteria2(server) = &mut value.protocol {
             server.fit(value.core);
@@ -881,14 +883,15 @@ fn edit(
                         })
                 }
                 "transport" => {
-                    let mut transport = active.transport.clone();
+                    let mut transport = inbound.transport.draft(&active.transport);
                     let choices: Vec<_> = Transport::variants()
                         .into_iter()
                         .filter(|(_, value)| active.supports_transport(value))
                         .collect();
-                    crate::native::parameters::Peers::inbound(&active, store)
-                        .and_then(|peers| {
-                            transport.select(screen, &menu, selected, &choices, &peers)
+                    transport
+                        .select(screen, &menu, selected, &choices, |value, screen, title| {
+                            let peers = crate::native::parameters::Peers::inbound(&active, store)?;
+                            value.edit(screen, title, &peers, None)
                         })
                         .map(|edited| {
                             if edited {

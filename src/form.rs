@@ -218,7 +218,20 @@ pub fn scoped<T: Form>(
     value: &mut T,
     fields: impl Fn(&mut T) -> Fields<'_>,
 ) -> Result<bool> {
-    edit_group(screen, title, value, None, None, None, &fields)
+    edit_group(screen, title, value, None, None, None, &|v| {
+        (v.groups(), fields(v))
+    })
+}
+
+pub fn flat<T>(
+    screen: &mut Screen,
+    title: &str,
+    value: &mut T,
+    fields: impl Fn(&mut T) -> Fields<'_>,
+) -> Result<bool> {
+    edit_group(screen, title, value, None, None, None, &|v| {
+        (Vec::new(), fields(v))
+    })
 }
 
 pub fn retain<T: Form>(value: &mut T, allowed: impl Fn(&str) -> bool) {
@@ -231,6 +244,10 @@ pub fn retain<T: Form>(value: &mut T, allowed: impl Fn(&str) -> bool) {
 
 type Submit<'a, T> = dyn Fn(&T, &mut Screen) -> Result<()> + 'a;
 type Confirm<'a, T> = (&'a dyn Fn(&T) -> bool, &'a Submit<'a, T>);
+
+fn layout<T: Form>(value: &mut T) -> (Vec<Group>, Fields<'_>) {
+    (value.groups(), value.fields(T::default()))
+}
 
 pub fn page<T: Form + PartialEq>(
     screen: &mut Screen,
@@ -245,7 +262,7 @@ pub fn page<T: Form + PartialEq>(
         None,
         Some((&|draft| draft != value, &save)),
         None,
-        &|v| v.fields(T::default()),
+        &layout,
     )
     .map(|_| ())
 }
@@ -266,7 +283,7 @@ pub fn optional<T: Form>(
         None,
         None,
         Some(&mut enabled),
-        &|v| v.fields(T::default()),
+        &layout,
     )?;
     if changed {
         *slot = enabled.then_some(value);
@@ -274,14 +291,14 @@ pub fn optional<T: Form>(
     Ok(changed)
 }
 
-fn edit_group<T: Form>(
+fn edit_group<T>(
     screen: &mut Screen,
     title: &str,
     value: &mut T,
     group: Option<&Group>,
     submit: Option<Confirm<'_, T>>,
     mut enabled: Option<&mut bool>,
-    bindings: &dyn Fn(&mut T) -> Fields<'_>,
+    bindings: &dyn Fn(&mut T) -> (Vec<Group>, Fields<'_>),
 ) -> Result<bool> {
     let mut selected = 0;
     let mut notice = String::new();
@@ -289,17 +306,19 @@ fn edit_group<T: Form>(
     loop {
         let pending = submit.is_some_and(|(dirty, _)| dirty(value));
         let active = enabled.as_deref().copied().unwrap_or(true);
-        let mut groups = if active && group.is_none() {
-            value.groups()
+        let (mut groups, mut fields) = if active {
+            bindings(value)
         } else {
-            Vec::new()
+            Default::default()
         };
-        let mut fields = if active { bindings(value) } else { Vec::new() };
         groups.retain(|group| {
             fields
                 .iter()
                 .any(|field| group.fields.contains(&field.key()))
         });
+        if group.is_some() {
+            groups.clear();
+        }
         fields.retain(|field| match group {
             Some(group) => group.fields.contains(&field.key()),
             None => !groups

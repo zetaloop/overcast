@@ -367,11 +367,11 @@ fn edit(
                 selected = destination + 1;
                 Ok(())
             }
-            (Action::Select, Some(index)) => outbound.connections[index].edit(screen),
+            (Action::Select, Some(index)) => outbound.connections[index].edit(screen, store),
             (Action::Select, None) => match items[selected].key.as_str() {
                 "name" => outbound.name.edit(screen, &menu, selected).map(|_| ()),
                 "add" => {
-                    if let Some(value) = connection::create(screen)? {
+                    if let Some(value) = connection::create(screen, store)? {
                         outbound.connections.push(value);
                         selected = outbound.connections.len();
                     }

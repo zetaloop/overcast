@@ -13,6 +13,7 @@ use url::Url;
 
 use crate::{
     Result,
+    config::Store,
     form::{self, Value, choices, fields},
     transport::Transport,
     tui::{Action, Item, Menu, Screen},
@@ -369,21 +370,21 @@ impl Connection {
         }
     }
 
-    pub fn edit(&mut self, screen: &mut Screen) -> Result<()> {
+    pub fn edit(&mut self, screen: &mut Screen, store: &Store) -> Result<()> {
         let title = self.summary();
-        match self {
-            Self::Direct(value) => form::edit(screen, &title, value),
-            Self::Http(value) => form::edit(screen, &title, value),
-            Self::Socks(value) => form::edit(screen, &title, value),
-            Self::Vless(value) => form::edit(screen, &title, value),
-            Self::Vmess(value) => form::edit(screen, &title, value),
-            Self::Trojan(value) => form::edit(screen, &title, value),
-            Self::Shadowsocks(value) => form::edit(screen, &title, value),
-            Self::Forward(value) => form::edit(screen, &title, value),
-            Self::Hysteria2(value) => form::edit(screen, &title, value),
-            Self::AnyTls(value) => form::edit(screen, &title, value),
-            Self::Warp(value) => form::edit(screen, &title, value),
-        }
+        form::flat(screen, &title, self, |source| match source {
+            Self::Direct(value) => value.controls(store),
+            Self::Http(value) => value.controls(store),
+            Self::Socks(value) => value.controls(store),
+            Self::Vless(value) => value.controls(store),
+            Self::Vmess(value) => value.controls(store),
+            Self::Trojan(value) => value.controls(store),
+            Self::Shadowsocks(value) => value.controls(store),
+            Self::Forward(value) => value.controls(store),
+            Self::Hysteria2(value) => value.controls(store),
+            Self::AnyTls(value) => value.controls(store),
+            Self::Warp(value) => value.controls(store),
+        })
         .map(|_| ())
     }
 
@@ -452,7 +453,7 @@ impl Connection {
     }
 }
 
-pub fn create(screen: &mut Screen) -> Result<Option<Connection>> {
+pub fn create(screen: &mut Screen, store: &Store) -> Result<Option<Connection>> {
     let items = [
         Item::new("http", "HTTP".stylized()),
         Item::new("socks", "SOCKS".stylized()),
@@ -492,7 +493,7 @@ pub fn create(screen: &mut Screen) -> Result<Option<Connection>> {
                     10 => Connection::Direct(Direct::default()),
                     _ => return Ok(None),
                 };
-                connection.edit(screen)?;
+                connection.edit(screen, store)?;
                 return Ok(Some(connection));
             }
             _ => {}
