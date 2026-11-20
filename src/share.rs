@@ -11,7 +11,6 @@ use url::Host;
 
 use crate::{
     Result,
-    config::Store,
     connection::{self, Connection, HttpVersion, Security, SocksVersion},
     native::options::Options,
     transport::{Header, Transport},
@@ -57,7 +56,7 @@ pub fn copy(
     }
 }
 
-pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<String> {
+pub fn path(connections: &[Connection], name: &str) -> Result<String> {
     let mut values = connections
         .iter()
         .rev()
@@ -139,10 +138,10 @@ pub fn path(connections: &[Connection], name: &str, store: &Store) -> Result<Str
         }
         *port = value.port;
     }
-    link(&inner, name, store)
+    link(&inner, name)
 }
 
-pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
+pub fn link(source: &Connection, name: &str) -> Result<String> {
     let (server, port) = source.server().ok_or("直连没有远端分享链接")?;
     let server = match server.parse::<IpAddr>() {
         Ok(server) => server.to_string(),
@@ -156,8 +155,8 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             return Err("此连接使用连接路径 JSON 分享".into());
         }
         Connection::Http(value) => {
-            tls(&value.security, &mut query, store)?;
-            transport(&value.transport, &value.security, &mut query, store)?;
+            tls(&value.security, &mut query)?;
+            transport(&value.transport, &value.security, &mut query)?;
             if matches!(value.security, Security::Tls(_)) {
                 query.remove("security");
                 if value.http.fixed_version && !query.contains_key("alpn") {
@@ -206,8 +205,8 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Socks(value) => {
-            tls(&value.security, &mut query, store)?;
-            transport(&value.transport, &value.security, &mut query, store)?;
+            tls(&value.security, &mut query)?;
+            transport(&value.transport, &value.security, &mut query)?;
             let socks_tls = value.socks.version == SocksVersion::V5
                 && matches!(value.security, Security::Tls(_));
             if socks_tls {
@@ -250,16 +249,16 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
                 "encryption".to_owned(),
                 json!(value.vless.encryption.as_deref().unwrap_or("none")),
             );
-            tls(&value.security, &mut query, store)?;
-            transport(&value.transport, &value.security, &mut query, store)?;
+            tls(&value.security, &mut query)?;
+            transport(&value.transport, &value.security, &mut query)?;
             (
                 "vless",
                 format!("{}@", utf8_percent_encode(&value.uuid, COMPONENT)),
             )
         }
         Connection::Vmess(value) => {
-            tls(&value.security, &mut query, store)?;
-            transport(&value.transport, &value.security, &mut query, store)?;
+            tls(&value.security, &mut query)?;
+            transport(&value.transport, &value.security, &mut query)?;
             if value.vmess.alter_id.is_some_and(|id| id != 0)
                 || query.keys().all(|key| {
                     matches!(
@@ -336,8 +335,8 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Trojan(value) => {
-            tls(&value.security, &mut query, store)?;
-            transport(&value.transport, &value.security, &mut query, store)?;
+            tls(&value.security, &mut query)?;
+            transport(&value.transport, &value.security, &mut query)?;
             match value.security {
                 Security::None => {
                     query.insert("security".to_owned(), json!("none"));
@@ -364,10 +363,10 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             match value.security {
                 Security::None => return Err("AnyTLS 分享链接使用 TLS".into()),
                 Security::Tls(_) => {
-                    tls(&value.security, &mut query, store)?;
+                    tls(&value.security, &mut query)?;
                     query.remove("security");
                 }
-                Security::Reality(_) => tls(&value.security, &mut query, store)?,
+                Security::Reality(_) => tls(&value.security, &mut query)?,
             }
             if let Some(value) = query.remove("allowInsecure") {
                 query.insert("insecure".to_owned(), value);
@@ -378,7 +377,7 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Hysteria2(value) => {
-            tls(&Security::Tls(value.tls.clone()), &mut query, store)?;
+            tls(&Security::Tls(value.tls.clone()), &mut query)?;
             query.remove("security");
             if let Some(value) = query.remove("allowInsecure") {
                 query.insert("insecure".to_owned(), value);
@@ -441,8 +440,8 @@ pub fn link(source: &Connection, name: &str, store: &Store) -> Result<String> {
             )
         }
         Connection::Shadowsocks(value) => {
-            tls(&value.security, &mut query, store)?;
-            transport(&value.transport, &value.security, &mut query, store)?;
+            tls(&value.security, &mut query)?;
+            transport(&value.transport, &value.security, &mut query)?;
             uot(&mut query, value.shadowsocks.udp_over_tcp)?;
             let cipher = serde_json::to_value(value.shadowsocks.cipher)?;
             let cipher = cipher.as_str().unwrap();
@@ -526,7 +525,7 @@ fn credentials(username: Option<&str>, password: Option<&str>) -> String {
     value
 }
 
-fn tls(security: &Security, query: &mut Map<String, Value>, store: &Store) -> Result<()> {
+fn tls(security: &Security, query: &mut Map<String, Value>) -> Result<()> {
     let (source, reality) = match security {
         Security::None => return Ok(()),
         Security::Tls(tls) => (tls, None),
@@ -547,8 +546,6 @@ fn tls(security: &Security, query: &mut Map<String, Value>, store: &Store) -> Re
             ("fragment", "tls_fragment"),
             ("fragment_delay", "tls_fragment_fallback_delay"),
             ("record_fragment", "tls_record_fragment"),
-            ("client_certificate", "tls_client_certificate"),
-            ("client_key", "tls_client_key"),
         ],
     );
     for (destination, separator, values) in [
@@ -556,7 +553,6 @@ fn tls(security: &Security, query: &mut Map<String, Value>, store: &Store) -> Re
         ("vcn", ",", &source.verify_names),
         ("cs", ":", &source.cipher_suites),
         ("tls_curve_preferences", ",", &source.curves),
-        ("tls_certificate", ",", &source.certificates),
         (
             "tls_certificate_public_key_sha256",
             ",",
@@ -566,6 +562,25 @@ fn tls(security: &Security, query: &mut Map<String, Value>, store: &Store) -> Re
         if !values.is_empty() {
             query.insert(destination.to_owned(), json!(values.join(separator)));
         }
+    }
+    for (key, material) in [
+        ("tls_client_certificate", &source.client_certificate),
+        ("tls_client_key", &source.client_key),
+    ] {
+        if let Some(text) = material
+            .as_ref()
+            .and_then(crate::security::Material::inline)
+        {
+            query.insert(key.into(), json!(text));
+        }
+    }
+    let trust: Vec<_> = source
+        .certificates
+        .iter()
+        .filter_map(crate::security::Material::inline)
+        .collect();
+    if !trust.is_empty() {
+        query.insert("tls_certificate".into(), json!(trust.join(",")));
     }
     if !source.certificate_sha256.is_empty() {
         query.insert(
@@ -593,16 +608,14 @@ fn tls(security: &Security, query: &mut Map<String, Value>, store: &Store) -> Re
         query.entry("fp").or_insert(json!("chrome"));
     }
     if let Some(ech) = &source.ech {
-        let value = if let Some(value) = &ech.config {
-            value.clone()
-        } else if let Some(file) = &ech.config_file {
-            std::fs::read_to_string(store.directory.join(file))?
-                .trim()
-                .to_owned()
-        } else {
-            ech.query_name.clone().unwrap_or_default()
+        let value = match &ech.config {
+            Some(crate::security::Material::Inline(text)) => Some(text.as_str()),
+            Some(crate::security::Material::File(_)) => None,
+            None => Some(ech.query_name.as_deref().unwrap_or_default()),
         };
-        query.insert("ech".to_owned(), json!(value));
+        if let Some(value) = value {
+            query.insert("ech".to_owned(), json!(value));
+        }
     }
     Ok(())
 }
@@ -611,7 +624,6 @@ fn transport(
     source: &Transport,
     security: &Security,
     query: &mut Map<String, Value>,
-    store: &Store,
 ) -> Result<()> {
     let secure = !matches!(security, Security::None);
     match source {
@@ -705,24 +717,21 @@ fn transport(
             let mut value = value.clone();
             if let Some(download) = &mut value.download {
                 download.network = connection::Network::default();
-                if let Some(tls) = download.security.tls_mut() {
-                    for file in std::mem::take(&mut tls.certificate_files) {
-                        tls.certificates
-                            .push(std::fs::read_to_string(store.directory.join(file))?);
-                    }
-                    if let Some(file) = tls.client_certificate_file.take() {
-                        tls.client_certificate =
-                            Some(std::fs::read_to_string(store.directory.join(file))?);
-                    }
-                    if let Some(file) = tls.client_key_file.take() {
-                        tls.client_key = Some(std::fs::read_to_string(store.directory.join(file))?);
-                    }
+                if let Some(tls) = download.security.tls_mut()
+                    && tls.ech.as_ref().is_some_and(|ech| {
+                        matches!(ech.config, Some(crate::security::Material::File(_)))
+                    })
+                {
+                    tls.ech = None;
                 }
             }
             let mut native = crate::native::transport::xray(
                 &Transport::XHttp(value),
                 false,
-                store.into(),
+                crate::native::parameters::Input {
+                    directory: std::path::Path::new(""),
+                    pending: None,
+                },
                 secure,
             )?;
             query.insert("type".to_owned(), json!("xhttp"));

@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    certificate_paths, hex_hashes, listener::Credential, options::Options, path, pem,
-    single_headers, unsupported,
+    certificate_paths, hex_hashes, listener::Credential, options::Options, single_headers,
+    unsupported,
 };
 
 pub fn outbound(
@@ -20,7 +20,6 @@ pub fn outbound(
     input: super::parameters::Input<'_>,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    let store = input.store;
     let (kind, proxy, network) = match source {
         Connection::Direct(value) => ("direct", None, &value.network),
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
@@ -125,7 +124,7 @@ pub fn outbound(
                     plugin,
                     inbound::Core::Mihomo,
                     &value.server,
-                    store,
+                    input.directory,
                     globals,
                 )?);
                 if plugin.name == "kcptun" && value.shadowsocks.udp_over_tcp.is_none() {
@@ -637,7 +636,6 @@ pub fn client_tls(
     globals: &mut Map<String, Value>,
     kind: &str,
 ) -> Result<()> {
-    let store = input.store;
     let v2ray = matches!(kind, "vless" | "vmess" | "trojan");
     let (source, reality) = match security {
         Security::None => return Ok(()),
@@ -701,29 +699,34 @@ pub fn client_tls(
             json!(hex_hashes(std::slice::from_ref(hash))?.remove(0)),
         );
     }
-    for (inline, file, destination) in [
+    if let (Some(cert), Some(key)) = (&source.client_certificate, &source.client_key)
+        && cert.inline().is_some() != key.inline().is_some()
+    {
+        return unsupported("Mihomo 的客户端证书与私钥需同为正文或同为文件路径");
+    }
+    for (name, value, destination) in [
         (
             "client_certificate",
-            "client_certificate_file",
+            &source.client_certificate,
             "certificate",
         ),
-        ("client_key", "client_key_file", "private-key"),
+        ("client_key", &source.client_key, "private-key"),
     ] {
-        let text = options.take(inline);
-        let file = options.take(file);
-        if let Some(file) = file {
-            output.insert(
-                destination.to_owned(),
-                json!(path(store, file.as_str().unwrap())),
-            );
-        } else if let Some(text) = text {
-            output.insert(destination.to_owned(), text);
+        options.take(name);
+        if let Some(v) = value {
+            output.insert(destination.into(), v.native(input.directory));
         }
     }
     options.take("certificates");
-    options.take("certificate_files");
-    let trust = pem(store, &source.certificates, &source.certificate_files)?;
-    if !trust.is_empty() {
+    if !source.certificates.is_empty() {
+        let Some(trust) = source
+            .certificates
+            .iter()
+            .map(crate::security::Material::inline)
+            .collect::<Option<Vec<_>>>()
+        else {
+            return unsupported("Mihomo 的出站信任库使用证书正文，不支持文件路径");
+        };
         let value = json!({"custom-certifactes": trust});
         if globals.get("tls").is_some_and(|current| current != &value) {
             return unsupported("Mihomo 同一连接的上传与下载使用共同的证书信任库");
@@ -736,13 +739,11 @@ pub fn client_tls(
             return unsupported(format!("Mihomo {kind} 出站没有 ECH 配置"));
         }
         let mut ech = Map::from_iter([("enable".to_owned(), json!(true))]);
-        if let Some(file) = &value.config_file {
-            ech.insert(
-                "config".to_owned(),
-                json!(std::fs::read_to_string(path(store, file))?.trim()),
-            );
-        } else if let Some(config) = &value.config {
-            ech.insert("config".to_owned(), json!(config));
+        if let Some(config) = &value.config {
+            let Some(text) = config.inline() else {
+                return unsupported("Mihomo 的 ECH 公共参数使用正文，不支持文件路径");
+            };
+            ech.insert("config".to_owned(), json!(crate::ech::base64(text)?));
         }
         if let Some(value) = &value.query_name {
             ech.insert("query-server-name".to_owned(), json!(value));
@@ -774,24 +775,25 @@ fn server_tls(source: &Inbound, store: &Store, output: &mut Map<String, Value>) 
     output.insert("private-key".to_owned(), json!(key));
     options.rename(output, &[("client_auth", "client-auth-type")]);
     options.take("client_certificates");
-    options.take("client_certificate_files");
-    let trust = pem(
-        store,
-        &tls.client_certificates,
-        &tls.client_certificate_files,
-    )?;
-    if !trust.is_empty() {
-        output.insert("client-auth-cert".to_owned(), json!(trust.join("\n")));
+    if let [v] = tls.client_certificates.as_slice() {
+        output.insert("client-auth-cert".into(), v.native(&store.directory));
+    } else if !tls.client_certificates.is_empty() {
+        let Some(trust) = tls
+            .client_certificates
+            .iter()
+            .map(crate::security::Material::inline)
+            .collect::<Option<Vec<_>>>()
+        else {
+            return unsupported("Mihomo 的入站信任库可用多张证书正文或一条文件路径");
+        };
+        output.insert("client-auth-cert".into(), json!(trust.join("\n")));
     }
     options.take("ech");
     if let Some(ech) = &tls.ech {
-        if let Some(file) = &ech.key_file {
-            output.insert("ech-key".to_owned(), json!(path(store, file)));
-        } else if let [key] = ech.keys.as_slice() {
-            output.insert("ech-key".to_owned(), json!(key));
-        } else {
-            return unsupported("Mihomo ECH 使用一份服务端密钥");
-        }
+        output.insert(
+            "ech-key".into(),
+            crate::ech::server_key(ech, &store.directory)?,
+        );
     }
     options.finish("Mihomo 服务端 TLS")
 }

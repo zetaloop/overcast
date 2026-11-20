@@ -2,19 +2,12 @@ use std::fs;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-use crate::{
-    Result,
-    config::Store,
-    inbound::{Core, Ech, Inbound},
-};
+use crate::{Result, config::Store, inbound::Ech, security::Material};
 
-pub fn public(source: &Inbound, ech: &Ech, store: &Store) -> Result<String> {
-    let text = if let Some(file) = &ech.key_file
-        && (ech.keys.is_empty() || source.core == Core::Xray)
-    {
-        fs::read_to_string(store.directory.join(file))?
-    } else {
-        ech.keys.join("\n")
+pub fn public(ech: &Ech, store: &Store) -> Result<String> {
+    let text = match &ech.key {
+        Material::File(file) => fs::read_to_string(store.directory.join(file))?,
+        Material::Inline(text) => text.clone(),
     };
     let bytes = decode(&text, "ECH KEYS")?;
     let mut input = bytes.as_slice();
@@ -29,10 +22,10 @@ pub fn public(source: &Inbound, ech: &Ech, store: &Store) -> Result<String> {
     Ok(STANDARD.encode(output))
 }
 
-pub fn pem(config: &str) -> Result<String> {
+pub fn pem(text: &str, label: &str) -> Result<String> {
     Ok(format!(
-        "-----BEGIN ECH CONFIGS-----\n{}\n-----END ECH CONFIGS-----\n",
-        STANDARD.encode(decode(config, "ECH CONFIGS")?)
+        "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+        STANDARD.encode(decode(text, label)?)
     ))
 }
 
@@ -42,6 +35,20 @@ pub fn base64(config: &str) -> Result<String> {
     } else {
         Ok(config.to_owned())
     }
+}
+
+pub fn base64_key(text: &str) -> Result<String> {
+    Ok(STANDARD.encode(decode(text, "ECH KEYS")?))
+}
+
+pub fn server_key(
+    key: &crate::inbound::Ech,
+    directory: &std::path::Path,
+) -> Result<serde_json::Value> {
+    Ok(match &key.key {
+        Material::File(path) => serde_json::json!(directory.join(path)),
+        Material::Inline(text) => serde_json::json!(pem(text, "ECH KEYS")?),
+    })
 }
 
 fn decode(text: &str, label: &str) -> Result<Vec<u8>> {

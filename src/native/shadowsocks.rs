@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 use crate::{
     Result,
-    config::Store,
     graph::Graph,
     inbound::{Core, Inbound, Protocol},
     progress::Progress,
@@ -159,7 +158,7 @@ pub fn plugin(
     source: &Plugin,
     core: Core,
     server: &str,
-    store: &Store,
+    directory: &std::path::Path,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
     let mut values = arguments(&source.options)?;
@@ -218,14 +217,17 @@ pub fn plugin(
             let raw = values.remove("certRaw").map(|value| {
                 format!("-----BEGIN CERTIFICATE-----\n{value}\n-----END CERTIFICATE-----")
             });
+            if cert.is_some() && raw.is_some() {
+                return Err("v2ray-plugin 的同一份证书请选择 cert 路径或 certRaw 正文".into());
+            }
             if core == Core::Mihomo && tls {
-                let trust = super::pem(
-                    store,
-                    &raw.into_iter().collect::<Vec<_>>(),
-                    &cert.into_iter().collect::<Vec<_>>(),
-                )?;
-                if !trust.is_empty() {
-                    globals.insert("tls".to_owned(), json!({"custom-certifactes": trust}));
+                if cert.is_some() {
+                    return unsupported(
+                        "Mihomo v2ray-plugin 的信任证书使用 certRaw 正文，不支持 cert 路径",
+                    );
+                }
+                if let Some(raw) = raw {
+                    globals.insert("tls".to_owned(), json!({"custom-certifactes": [raw]}));
                 }
             }
             (
@@ -316,7 +318,7 @@ pub fn plugin(
             ));
         }
         if let Some(path) = original.get_mut("cert") {
-            *path = super::path(store, path).to_string_lossy().into_owned();
+            *path = directory.join(&*path).to_string_lossy().into_owned();
         }
         let escape = |value: &str| {
             value
@@ -361,7 +363,7 @@ pub fn plugin(
             } else if matches!(key.as_str(), "certificate" | "private-key")
                 && !value.contains("-----BEGIN")
             {
-                json!(super::path(store, &value))
+                json!(directory.join(&value))
             } else {
                 json!(value)
             };

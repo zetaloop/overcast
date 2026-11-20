@@ -532,8 +532,12 @@ pub fn security(query: &mut BTreeMap<String, String>, default: bool) -> Result<S
         fingerprint: query.remove("fp"),
         min_version: query.remove("tls_min_version"),
         max_version: query.remove("tls_max_version"),
-        client_certificate: query.remove("tls_client_certificate"),
-        client_key: query.remove("tls_client_key"),
+        client_certificate: query
+            .remove("tls_client_certificate")
+            .map(crate::security::Material::Inline),
+        client_key: query
+            .remove("tls_client_key")
+            .map(crate::security::Material::Inline),
         fragment_delay: query.remove("tls_fragment_fallback_delay"),
         ..Tls::default()
     };
@@ -543,7 +547,6 @@ pub fn security(query: &mut BTreeMap<String, String>, default: bool) -> Result<S
         ("pcs", ',', &mut tls.certificate_sha256),
         ("cs", ':', &mut tls.cipher_suites),
         ("tls_curve_preferences", ',', &mut tls.curves),
-        ("tls_certificate", ',', &mut tls.certificates),
         (
             "tls_certificate_public_key_sha256",
             ',',
@@ -557,6 +560,14 @@ pub fn security(query: &mut BTreeMap<String, String>, default: bool) -> Result<S
                 .map(str::to_owned)
                 .collect();
         }
+    }
+    if let Some(certs) = query.remove("tls_certificate") {
+        tls.certificates.extend(
+            certs
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| crate::security::Material::Inline(s.to_owned())),
+        );
     }
     for (key, target) in [
         ("tls_fragment", &mut tls.fragment),
@@ -584,7 +595,7 @@ pub fn security(query: &mut BTreeMap<String, String>, default: bool) -> Result<S
     }
     if let Some(value) = query.remove("ech") {
         tls.ech = Some(Ech {
-            config: Some(value),
+            config: Some(crate::security::Material::Inline(value)),
             ..Ech::default()
         });
     }
@@ -984,25 +995,33 @@ fn security_options(mut values: Map<String, Value>, reality: bool) -> Result<Sec
             for mut certificate in serde_json::from_value::<Vec<Map<String, Value>>>(certificates)?
             {
                 let usage = certificate.remove("usage");
-                let text = certificate
-                    .remove("certificate")
-                    .map(serde_json::from_value::<Vec<String>>)
-                    .transpose()?
-                    .unwrap_or_default();
+                let mut material =
+                    |inline: &str, file: &str| -> Result<Option<crate::security::Material>> {
+                        match (certificate.remove(inline), certificate.remove(file)) {
+                            (Some(text), None) => Ok(Some(crate::security::Material::Inline(
+                                serde_json::from_value::<Vec<String>>(text)?.join("\n"),
+                            ))),
+                            (None, Some(path)) => Ok(Some(crate::security::Material::File(
+                                serde_json::from_value(path)?,
+                            ))),
+                            (None, None) => Ok(None),
+                            (Some(_), Some(_)) => {
+                                Err(format!("XHTTP 下载连接同时包含 {inline} 和 {file}").into())
+                            }
+                        }
+                    };
+                let cert = material("certificate", "certificateFile")?;
                 if usage.as_ref() == Some(&json!("verify")) {
-                    trust.extend(text);
+                    trust.extend(cert);
                 } else if usage.is_none() || usage.as_ref() == Some(&json!("encipherment")) {
                     if output.contains_key("client_certificate") {
                         return Err("XHTTP 下载连接使用一组客户端证书".into());
                     }
-                    if !text.is_empty() {
-                        output.insert("client_certificate".to_owned(), json!(text.join("\n")));
+                    if let Some(cert) = cert {
+                        output.insert("client_certificate".to_owned(), json!(cert));
                     }
-                    if let Some(key) = certificate.remove("key") {
-                        output.insert(
-                            "client_key".to_owned(),
-                            json!(serde_json::from_value::<Vec<String>>(key)?.join("\n")),
-                        );
+                    if let Some(key) = material("key", "keyFile")? {
+                        output.insert("client_key".to_owned(), json!(key));
                     }
                 } else {
                     return Err("无法识别 XHTTP 下载证书用途".into());

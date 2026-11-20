@@ -7,6 +7,77 @@ use crate::{
     tui::{Action, Item, Menu, Screen},
 };
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub enum Material {
+    File(String),
+    #[serde(untagged)]
+    Inline(String),
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self::Inline(String::new())
+    }
+}
+
+impl Material {
+    pub fn inline(&self) -> Option<&str> {
+        match self {
+            Self::Inline(text) => Some(text),
+            Self::File(_) => None,
+        }
+    }
+}
+
+impl Value for Material {
+    fn text(&self) -> String {
+        match self {
+            Self::File(path) => path.clone(),
+            Self::Inline(text) => text.lines().next().unwrap_or_default().to_owned(),
+        }
+    }
+
+    fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
+        let title = format!("{} / {}", parent.title, parent.items[field].label.content);
+        let mut items = [
+            Item::new("inline", "正文".stylized()),
+            Item::new("file", "文件路径".stylized()),
+            Item::new("back", "返回".stylized()),
+        ];
+        let current = usize::from(matches!(self, Self::File(_)));
+        let mut selected = current;
+        items[current].value = self.text();
+        let menu = Menu {
+            title: &title,
+            heading: "",
+            items: &items,
+            help: "方向键 选择\n回车键 编辑\nEsc 返回",
+        };
+        loop {
+            match screen.select(&menu, &mut selected, "")? {
+                Action::Back => return Ok(false),
+                Action::Select if selected == 2 => return Ok(false),
+                Action::Select => {
+                    let mut text = match self {
+                        Self::Inline(s) | Self::File(s) if selected == current => s.clone(),
+                        _ => String::new(),
+                    };
+                    if text.edit(screen, &menu, selected)? {
+                        *self = if selected == 0 {
+                            Self::Inline(text)
+                        } else {
+                            Self::File(text)
+                        };
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Security<T, R> {

@@ -7,14 +7,13 @@ use crate::{
     inbound::{self, Inbound, Protocol},
 };
 
-use super::{certificate_paths, hashes, listener::Credential, options::Options, path, unsupported};
+use super::{certificate_paths, hashes, listener::Credential, options::Options, unsupported};
 
 pub fn outbound(
     source: &Connection,
     input: super::parameters::Input<'_>,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
-    let store = input.store;
     if source.multiplex().is_some()
         && !matches!(
             source,
@@ -363,7 +362,7 @@ pub fn outbound(
                     plugin,
                     inbound::Core::SingBox,
                     &value.server,
-                    store,
+                    input.directory,
                     globals,
                 )?);
             }
@@ -882,7 +881,6 @@ fn client_tls(
     input: super::parameters::Input<'_>,
     globals: &mut Map<String, Value>,
 ) -> Result<Value> {
-    let store = input.store;
     let source = match security {
         Security::None => return Ok(json!({})),
         Security::Tls(tls) => tls,
@@ -899,8 +897,6 @@ fn client_tls(
             "min_version",
             "max_version",
             "cipher_suites",
-            "client_certificate",
-            "client_key",
             "kernel_tx",
             "kernel_rx",
             "fragment",
@@ -926,17 +922,7 @@ fn client_tls(
             json!({"enabled": true, "fingerprint": value}),
         );
     }
-    for (name, destination) in [
-        ("client_certificate_file", "client_certificate_path"),
-        ("client_key_file", "client_key_path"),
-    ] {
-        if let Some(value) = options.take(name) {
-            output.insert(
-                destination.to_owned(),
-                json!(path(store, value.as_str().unwrap())),
-            );
-        }
-    }
+    identity(source, input.directory, &mut options, &mut output);
     for (name, destination, values) in [
         (
             "certificate_sha256",
@@ -955,25 +941,39 @@ fn client_tls(
     }
     options.take("system_roots");
     options.take("certificates");
-    options.take("certificate_files");
-    if source.system_roots.is_some()
-        || !source.certificates.is_empty()
-        || !source.certificate_files.is_empty()
-    {
-        globals.insert("certificate".to_owned(), json!({
-            "store": if source.system_roots == Some(true) { "system" } else { "none" },
-            "certificate": source.certificates,
-            "certificate_path": source.certificate_files.iter().map(|value| path(store, value)).collect::<Vec<_>>(),
-        }));
+    if source.system_roots.is_some() || !source.certificates.is_empty() {
+        let mut trust = Map::from_iter([(
+            "store".into(),
+            json!(if source.system_roots == Some(true) {
+                "system"
+            } else {
+                "none"
+            }),
+        )]);
+        certificates(
+            &mut trust,
+            &source.certificates,
+            "certificate",
+            "certificate_path",
+            input.directory,
+        );
+        globals.insert("certificate".to_owned(), json!(trust));
     }
     options.take("ech");
     if let Some(value) = &source.ech {
         let mut ech = Map::from_iter([("enabled".to_owned(), json!(true))]);
-        if let Some(value) = &value.config {
-            ech.insert("config".to_owned(), json!(crate::ech::pem(value)?));
-        }
-        if let Some(file) = &value.config_file {
-            ech.insert("config_path".to_owned(), json!(path(store, file)));
+        if let Some(material) = &value.config {
+            match material {
+                crate::security::Material::Inline(text) => {
+                    ech.insert(
+                        "config".into(),
+                        json!(crate::ech::pem(text, "ECH CONFIGS")?),
+                    );
+                }
+                crate::security::Material::File(file) => {
+                    ech.insert("config_path".into(), json!(input.directory.join(file)));
+                }
+            }
         }
         if let Some(value) = &value.query_name {
             ech.insert("query_server_name".to_owned(), json!(value));
@@ -982,6 +982,44 @@ fn client_tls(
     }
     options.finish("sing-box TLS")?;
     Ok(json!(output))
+}
+
+pub(super) fn identity(
+    source: &connection::Tls,
+    directory: &std::path::Path,
+    options: &mut Options,
+    output: &mut Map<String, Value>,
+) {
+    for (name, file, value) in [
+        (
+            "client_certificate",
+            "client_certificate_path",
+            &source.client_certificate,
+        ),
+        ("client_key", "client_key_path", &source.client_key),
+    ] {
+        options.take(name);
+        if let Some(value) = value {
+            output.insert(value.field(name, file).into(), value.native(directory));
+        }
+    }
+}
+
+fn certificates(
+    output: &mut Map<String, Value>,
+    values: &[crate::security::Material],
+    inline: &'static str,
+    file: &'static str,
+    directory: &std::path::Path,
+) {
+    for v in values {
+        output
+            .entry(v.field(inline, file))
+            .or_insert(json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(v.native(directory));
+    }
 }
 
 fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
@@ -1024,7 +1062,6 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
         &[
             ("curves", "curve_preferences"),
             ("client_auth", "client_authentication"),
-            ("client_certificates", "client_certificate"),
         ],
     );
     options.durations(
@@ -1032,17 +1069,19 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
         &[("handshake_timeout", "handshake_timeout")],
         None,
     )?;
-    if options.take("client_certificate_files").is_some() {
-        output.insert(
-            "client_certificate_path".to_owned(),
-            json!(
-                tls.client_certificate_files
-                    .iter()
-                    .map(|value| path(store, value))
-                    .collect::<Vec<_>>()
-            ),
-        );
+    options.take("client_certificates");
+    if tls.client_certificates.iter().any(|v| v.inline().is_some())
+        && tls.client_certificates.iter().any(|v| v.inline().is_none())
+    {
+        return unsupported("sing-box 入站的客户端信任证书需同为正文或同为文件路径");
     }
+    certificates(
+        &mut output,
+        &tls.client_certificates,
+        "client_certificate",
+        "client_certificate_path",
+        &store.directory,
+    );
     for (name, destination, values) in [
         (
             "client_certificate_sha256",
@@ -1062,12 +1101,10 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
     options.take("ech");
     if let Some(value) = &tls.ech {
         let mut ech = Map::from_iter([("enabled".to_owned(), json!(true))]);
-        if !value.keys.is_empty() {
-            ech.insert("key".to_owned(), json!(value.keys));
-        }
-        if let Some(value) = &value.key_file {
-            ech.insert("key_path".to_owned(), json!(path(store, value)));
-        }
+        ech.insert(
+            value.key.field("key", "key_path").into(),
+            crate::ech::server_key(value, &store.directory)?,
+        );
         output.insert("ech".to_owned(), json!(ech));
     }
     options.finish("sing-box 服务端 TLS")?;

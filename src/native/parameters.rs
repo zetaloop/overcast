@@ -32,14 +32,14 @@ impl From<&Inbound> for Handshake {
 /// Parameters may be selected before their authentication material is available.
 #[derive(Clone, Copy)]
 pub(crate) struct Input<'a> {
-    pub store: &'a Store,
+    pub directory: &'a std::path::Path,
     pub pending: Option<Handshake>,
 }
 
 impl<'a> From<&'a Store> for Input<'a> {
     fn from(store: &'a Store) -> Self {
         Self {
-            store,
+            directory: &store.directory,
             pending: None,
         }
     }
@@ -88,7 +88,7 @@ impl Core {
         self.client(
             value,
             Input {
-                store,
+                directory: &store.directory,
                 pending: Some(pending),
             },
             &mut Map::new(),

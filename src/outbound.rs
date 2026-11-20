@@ -347,7 +347,7 @@ fn edit(
             }
             (Action::Key(key), Some(index)) if matches!(key.code, KeyCode::Char('l' | 'L')) => {
                 let connection = &active.connections[index];
-                crate::share::link(connection, &connection.summary(), store)
+                crate::share::link(connection, &connection.summary())
                     .and_then(|text| screen.copy(&text))
             }
             (Action::Key(key), Some(index)) if key.code == KeyCode::Delete => {
@@ -379,7 +379,7 @@ fn edit(
                 }
                 "export" => crate::share::copy(screen, "连接资料", |_, links| {
                     if links {
-                        crate::share::path(&active.connections, &active.name, store)
+                        crate::share::path(&active.connections, &active.name)
                     } else {
                         Ok(serde_json::to_string(&active.selection())?)
                     }

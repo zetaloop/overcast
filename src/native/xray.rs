@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    certificate_paths, hex_hashes, listener::Credential, options::Options, path, single_headers,
+    certificate_paths, hex_hashes, listener::Credential, options::Options, single_headers,
     transport, unsupported,
 };
 
@@ -870,7 +870,7 @@ pub fn security(
 ) -> Result<Map<String, Value>> {
     let (kind, name, value) = match source {
         connection::Security::None => return Ok(Map::new()),
-        connection::Security::Tls(tls) => ("tls", "tlsSettings", client_tls(tls, input.store)?),
+        connection::Security::Tls(tls) => ("tls", "tlsSettings", client_tls(tls, input.directory)?),
         connection::Security::Reality(reality) => (
             "reality",
             "realitySettings",
@@ -915,7 +915,7 @@ fn reality_transport(source: &crate::transport::Transport) -> Result<()> {
     }
 }
 
-fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
+fn client_tls(source: &connection::Tls, directory: &std::path::Path) -> Result<Value> {
     let mut options = Options::new(source)?;
     let mut output = Map::new();
     options.copy(&mut output, &["alpn", "fingerprint"]);
@@ -968,28 +968,30 @@ fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
     }
     let mut certificates = Vec::new();
     options.take("certificates");
-    options.take("certificate_files");
-    if !source.certificates.is_empty() {
-        certificates.push(json!({"usage": "verify", "certificate": source.certificates}));
-    }
-    for value in &source.certificate_files {
-        certificates.push(json!({"usage": "verify", "certificateFile": path(store, value)}));
+    for source in &source.certificates {
+        let mut item = Map::from_iter([("usage".into(), json!("verify"))]);
+        material(
+            &mut item,
+            source,
+            "certificate",
+            "certificateFile",
+            directory,
+        );
+        certificates.push(json!(item));
     }
     let mut client = Map::new();
-    for (name, destination) in [("client_certificate", "certificate"), ("client_key", "key")] {
-        if let Some(value) = options.take(name) {
-            client.insert(destination.to_owned(), json!([value]));
-        }
-    }
-    for (name, destination) in [
-        ("client_certificate_file", "certificateFile"),
-        ("client_key_file", "keyFile"),
+    for (name, value, inline, file) in [
+        (
+            "client_certificate",
+            &source.client_certificate,
+            "certificate",
+            "certificateFile",
+        ),
+        ("client_key", &source.client_key, "key", "keyFile"),
     ] {
-        if let Some(value) = options.take(name) {
-            client.insert(
-                destination.to_owned(),
-                json!(path(store, value.as_str().unwrap())),
-            );
+        options.take(name);
+        if let Some(value) = value {
+            material(&mut client, value, inline, file, directory);
         }
     }
     if !client.is_empty() {
@@ -1001,14 +1003,12 @@ fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
     options.take("ech");
     if let Some(ech) = &source.ech {
         if let Some(config) = &ech.config {
+            let Some(config) = config.inline() else {
+                return unsupported("Xray 的 ECH 公共参数使用正文，不支持文件路径");
+            };
             output.insert(
                 "echConfigList".to_owned(),
                 json!(crate::ech::base64(config)?),
-            );
-        } else if let Some(file) = &ech.config_file {
-            output.insert(
-                "echConfigList".to_owned(),
-                json!(std::fs::read_to_string(path(store, file))?.trim()),
             );
         } else if let Some(name) = &ech.query_name {
             output.insert("echConfigList".to_owned(), json!(name));
@@ -1016,6 +1016,20 @@ fn client_tls(source: &connection::Tls, store: &Store) -> Result<Value> {
     }
     options.finish("Xray TLS")?;
     Ok(json!(output))
+}
+
+fn material(
+    output: &mut Map<String, Value>,
+    material: &crate::security::Material,
+    inline: &'static str,
+    file: &'static str,
+    directory: &std::path::Path,
+) {
+    let value = match material.inline() {
+        Some(text) => json!([text]),
+        None => material.native(directory),
+    };
+    output.insert(material.field(inline, file).into(), value);
 }
 
 fn server_tls(source: &Inbound, tls: &inbound::Tls, store: &Store) -> Result<Value> {
@@ -1049,16 +1063,10 @@ fn server_tls(source: &Inbound, tls: &inbound::Tls, store: &Store) -> Result<Val
     }
     options.take("ech");
     if let Some(ech) = &tls.ech {
-        if let Some(file) = &ech.key_file {
-            output.insert(
-                "echServerKeys".to_owned(),
-                json!(std::fs::read_to_string(path(store, file))?.trim()),
-            );
-        } else if let [key] = ech.keys.as_slice() {
-            output.insert("echServerKeys".to_owned(), json!(key));
-        } else {
-            return unsupported("Xray ECH 使用一份服务端密钥");
-        }
+        let Some(text) = ech.key.inline() else {
+            return unsupported("Xray 的 ECH 服务端密钥使用正文，不支持文件路径");
+        };
+        output.insert("echServerKeys".into(), json!(crate::ech::base64_key(text)?));
     }
     options.finish("Xray 服务端 TLS")?;
     Ok(json!(output))

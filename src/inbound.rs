@@ -515,8 +515,7 @@ pub struct Tls {
     pub session_resumption: Option<bool>,
     pub reject_unknown_sni: Option<bool>,
     pub client_auth: ClientAuth,
-    pub client_certificates: Vec<String>,
-    pub client_certificate_files: Vec<String>,
+    pub client_certificates: Vec<crate::security::Material>,
     pub client_certificate_sha256: Vec<String>,
     pub client_public_key_sha256: Vec<String>,
     pub handshake_timeout: Option<String>,
@@ -540,8 +539,7 @@ pub enum ClientAuth {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ech {
-    pub keys: Vec<String>,
-    pub key_file: Option<String>,
+    pub key: crate::security::Material,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1133,7 +1131,6 @@ fields!(Tls {
     reject_unknown_sni: "匹配 SNI",
     client_auth: "客户端证书",
     client_certificates: "客户端信任证书",
-    client_certificate_files: "客户端信任证书文件",
     client_certificate_sha256: "客户端证书 SHA-256",
     client_public_key_sha256: "客户端公钥 SHA-256",
     handshake_timeout: "握手超时",
@@ -1142,15 +1139,12 @@ fields!(Tls {
     key_log: "密钥日志文件",
     ech: "ECH",
 } groups {
-    certificates: "客户端认证" => [client_auth, client_certificates, client_certificate_files, client_certificate_sha256, client_public_key_sha256],
+    certificates: "客户端认证" => [client_auth, client_certificates, client_certificate_sha256, client_public_key_sha256],
     protocol: "版本与密码" => [min_version, max_version, cipher_suites, curves],
     handshake: "握手" => [session_resumption, reject_unknown_sni, handshake_timeout, kernel_tx, kernel_rx, key_log],
 });
 
-fields!(Ech {
-    keys: "密钥",
-    key_file: "密钥文件",
-});
+fields!(Ech { key: "密钥" });
 
 fields!(Listen {
     host: "连接地址",

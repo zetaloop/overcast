@@ -131,8 +131,6 @@ pub fn singbox(reality: &Client, input: super::parameters::Input<'_>) -> Result<
             "min_version",
             "max_version",
             "cipher_suites",
-            "client_certificate",
-            "client_key",
             "kernel_tx",
             "kernel_rx",
         ],
@@ -145,17 +143,7 @@ pub fn singbox(reality: &Client, input: super::parameters::Input<'_>) -> Result<
     let mut utls = Map::from_iter([("enabled".to_owned(), json!(true))]);
     options.copy(&mut utls, &["fingerprint"]);
     output.insert("utls".to_owned(), json!(utls));
-    for (name, destination) in [
-        ("client_certificate_file", "client_certificate_path"),
-        ("client_key_file", "client_key_path"),
-    ] {
-        if let Some(value) = options.take(name) {
-            output.insert(
-                destination.to_owned(),
-                json!(super::path(input.store, value.as_str().unwrap())),
-            );
-        }
-    }
+    super::singbox::identity(source, input.directory, &mut options, &mut output);
     options.finish("sing-box REALITY")?;
     params.take("tls");
     if reality.hybrid_key_exchange == Some(false) {

@@ -86,7 +86,7 @@ pub fn copy(
                 let mut links = Vec::new();
                 for profile in &profiles {
                     progress.check()?;
-                    match crate::share::path(&profile.connections, &profile.name, store) {
+                    match crate::share::path(&profile.connections, &profile.name) {
                         Ok(link) => links.push(link),
                         Err(error) => progress.warn(&profile.name, &error.to_string()),
                     }
@@ -213,7 +213,7 @@ impl Builder<'_> {
                         .and_then(|value| value.connections.last())
                         .unwrap();
                     for client in clients {
-                        result.push((authenticated, vec![client.clone(), self.remote(target)?]));
+                        result.push((authenticated, vec![client.clone(), Self::remote(target)]));
                     }
                 }
             }
@@ -474,7 +474,9 @@ impl Builder<'_> {
         let mut tls = peer_tls(server);
         if let Some(ech) = &server.ech {
             tls.ech = Some(connection::Ech {
-                config: Some(crate::ech::public(source, ech, self.store)?),
+                config: Some(crate::security::Material::Inline(crate::ech::public(
+                    ech, self.store,
+                )?)),
                 ..connection::Ech::default()
             });
         }
@@ -482,9 +484,9 @@ impl Builder<'_> {
             tls.server_name = Some(crate::certificate::name(source)?);
             if !crate::certificate::public(tls.server_name.as_ref().unwrap()) {
                 tls.certificates
-                    .push(std::fs::read_to_string(crate::certificate::root(
-                        self.store,
-                    ))?);
+                    .push(crate::security::Material::Inline(std::fs::read_to_string(
+                        crate::certificate::root(self.store),
+                    )?));
             }
             return Ok(vec![connection::Security::Tls(tls)]);
         };
@@ -515,87 +517,27 @@ impl Builder<'_> {
         Ok(values)
     }
 
-    fn remote(&self, target: &Connection) -> Result<Connection> {
+    fn remote(target: &Connection) -> Connection {
         let mut target = target.clone();
-        let (core, network, tls) = match &mut target {
-            Connection::Http(value) => (
-                &mut value.proxy.core,
-                &mut value.network,
-                value.security.tls_mut(),
-            ),
-            Connection::Socks(value) => (
-                &mut value.proxy.core,
-                &mut value.network,
-                value.security.tls_mut(),
-            ),
-            Connection::Vless(value) => (
-                &mut value.core,
-                &mut value.network,
-                value.security.tls_mut(),
-            ),
-            Connection::Vmess(value) => (
-                &mut value.core,
-                &mut value.network,
-                value.security.tls_mut(),
-            ),
-            Connection::Trojan(value) => (
-                &mut value.core,
-                &mut value.network,
-                value.security.tls_mut(),
-            ),
-            Connection::Shadowsocks(value) => (
-                &mut value.core,
-                &mut value.network,
-                value.security.tls_mut(),
-            ),
-            Connection::Hysteria2(value) => {
-                (&mut value.core, &mut value.network, Some(&mut value.tls))
-            }
-            Connection::AnyTls(value) => (
-                &mut value.core,
-                &mut value.network,
-                value.security.tls_mut(),
-            ),
-            Connection::Forward(value) => (
-                &mut value.core,
-                &mut value.network,
-                value.security.tls_mut(),
-            ),
+        let core = match &mut target {
+            Connection::Http(value) => &mut value.proxy.core,
+            Connection::Socks(value) => &mut value.proxy.core,
+            Connection::Vless(value) => &mut value.core,
+            Connection::Vmess(value) => &mut value.core,
+            Connection::Trojan(value) => &mut value.core,
+            Connection::Shadowsocks(value) => &mut value.core,
+            Connection::Hysteria2(value) => &mut value.core,
+            Connection::AnyTls(value) => &mut value.core,
+            Connection::Forward(value) => &mut value.core,
             Connection::Warp(value) => {
                 value.server = Some(value.server().to_owned());
-                (&mut value.core, &mut value.network, None)
+                &mut value.core
             }
-            Connection::Direct(_) => return Ok(target),
+            Connection::Direct(_) => return target,
         };
         *core = connection::Core::Auto;
-        *network = connection::Network::default();
-        let Some(tls) = tls else {
-            return Ok(target);
-        };
-        for file in tls.certificate_files.drain(..) {
-            tls.certificates
-                .push(std::fs::read_to_string(self.store.directory.join(file))?);
-        }
-        for (inline, file) in [
-            (
-                &mut tls.client_certificate,
-                &mut tls.client_certificate_file,
-            ),
-            (&mut tls.client_key, &mut tls.client_key_file),
-        ] {
-            if let Some(file) = file.take()
-                && inline.is_none()
-            {
-                *inline = Some(std::fs::read_to_string(self.store.directory.join(file))?);
-            }
-        }
-        if let Some(ech) = &mut tls.ech
-            && let Some(file) = ech.config_file.take()
-            && ech.config.is_none()
-        {
-            ech.config = Some(std::fs::read_to_string(self.store.directory.join(file))?);
-        }
-        Ok(target)
+        *target.network_mut() = connection::Network::default();
+        target
     }
 }
 

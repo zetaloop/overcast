@@ -19,7 +19,7 @@ mod xray;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fmt, fs,
+    fmt,
     io::{ErrorKind, Write},
     net::{TcpListener, UdpSocket},
     path::PathBuf,
@@ -1454,12 +1454,20 @@ fn certificate_paths(store: &Store, inbound: &Inbound) -> Result<(PathBuf, PathB
     Ok(certificate::paths(store, &certificate::name(inbound)?))
 }
 
-fn pem(store: &Store, inline: &[String], files: &[String]) -> Result<Vec<String>> {
-    let mut values = inline.to_vec();
-    for file in files {
-        values.push(fs::read_to_string(path(store, file))?);
+impl crate::security::Material {
+    fn native(&self, directory: &std::path::Path) -> Value {
+        match self {
+            Self::Inline(text) => json!(text),
+            Self::File(file) => json!(directory.join(file)),
+        }
     }
-    Ok(values)
+
+    fn field(&self, inline: &'static str, file: &'static str) -> &'static str {
+        match self {
+            Self::Inline(_) => inline,
+            Self::File(_) => file,
+        }
+    }
 }
 
 fn digest(value: &str) -> Result<Vec<u8>> {

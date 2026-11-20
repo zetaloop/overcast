@@ -691,14 +691,11 @@ pub struct Tls {
     pub fingerprint: Option<String>,
     pub engine: Option<String>,
     pub system_roots: Option<bool>,
-    pub certificates: Vec<String>,
-    pub certificate_files: Vec<String>,
+    pub certificates: Vec<crate::security::Material>,
     pub certificate_sha256: Vec<String>,
     pub public_key_sha256: Vec<String>,
-    pub client_certificate: Option<String>,
-    pub client_certificate_file: Option<String>,
-    pub client_key: Option<String>,
-    pub client_key_file: Option<String>,
+    pub client_certificate: Option<crate::security::Material>,
+    pub client_key: Option<crate::security::Material>,
     pub handshake_timeout: Option<String>,
     pub session_resumption: Option<bool>,
     pub kernel_tx: Option<bool>,
@@ -715,8 +712,7 @@ pub struct Tls {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ech {
-    pub config: Option<String>,
-    pub config_file: Option<String>,
+    pub config: Option<crate::security::Material>,
     pub query_name: Option<String>,
 }
 
@@ -990,13 +986,10 @@ fields!(Tls {
     engine: "实现",
     system_roots: "系统证书",
     certificates: "信任证书",
-    certificate_files: "信任证书文件",
     certificate_sha256: "证书 SHA-256",
     public_key_sha256: "公钥 SHA-256",
     client_certificate: "客户端证书",
-    client_certificate_file: "客户端证书文件",
     client_key: "客户端私钥",
-    client_key_file: "客户端私钥文件",
     handshake_timeout: "握手超时",
     session_resumption: "会话复用",
     kernel_tx: "内核发送",
@@ -1009,14 +1002,13 @@ fields!(Tls {
     key_log: "密钥日志文件",
     ech: "ECH",
 } groups {
-    certificates: "证书" => [verify_names, system_roots, certificates, certificate_files, certificate_sha256, public_key_sha256, client_certificate, client_certificate_file, client_key, client_key_file],
+    certificates: "证书" => [verify_names, system_roots, certificates, certificate_sha256, public_key_sha256, client_certificate, client_key],
     protocol: "版本与密码" => [min_version, max_version, cipher_suites, curves, fingerprint, engine],
     handshake: "握手" => [handshake_timeout, session_resumption, kernel_tx, kernel_rx, fragment, fragment_delay, record_fragment, spoof, spoof_method, key_log],
 });
 
 fields!(Ech {
-    config: "配置",
-    config_file: "配置文件",
+    config: "ECH 公共参数",
     query_name: "查询名称",
 });
 
