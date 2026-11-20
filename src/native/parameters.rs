@@ -62,7 +62,8 @@ impl Input<'_> {
         Ok(options)
     }
 
-    pub(super) fn vless(self, value: &crate::vless::ClientOptions) -> Result<Options> {
+    pub(super) fn vless(self, value: &crate::vless::ClientOptions, core: Core) -> Result<Options> {
+        core.check_encryption(value.encrypted() || self.pending.is_some_and(|v| v.encryption))?;
         let mut options = Options::new(value)?;
         if self.pending.is_some_and(|handshake| handshake.encryption) {
             options.require("encryption");
@@ -79,6 +80,30 @@ impl Input<'_> {
 }
 
 impl Core {
+    pub(crate) fn vless_encryption(self) -> bool {
+        self != Self::SingBox
+    }
+
+    pub(super) fn check_encryption(self, enabled: bool) -> Result<()> {
+        if enabled && !self.vless_encryption() {
+            return super::unsupported("sing-box 不支持 VLESS Encryption");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ech_file(self, inbound: bool) -> bool {
+        self == Self::SingBox || inbound && self == Self::Mihomo
+    }
+
+    pub(crate) fn inline_trust(self, inbound: bool, trust: &[crate::security::Material]) -> bool {
+        let paths = trust.iter().filter(|v| v.inline().is_none()).count();
+        paths > 0
+            && match self {
+                Self::Xray => false,
+                Self::Mihomo => !inbound || trust.len() > 1,
+                Self::SingBox => inbound && paths < trust.len(),
+            }
+    }
     pub(crate) fn paired_identity(self) -> bool {
         self == Self::Mihomo
     }

@@ -708,6 +708,11 @@ impl Screen {
         Ok(())
     }
 
+    pub fn warn(&mut self, message: String) {
+        self.warnings.push(message);
+        self.arguments.clear();
+    }
+
     pub fn work<T: Send>(
         &mut self,
         title: &str,

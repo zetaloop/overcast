@@ -133,7 +133,7 @@ pub fn outbound(
             if value.multiplex.is_some() && value.vless.flow == crate::vless::Flow::Vision {
                 return unsupported("Vision 与 Mux.Cool TCP 流复用无法同时使用");
             }
-            let mut options = input.vless(&value.vless)?;
+            let mut options = input.vless(&value.vless, inbound::Core::Xray)?;
             settings.insert("address".to_owned(), json!(value.server));
             settings.insert("port".to_owned(), json!(value.port));
             settings.insert("id".to_owned(), json!(value.uuid));

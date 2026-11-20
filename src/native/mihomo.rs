@@ -251,7 +251,7 @@ pub fn outbound(
             {
                 return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
             }
-            let mut options = input.vless(&value.vless)?;
+            let mut options = input.vless(&value.vless, inbound::Core::Mihomo)?;
             output.insert("server".to_owned(), json!(value.server));
             output.insert("port".to_owned(), json!(value.port));
             output.insert("uuid".to_owned(), json!(value.uuid));

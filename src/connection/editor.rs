@@ -33,6 +33,12 @@ impl Connection {
             && let Some(core) = requested.candidates(None).next()
         {
             self.network_mut().fit(core);
+            if let Self::Vless(v) = self
+                && !core.vless_encryption()
+                && v.vless.encrypted()
+            {
+                v.vless.encryption = None;
+            }
         }
         if let Self::Hysteria2(v) = self
             && let Some(obfs) = &mut v.hysteria.obfs
@@ -82,6 +88,83 @@ fn handshake(mode: usize) -> Security {
         1 => Security::Tls(Default::default()),
         2 => Security::Reality(Box::default()),
         _ => unreachable!(),
+    }
+}
+
+impl crate::core::Draft for Connection {
+    type Core = Core;
+    fn core(&self) -> Core {
+        self.core()
+    }
+    fn supports(&self, selected: Core) -> bool {
+        selected
+            .candidates(None)
+            .any(|core| Stack::Outbound(self).implements(core))
+    }
+    fn set_core(&mut self, selected: Core) {
+        *match self {
+            Self::Direct(v) => &mut v.core,
+            Self::Http(v) => &mut v.proxy.core,
+            Self::Socks(v) => &mut v.proxy.core,
+            Self::Vless(v) => &mut v.core,
+            Self::Vmess(v) => &mut v.core,
+            Self::Trojan(v) => &mut v.core,
+            Self::Shadowsocks(v) => &mut v.core,
+            Self::Hysteria2(v) => &mut v.core,
+            Self::AnyTls(v) => &mut v.core,
+            Self::Warp(v) => &mut v.core,
+            Self::Forward(v) => &mut v.core,
+        } = selected;
+    }
+    fn projected(&self) -> Self {
+        let mut v = self.clone();
+        v.fit();
+        v
+    }
+    fn changes(&self, next: &Self, changes: &mut crate::core::Changes) {
+        changes.fields("", self.network(), next.network());
+        if let (Some(old), Some(new)) = (self.transport(), next.transport()) {
+            changes.transport(old, new);
+        }
+        let modes = ["无", "TLS", "REALITY"];
+        let (a, b) = (self.security_mode(), next.security_mode());
+        if a != b {
+            changes.lines.push(if b == 0 {
+                format!("关闭 {}", modes[a])
+            } else {
+                format!("握手改用 {}", modes[b])
+            });
+        }
+        if let (Self::Vless(a), Self::Vless(b)) = (self, next) {
+            changes.flag("VLESS Encryption", a.vless.encrypted(), b.vless.encrypted());
+        }
+    }
+    fn materials(&mut self, active: &Self, changes: &mut crate::core::Changes) {
+        let requested = active.core();
+        if requested == Core::Auto {
+            return;
+        }
+        let core = requested.candidates(None).next().unwrap();
+        let mode = active.security_mode();
+        let ech = core != Engine::Mihomo || !matches!(active, Self::Http(_) | Self::Socks(_));
+        if let Self::Hysteria2(v) = self {
+            changes.client_tls(&mut v.tls, core, true, "");
+        } else {
+            let (security, transport) = self.stream();
+            if let Some(s) = security
+                && s.index() == mode
+                && let Some(tls) = s.tls_mut()
+            {
+                changes.client_tls(tls, core, ech && (mode == 1 || core == Engine::Mihomo), "");
+            }
+            if matches!(active.transport(), Some(Transport::XHttp(_)))
+                && let Some(Transport::XHttp(x)) = transport
+                && let Some(download) = &mut x.download
+                && let Some(tls) = download.security.tls_mut()
+            {
+                changes.client_tls(tls, core, true, "下载连接的");
+            }
+        }
     }
 }
 
@@ -264,6 +347,23 @@ pub(crate) struct Choices {
 }
 
 impl Choices {
+    pub(crate) fn vless<'a>(
+        &self,
+        label: &'static str,
+        value: &'a mut crate::vless::ClientOptions,
+        default: crate::vless::ClientOptions,
+    ) -> Box<dyn Field + 'a> {
+        let encryption = self
+            .source
+            .core()
+            .candidates(None)
+            .any(Engine::vless_encryption);
+        form::control("vless", label, value, default, None, move |v, s, m, _| {
+            form::subset(s, &format!("{} / {label}", m.title), v, |key| {
+                key != "encryption" || encryption
+            })
+        })
+    }
     pub(crate) fn new(mut source: Connection, store: &Store) -> Self {
         source.fit();
         Self {
@@ -354,14 +454,6 @@ impl Choices {
                 })
             },
         )
-    }
-
-    pub(crate) fn core<'a>(&self, value: &'a mut Core, default: Core) -> Box<dyn Field + 'a> {
-        let source = Rc::clone(&self.source);
-        form::choice_field("core", "核心", value, default, move |v| {
-            v.candidates(None)
-                .any(|core| Stack::Outbound(&source).implements(core))
-        })
     }
 
     pub(crate) fn handshake<'a>(
@@ -525,10 +617,10 @@ macro_rules! client_fields {
         }
     };
     (@push $f:ident, $c:ident, $s:ident, $d:ident, proxy, ..) => {
-        $f.extend($s.proxy.fields($d.proxy, &$c));
+        $f.extend($s.proxy.fields($d.proxy));
     };
     (@push $f:ident, $c:ident, $s:ident, $d:ident, core, $label:literal) => {
-        $f.push($c.core(&mut $s.core, $d.core));
+        $f.push($crate::form::field("core", $label, &mut $s.core, $d.core));
     };
     (@push $f:ident, $c:ident, $s:ident, $d:ident, security, $label:literal) => {
         $f.extend($c.handshake($label, &mut $s.security, $d.security));
@@ -541,6 +633,9 @@ macro_rules! client_fields {
     };
     (@push $f:ident, $c:ident, $s:ident, $d:ident, tls, $label:literal) => {
         $f.push($c.tls($label, &mut $s.tls, $d.tls));
+    };
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, vless, $label:literal) => {
+        $f.push($c.vless($label, &mut $s.vless, $d.vless));
     };
     (@push $f:ident, $c:ident, $s:ident, $d:ident, $key:ident, $label:literal) => {
         $f.push($crate::form::field(stringify!($key), $label, &mut $s.$key, $d.$key));

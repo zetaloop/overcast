@@ -151,7 +151,7 @@ pub fn outbound(
             options.finish("sing-box SOCKS")?;
         }
         Connection::Vless(value) => {
-            let mut options = input.vless(&value.vless)?;
+            let mut options = input.vless(&value.vless, inbound::Core::SingBox)?;
             output.insert("server".to_owned(), json!(value.server));
             output.insert("server_port".to_owned(), json!(value.port));
             output.insert("uuid".to_owned(), json!(value.uuid));
@@ -159,9 +159,7 @@ pub fn outbound(
             if value.vless.flow == crate::vless::Flow::Vision {
                 output.insert("flow".to_owned(), json!("xtls-rprx-vision"));
             }
-            if value.vless.encryption.as_deref() == Some("none") {
-                options.take("encryption");
-            }
+            options.take("encryption");
             options.take("tcp");
             options.take("udp");
             let mut networks = Vec::new();
@@ -491,10 +489,12 @@ pub fn listeners(
         return Ok(vec![output]);
     }
     if let Protocol::Vless(value) = &source.protocol {
+        source.core.check_encryption(value.encryption.is_some())?;
         if users.is_empty() {
             return unsupported("VLESS 入口需要认证用户");
         }
         let mut options = Options::new(value)?;
+        options.take("encryption");
         options.take("flow");
         options.take("multiplex");
         if let Some(multiplex) = &value.multiplex {
@@ -1070,9 +1070,7 @@ fn server_tls(source: &Inbound, store: &Store) -> Result<Option<Value>> {
         None,
     )?;
     options.take("client_certificates");
-    if tls.client_certificates.iter().any(|v| v.inline().is_some())
-        && tls.client_certificates.iter().any(|v| v.inline().is_none())
-    {
+    if source.core.inline_trust(true, &tls.client_certificates) {
         return unsupported("sing-box 入站的客户端信任证书需同为正文或同为文件路径");
     }
     certificates(

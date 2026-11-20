@@ -85,6 +85,20 @@ impl Inbound {
         Stack::Inbound(&self.protocol)
             .check(self.core, self.security.index(), &self.transport)
             .map_err(|error| format!("入站 {}：{error}", self.name))?;
+        if let Some(tls) = self.security.tls() {
+            if let Some(ech) = &tls.ech {
+                ech.key.validate("ECH 密钥")?;
+            }
+            for cert in &tls.client_certificates {
+                cert.validate("客户端信任证书")?;
+            }
+        }
+        if let Transport::XHttp(x) = &self.transport
+            && let Some(tls) = x.download.as_ref().and_then(|v| v.security.tls())
+        {
+            tls.materials()
+                .map_err(|error| format!("XHTTP 下载连接：{error}"))?;
+        }
         let credential = self.protocol.credential();
         if self.users && !self.protocol.supports_users(self.core) {
             return Err(format!("入站 {} 的协议设置不支持系统用户认证", self.name).into());
@@ -137,6 +151,11 @@ impl Inbound {
         }
         if let Protocol::Hysteria2(server) = &mut value.protocol {
             server.fit(value.core);
+        }
+        if let Protocol::Vless(v) = &mut value.protocol
+            && !value.core.vless_encryption()
+        {
+            v.encryption = None;
         }
         if let Protocol::Shadowsocks(server) = &mut value.protocol {
             server.fit(value.core);
@@ -201,6 +220,79 @@ fn is_ip(value: &str) -> bool {
     match value.split_once('%') {
         Some((address, zone)) => !zone.is_empty() && address.parse::<Ipv6Addr>().is_ok(),
         None => value.parse::<IpAddr>().is_ok(),
+    }
+}
+
+impl crate::core::Draft for Inbound {
+    type Core = Core;
+    fn core(&self) -> Core {
+        self.core
+    }
+    fn supports(&self, core: Core) -> bool {
+        Stack::Inbound(&self.protocol).implements(core)
+    }
+    fn set_core(&mut self, core: Core) {
+        self.core = core;
+    }
+    fn projected(&self) -> Self {
+        self.effective()
+    }
+    fn changes(&self, next: &Self, changes: &mut crate::core::Changes) {
+        changes.mode("握手", &self.security, &next.security);
+        changes.transport(&self.transport, &next.transport);
+        changes.flag("用户支持", self.users, next.users);
+        changes.flag(
+            "入口凭据",
+            self.credentials.is_some(),
+            next.credentials.is_some(),
+        );
+        if let (Security::Reality(a), Security::Reality(b)) = (&self.security, &next.security) {
+            changes.fields("REALITY ", &a.tls, &b.tls);
+            changes.fields("REALITY ", a.as_ref(), b.as_ref());
+        }
+        match (&self.protocol, &next.protocol) {
+            (Protocol::Vless(a), Protocol::Vless(b)) => changes.flag(
+                "VLESS Encryption",
+                a.encryption.is_some(),
+                b.encryption.is_some(),
+            ),
+            (Protocol::Shadowsocks(a), Protocol::Shadowsocks(b)) => {
+                changes.mode("Shadowsocks 算法", &a.cipher, &b.cipher);
+                changes.flag("TCP 接收", a.tcp, b.tcp);
+                changes.flag("入口共享密钥", a.password.is_some(), b.password.is_some());
+                if a.user_level != b.user_level {
+                    changes.lines.push(if let Some(level) = b.user_level {
+                        format!("用户等级改为 {level}")
+                    } else {
+                        "用户等级恢复默认".into()
+                    });
+                }
+                changes.flag("S-Mux", a.multiplex.is_some(), b.multiplex.is_some());
+            }
+            (Protocol::Hysteria2(a), Protocol::Hysteria2(b)) => {
+                changes.flag("伪装响应", a.masquerade.is_some(), b.masquerade.is_some());
+                if let (Some(a), Some(b)) = (&a.masquerade, &b.masquerade) {
+                    changes.fields("伪装响应的", a, b);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn materials(&mut self, active: &Self, changes: &mut crate::core::Changes) {
+        if matches!(active.security, Security::Tls(_))
+            && let Security::Tls(tls) = &mut self.security
+        {
+            if !active.core.ech_file(true)
+                && let Some(ech) = &mut tls.ech
+            {
+                changes.inline("ECH 密钥", &mut ech.key);
+            }
+            if active.core.inline_trust(true, &tls.client_certificates) {
+                for material in &mut tls.client_certificates {
+                    changes.inline("客户端信任证书", material);
+                }
+            }
+        }
     }
 }
 
@@ -359,7 +451,9 @@ impl Protocol {
         let title = self.kind().text();
         match self {
             Self::Mixed(value) => form::edit(screen, &title, value),
-            Self::Vless(value) => form::edit(screen, &title, value),
+            Self::Vless(value) => form::subset(screen, &title, value, |key| {
+                key != "encryption" || core.vless_encryption()
+            }),
             Self::Vmess(value) => form::edit(screen, &title, value),
             Self::Trojan(value) => form::edit(screen, &title, value),
             Self::Shadowsocks(value) => value.edit(screen, &title, core),
@@ -770,16 +864,8 @@ fn edit(
                 "export" => crate::profile::copy(screen, store, Some(inbound.uuid), None),
                 "name" => edit!(name),
                 "core" => {
-                    let choices: Vec<_> = Core::choices()
-                        .into_iter()
-                        .filter(|(_, _, core)| Stack::Inbound(&inbound.protocol).implements(*core))
-                        .collect();
-                    let current = choices
-                        .iter()
-                        .position(|(_, _, core)| *core == inbound.core)
-                        .unwrap_or_default();
                     let title = format!("{} / 核心", menu.title);
-                    form::choose(&mut inbound.core, screen, &title, &choices, current).map(|_| ())
+                    crate::core::choose(&mut inbound, screen, &title, store).map(|_| ())
                 }
                 "users" => {
                     if inbound.users

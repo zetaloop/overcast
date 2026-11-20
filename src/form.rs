@@ -239,6 +239,7 @@ pub fn flat<T>(
     title: &str,
     value: &mut T,
     fields: impl Fn(&mut T) -> Fields<'_>,
+    editors: &[Editor<'_, T>],
 ) -> Result<bool> {
     edit_group(
         screen,
@@ -247,7 +248,7 @@ pub fn flat<T>(
         None,
         None,
         None,
-        (&|v| (Vec::new(), fields(v)), &[]),
+        (&|v| (Vec::new(), fields(v)), editors),
     )
 }
 
@@ -752,11 +753,31 @@ pub fn choose<T: Clone>(
     choices: &[(&str, &str, T)],
     current: usize,
 ) -> Result<bool> {
+    let Some(index) = pick(screen, title, choices, Some(current), |_| String::new())? else {
+        return Ok(false);
+    };
+    *value = choices[index].2.clone();
+    Ok(true)
+}
+
+pub(crate) fn pick<T>(
+    screen: &mut Screen,
+    title: &str,
+    choices: &[(&str, &str, T)],
+    current: Option<usize>,
+    detail: impl Fn(&T) -> String,
+) -> Result<Option<usize>> {
     let mut items: Vec<_> = choices
         .iter()
-        .map(|(key, label, _)| Item::new(*key, (*label).to_owned().stylized()))
+        .map(|(key, label, value)| {
+            let mut item = Item::new(*key, (*label).to_owned().stylized());
+            item.detail = detail(value);
+            item
+        })
         .collect();
-    items[current].marker = "■";
+    if let Some(index) = current {
+        items[index].marker = "■";
+    }
     items.push(Item::new("back", "返回".stylized()));
     let menu = Menu {
         title,
@@ -764,15 +785,11 @@ pub fn choose<T: Clone>(
         items: &items,
         help: "方向键 选择\n回车键 确定\nEsc 返回",
     };
-    let mut selected = current;
+    let mut selected = current.unwrap_or_default();
     loop {
         match screen.select(&menu, &mut selected, "")? {
-            Action::Back => return Ok(false),
-            Action::Select if selected == choices.len() => return Ok(false),
-            Action::Select => {
-                *value = choices[selected].2.clone();
-                return Ok(true);
-            }
+            Action::Back => return Ok(None),
+            Action::Select => return Ok((selected < choices.len()).then_some(selected)),
             _ => {}
         }
     }

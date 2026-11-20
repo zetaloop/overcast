@@ -54,6 +54,14 @@ pub struct ClientOptions {
     pub padding: Vec<u32>,
 }
 
+impl ClientOptions {
+    pub(crate) fn encrypted(&self) -> bool {
+        self.encryption
+            .as_deref()
+            .is_some_and(|v| !v.is_empty() && v != "none")
+    }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Server {

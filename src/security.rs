@@ -22,6 +22,18 @@ impl Default for Material {
 }
 
 impl Material {
+    pub(crate) fn validate(&self, label: &str) -> Result<()> {
+        match self {
+            Self::Inline(text) if text.trim().is_empty() => {
+                Err(format!("请填写{label}正文").into())
+            }
+            Self::File(path) if path.trim().is_empty() => {
+                Err(format!("请填写{label}文件路径").into())
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn inline(&self) -> Option<&str> {
         match self {
             Self::Inline(text) => Some(text),

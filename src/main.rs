@@ -4,6 +4,7 @@ mod component;
 mod condition;
 mod config;
 mod connection;
+mod core;
 mod ech;
 mod encryption;
 mod endpoint;

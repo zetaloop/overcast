@@ -304,18 +304,24 @@ impl Connection {
     }
 
     pub(crate) fn security_mode(&self) -> usize {
-        match self {
-            Self::Direct(_) | Self::Warp(_) => 0,
-            Self::Hysteria2(_) => 1,
-            Self::Http(v) => v.security.index(),
-            Self::Socks(v) => v.security.index(),
-            Self::Vless(v) => v.security.index(),
-            Self::Vmess(v) => v.security.index(),
-            Self::Trojan(v) => v.security.index(),
-            Self::Shadowsocks(v) => v.security.index(),
-            Self::AnyTls(v) => v.security.index(),
-            Self::Forward(v) => v.security.index(),
-        }
+        self.security().map_or(
+            usize::from(matches!(self, Self::Hysteria2(_))),
+            Security::index,
+        )
+    }
+
+    fn security(&self) -> Option<&Security> {
+        Some(match self {
+            Self::Direct(_) | Self::Warp(_) | Self::Hysteria2(_) => return None,
+            Self::Http(v) => &v.security,
+            Self::Socks(v) => &v.security,
+            Self::Vless(v) => &v.security,
+            Self::Vmess(v) => &v.security,
+            Self::Trojan(v) => &v.security,
+            Self::Shadowsocks(v) => &v.security,
+            Self::AnyTls(v) => &v.security,
+            Self::Forward(v) => &v.security,
+        })
     }
 
     pub fn multiplex(&self) -> Option<&crate::multiplex::Client> {
@@ -372,24 +378,44 @@ impl Connection {
 
     pub fn edit(&mut self, screen: &mut Screen, store: &Store) -> Result<()> {
         let title = self.summary();
-        form::flat(screen, &title, self, |source| match source {
-            Self::Direct(value) => value.controls(store),
-            Self::Http(value) => value.controls(store),
-            Self::Socks(value) => value.controls(store),
-            Self::Vless(value) => value.controls(store),
-            Self::Vmess(value) => value.controls(store),
-            Self::Trojan(value) => value.controls(store),
-            Self::Shadowsocks(value) => value.controls(store),
-            Self::Forward(value) => value.controls(store),
-            Self::Hysteria2(value) => value.controls(store),
-            Self::AnyTls(value) => value.controls(store),
-            Self::Warp(value) => value.controls(store),
-        })
+        form::flat(
+            screen,
+            &title,
+            self,
+            |source| match source {
+                Self::Direct(value) => value.controls(store),
+                Self::Http(value) => value.controls(store),
+                Self::Socks(value) => value.controls(store),
+                Self::Vless(value) => value.controls(store),
+                Self::Vmess(value) => value.controls(store),
+                Self::Trojan(value) => value.controls(store),
+                Self::Shadowsocks(value) => value.controls(store),
+                Self::Forward(value) => value.controls(store),
+                Self::Hysteria2(value) => value.controls(store),
+                Self::AnyTls(value) => value.controls(store),
+                Self::Warp(value) => value.controls(store),
+            },
+            &[("core", &|source, screen, menu, _| {
+                crate::core::choose(source, screen, &format!("{} / 核心", menu.title), store)
+            })],
+        )
         .map(|_| ())
     }
 
     pub fn validate(&self) -> Result<()> {
         self.check_stack()?;
+        if let Some(tls) = match self {
+            Self::Hysteria2(v) => Some(&v.tls),
+            _ => self.security().and_then(Security::tls),
+        } {
+            tls.materials()?;
+        }
+        if let Some(Transport::XHttp(x)) = self.transport()
+            && let Some(tls) = x.download.as_ref().and_then(|v| v.security.tls())
+        {
+            tls.materials()
+                .map_err(|error| format!("XHTTP 下载连接：{error}"))?;
+        }
         let (server, port) = match self {
             Self::Direct(_) => return Ok(()),
             Self::Http(value) => (value.proxy.server.as_str(), value.proxy.port),
@@ -716,6 +742,26 @@ pub struct Ech {
     pub query_name: Option<String>,
 }
 
+impl Tls {
+    pub(crate) fn materials(&self) -> Result<()> {
+        if let Some(v) = self.ech.as_ref().and_then(|v| v.config.as_ref()) {
+            v.validate("ECH 公共参数")?;
+        }
+        for cert in &self.certificates {
+            cert.validate("信任证书")?;
+        }
+        for (name, material) in [
+            ("客户端证书", &self.client_certificate),
+            ("客户端私钥", &self.client_key),
+        ] {
+            if let Some(v) = material {
+                v.validate(name)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum FastOpen {
@@ -902,14 +948,14 @@ choices!(AddressStrategy {
 });
 
 impl Proxy {
-    fn fields(&mut self, d: Self, choices: &editor::Choices) -> form::Fields<'_> {
+    fn fields(&mut self, d: Self) -> form::Fields<'_> {
         vec![
             form::field("name", "名称", &mut self.name, d.name),
             form::field("server", "地址", &mut self.server, d.server),
             form::field("port", "端口", &mut self.port, d.port),
             form::field("username", "用户名", &mut self.username, d.username),
             form::field("password", "密码", &mut self.password, d.password),
-            choices.core(&mut self.core, d.core),
+            form::field("core", "核心", &mut self.core, d.core),
         ]
     }
 }
