@@ -528,7 +528,7 @@ pub fn run(store: Store) -> Result<()> {
         use nix::sys::signal::{SigSet, Signal};
         use std::os::unix::process::CommandExt;
 
-        let program = std::env::current_exe()?;
+        let program = crate::update::service_program()?;
         let mut signals = SigSet::empty();
         for signal in [
             Signal::SIGHUP,

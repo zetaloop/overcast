@@ -146,7 +146,7 @@ pub(super) fn install(store: &Store) -> Result<()> {
         service_type: ServiceType::OWN_PROCESS,
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
-        executable_path: std::env::current_exe()?,
+        executable_path: crate::update::service_program()?,
         launch_arguments: vec!["--run".into(), store.directory.as_os_str().to_owned()],
         dependencies: Vec::new(),
         account_name: None,

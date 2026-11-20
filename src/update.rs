@@ -1,5 +1,10 @@
 use crate::language::{message, text as tr};
-use std::{env, fmt::Write as _, fs, io, path::PathBuf};
+use std::{
+    env,
+    fmt::Write as _,
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -12,13 +17,47 @@ fn program() -> io::Result<PathBuf> {
     env::current_exe()?.canonicalize()
 }
 
-pub fn channel() -> Result<Option<String>> {
-    match fs::read_to_string(program()?.with_extension("channel")) {
-        Ok(text) if !text.trim().is_empty() => Ok(Some(text.trim().to_owned())),
-        Ok(_) => Err(tr("Installation channel marker is empty", "安装渠道标记为空").into()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
+#[derive(serde::Deserialize)]
+pub struct Channel {
+    pub name: String,
+    executable: Option<PathBuf>,
+}
+
+fn read_channel(program: &Path) -> Result<Option<Channel>> {
+    let path = program.with_extension("channel");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display()).into()),
+    };
+    let channel: Channel =
+        serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    if channel.name.trim().is_empty() {
+        return Err(tr("Installation channel name is empty", "安装渠道名称为空").into());
     }
+    if channel
+        .executable
+        .as_ref()
+        .is_some_and(|p| !p.is_absolute())
+    {
+        return Err(tr(
+            "The service executable path must be absolute",
+            "服务程序需要使用绝对路径",
+        )
+        .into());
+    }
+    Ok(Some(channel))
+}
+
+pub fn channel() -> Result<Option<Channel>> {
+    read_channel(&program()?)
+}
+
+pub fn service_program() -> Result<PathBuf> {
+    let exe = env::current_exe()?;
+    Ok(read_channel(&exe.canonicalize()?)?
+        .and_then(|c| c.executable)
+        .unwrap_or(exe))
 }
 
 fn digest(mut file: impl io::Read) -> Result<String> {

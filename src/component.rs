@@ -558,7 +558,7 @@ pub fn edit(
             .unwrap_or(tr("Not installed", "未安装"));
         let channel = if own { crate::update::channel()? } else { None };
         let mut heading = message!("Current version: {version}", "当前版本：{version}");
-        if let Some(channel) = &channel {
+        if let Some(channel) = channel.as_ref().map(|c| &c.name) {
             heading.push_str(&message!(
                 " (installed via {channel})",
                 "（{channel} 安装）"
@@ -612,7 +612,7 @@ pub fn edit(
                     latest = Some(release);
                 }),
             "install" | "version" => {
-                if let Some(channel) = &channel {
+                if let Some(channel) = channel.as_ref().map(|c| &c.name) {
                     let mut selected = 0;
                     let choices = [
                         Item::new("back", tr("Back", "返回").stylized()),
