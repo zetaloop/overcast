@@ -6,17 +6,86 @@ use url::form_urlencoded;
 
 use crate::{
     Result,
-    config::Store,
     connection::{HttpVersion, Network, Security},
+    inbound::Core,
     transport::{Mode, PaddingPlacement, Placement, Pool, Quic, Transport, XHttp, XHttpOptions},
 };
 
 use super::{options::Options, single_headers, unsupported};
 
+pub(super) fn grpc(core: Core, inbound: bool, options: &mut Options) -> Result<Map<String, Value>> {
+    let mut output = Map::new();
+    let (service, idle, ping, unit) = match core {
+        Core::Xray => (
+            "serviceName",
+            "idle_timeout",
+            "health_check_timeout",
+            Some(Duration::from_secs(1)),
+        ),
+        Core::SingBox => ("service_name", "idle_timeout", "ping_timeout", None),
+        Core::Mihomo => (
+            "grpc-service-name",
+            "ping-interval",
+            "",
+            Some(Duration::from_secs(1)),
+        ),
+    };
+    options.rename(&mut output, &[("service_name", service)]);
+    if core != Core::Mihomo || !inbound {
+        options.durations(&mut output, &[("keep_alive", idle)], unit)?;
+    }
+    if core != Core::Mihomo {
+        options.durations(&mut output, &[("ping_timeout", ping)], unit)?;
+    }
+    if inbound {
+        for key in [
+            "authority",
+            "permit_without_stream",
+            "receive_window",
+            "user_agent",
+            "connections",
+            "min_streams",
+            "max_streams",
+        ] {
+            options.take(key);
+        }
+        if core == Core::Xray {
+            options.take("multi_mode");
+        }
+    } else {
+        match core {
+            Core::Xray => {
+                options.copy(
+                    &mut output,
+                    &["authority", "permit_without_stream", "user_agent"],
+                );
+                options.rename(
+                    &mut output,
+                    &[
+                        ("multi_mode", "multiMode"),
+                        ("receive_window", "initial_windows_size"),
+                    ],
+                );
+            }
+            Core::SingBox => options.copy(&mut output, &["permit_without_stream"]),
+            Core::Mihomo => options.rename(
+                &mut output,
+                &[
+                    ("user_agent", "grpc-user-agent"),
+                    ("connections", "max-connections"),
+                    ("min_streams", "min-streams"),
+                    ("max_streams", "max-streams"),
+                ],
+            ),
+        }
+    }
+    Ok(output)
+}
+
 pub fn xray(
     source: &Transport,
     inbound: bool,
-    store: &Store,
+    input: super::parameters::Input<'_>,
     tls: bool,
 ) -> Result<Map<String, Value>> {
     let mut output = Map::new();
@@ -27,7 +96,7 @@ pub fn xray(
             ("httpupgrade", "httpupgradeSettings", Options::new(value)?)
         }
         Transport::Grpc(value) => ("grpc", "grpcSettings", Options::new(value)?),
-        Transport::XHttp(value) => return xhttp(value, inbound, store),
+        Transport::XHttp(value) => return xhttp(value, inbound, input),
         Transport::Http(value) => ("raw", "rawSettings", Options::new(value)?),
         Transport::Kcp(value) => ("kcp", "kcpSettings", Options::new(value)?),
         Transport::Quic => return unsupported("Xray 没有独立 QUIC 传输配置"),
@@ -147,43 +216,7 @@ pub fn xray(
                 );
             }
         }
-        Transport::Grpc(_) => {
-            options.rename(&mut settings, &[("service_name", "serviceName")]);
-            if inbound {
-                for field in [
-                    "authority",
-                    "multi_mode",
-                    "permit_without_stream",
-                    "receive_window",
-                    "user_agent",
-                    "connections",
-                    "min_streams",
-                    "max_streams",
-                ] {
-                    options.take(field);
-                }
-            } else {
-                options.copy(
-                    &mut settings,
-                    &["authority", "permit_without_stream", "user_agent"],
-                );
-                options.rename(
-                    &mut settings,
-                    &[
-                        ("multi_mode", "multiMode"),
-                        ("receive_window", "initial_windows_size"),
-                    ],
-                );
-            }
-            options.durations(
-                &mut settings,
-                &[
-                    ("keep_alive", "idle_timeout"),
-                    ("ping_timeout", "health_check_timeout"),
-                ],
-                Some(Duration::from_secs(1)),
-            )?;
-        }
+        Transport::Grpc(_) => settings = grpc(Core::Xray, inbound, &mut options)?,
     }
     options.finish("Xray 传输")?;
     if let Some(Value::String(path)) = settings.get_mut("path") {
@@ -332,30 +365,7 @@ pub fn singbox(
         Transport::Grpc(value) => {
             let mut options = Options::new(value)?;
             output.insert("type".to_owned(), json!("grpc"));
-            options.copy(&mut output, &["service_name"]);
-            if inbound {
-                for field in [
-                    "authority",
-                    "user_agent",
-                    "receive_window",
-                    "permit_without_stream",
-                    "connections",
-                    "min_streams",
-                    "max_streams",
-                ] {
-                    options.take(field);
-                }
-            } else {
-                options.copy(&mut output, &["permit_without_stream"]);
-            }
-            options.durations(
-                &mut output,
-                &[
-                    ("keep_alive", "idle_timeout"),
-                    ("ping_timeout", "ping_timeout"),
-                ],
-                None,
-            )?;
+            output.extend(grpc(Core::SingBox, inbound, &mut options)?);
             options.finish("sing-box gRPC")?;
         }
         Transport::XHttp(_) => return unsupported("sing-box 没有 XHTTP 传输配置"),
@@ -367,7 +377,7 @@ pub fn mihomo_client(
     source: &Transport,
     network: &Network,
     tls: bool,
-    store: &Store,
+    input: super::parameters::Input<'_>,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
     let mut output = Map::new();
@@ -478,22 +488,7 @@ pub fn mihomo_client(
         }
         Transport::Grpc(value) => {
             let mut options = Options::new(value)?;
-            let mut grpc = Map::new();
-            options.rename(
-                &mut grpc,
-                &[
-                    ("service_name", "grpc-service-name"),
-                    ("user_agent", "grpc-user-agent"),
-                    ("connections", "max-connections"),
-                    ("min_streams", "min-streams"),
-                    ("max_streams", "max-streams"),
-                ],
-            );
-            options.durations(
-                &mut grpc,
-                &[("keep_alive", "ping-interval")],
-                Some(Duration::from_secs(1)),
-            )?;
+            let grpc = grpc(Core::Mihomo, false, &mut options)?;
             options.finish("Mihomo gRPC")?;
             output.insert("network".to_owned(), json!("grpc"));
             output.insert("grpc-opts".to_owned(), json!(grpc));
@@ -512,7 +507,7 @@ pub fn mihomo_client(
                 if value.http.mode == Mode::StreamOne {
                     return unsupported("XHTTP 单流模式与独立下载连接无法同时使用");
                 }
-                if download.server.is_empty() || download.port == 0 {
+                if input.pending.is_none() && (download.server.is_empty() || download.port == 0) {
                     return Err("请填写 XHTTP 下载连接的地址与端口".into());
                 }
                 if serde_json::to_value(&download.network)? != serde_json::to_value(network)? {
@@ -561,7 +556,7 @@ pub fn mihomo_client(
                 if !matches!(download.security, Security::None) {
                     super::mihomo::client_tls(
                         &download.security,
-                        store,
+                        input.download(),
                         &mut settings,
                         globals,
                         "vless",
@@ -622,18 +617,7 @@ pub fn mihomo_server(source: &Transport) -> Result<Map<String, Value>> {
             if value.service_name.as_deref().is_none_or(str::is_empty) {
                 return unsupported("Mihomo gRPC 入站通过非空服务名启用");
             }
-            options.rename(&mut output, &[("service_name", "grpc-service-name")]);
-            for field in [
-                "authority",
-                "user_agent",
-                "receive_window",
-                "permit_without_stream",
-                "connections",
-                "min_streams",
-                "max_streams",
-            ] {
-                options.take(field);
-            }
+            output.extend(grpc(Core::Mihomo, true, &mut options)?);
             options.finish("Mihomo gRPC 入站")?;
         }
         Transport::XHttp(value) => {
@@ -835,17 +819,22 @@ fn mihomo_pool(source: &Pool) -> Result<Map<String, Value>> {
     Ok(output)
 }
 
-fn xhttp(source: &XHttp, inbound: bool, store: &Store) -> Result<Map<String, Value>> {
+fn xhttp(
+    source: &XHttp,
+    inbound: bool,
+    input: super::parameters::Input<'_>,
+) -> Result<Map<String, Value>> {
     let mut settings = xhttp_options(&source.http, inbound)?;
     if !inbound && let Some(download) = &source.download {
         if source.http.mode == Mode::StreamOne {
             return unsupported("XHTTP 单流模式与独立下载连接无法同时使用");
         }
-        if download.server.is_empty() || download.port == 0 {
+        if input.pending.is_none() && (download.server.is_empty() || download.port == 0) {
             return Err("请填写 XHTTP 下载连接的地址与端口".into());
         }
         let server = match download.server.parse::<std::net::IpAddr>() {
             Ok(address) => address.to_string(),
+            Err(_) if download.server.is_empty() => String::new(),
             Err(_) => match url::Host::parse(&download.server)? {
                 url::Host::Domain(value) => value,
                 url::Host::Ipv4(value) => value.to_string(),
@@ -867,7 +856,7 @@ fn xhttp(source: &XHttp, inbound: bool, store: &Store) -> Result<Map<String, Val
         if !socket.is_empty() {
             stream.insert("sockopt".to_owned(), json!(socket));
         }
-        stream.extend(super::xray::security(&download.security, store)?);
+        stream.extend(super::xray::security(&download.security, input.download())?);
         let params = quic(&download.quic, false)?;
         if !params.is_empty() {
             stream.insert("finalmask".to_owned(), json!({"quicParams": params}));

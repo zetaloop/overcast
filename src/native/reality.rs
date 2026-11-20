@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::{
     Result,
-    config::Store,
     graph::Graph,
     inbound::{Core, Inbound},
     progress::Progress,
@@ -82,8 +81,8 @@ pub fn prepare(
     Ok(())
 }
 
-pub fn xray(source: &Client) -> Result<Value> {
-    source.validate()?;
+pub fn xray(source: &Client, input: super::parameters::Input<'_>) -> Result<Value> {
+    let mut options = input.reality(source)?;
     let mut tls = Options::new(&source.tls)?;
     let mut output = Map::new();
     tls.rename(
@@ -92,7 +91,6 @@ pub fn xray(source: &Client) -> Result<Value> {
     );
     tls.copy(&mut output, &["fingerprint"]);
     tls.finish("Xray REALITY")?;
-    let mut options = Options::new(source)?;
     options.take("tls");
     options.rename(
         &mut output,
@@ -108,8 +106,8 @@ pub fn xray(source: &Client) -> Result<Value> {
     Ok(json!(output))
 }
 
-pub fn singbox(reality: &Client, store: &Store) -> Result<Value> {
-    reality.validate()?;
+pub fn singbox(reality: &Client, input: super::parameters::Input<'_>) -> Result<Value> {
+    let mut params = input.reality(reality)?;
     let source = &reality.tls;
     let mut options = Options::new(source)?;
     if source.verify_certificate == Some(true) {
@@ -154,19 +152,18 @@ pub fn singbox(reality: &Client, store: &Store) -> Result<Value> {
         if let Some(value) = options.take(name) {
             output.insert(
                 destination.to_owned(),
-                json!(super::path(store, value.as_str().unwrap())),
+                json!(super::path(input.store, value.as_str().unwrap())),
             );
         }
     }
     options.finish("sing-box REALITY")?;
-    let mut options = Options::new(reality)?;
-    options.take("tls");
+    params.take("tls");
     if reality.hybrid_key_exchange == Some(false) {
-        options.take("hybrid_key_exchange");
+        params.take("hybrid_key_exchange");
     }
     let mut reality = Map::from_iter([("enabled".to_owned(), json!(true))]);
-    options.copy(&mut reality, &["public_key", "short_id"]);
-    options.finish("sing-box REALITY 客户端")?;
+    params.copy(&mut reality, &["public_key", "short_id"]);
+    params.finish("sing-box REALITY 客户端")?;
     output.insert("reality".to_owned(), json!(reality));
     Ok(json!(output))
 }

@@ -17,9 +17,10 @@ use super::{
 
 pub fn outbound(
     source: &Connection,
-    store: &Store,
+    input: super::parameters::Input<'_>,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
+    let store = input.store;
     let (kind, proxy, network) = match source {
         Connection::Direct(value) => ("direct", None, &value.network),
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
@@ -50,7 +51,7 @@ pub fn outbound(
     let tls = match source {
         Connection::Forward(_) => unreachable!(),
         Connection::Warp(value) => {
-            output.extend(super::warp::mihomo(value)?);
+            output.extend(super::warp::mihomo(value, input)?);
             output.insert("server".to_owned(), json!(value.server()));
             output.insert("port".to_owned(), json!(value.port));
             None
@@ -97,10 +98,11 @@ pub fn outbound(
                 "cipher".to_owned(),
                 super::shadowsocks::cipher(value.shadowsocks.cipher, inbound::Core::Mihomo, false)?,
             );
-            output.insert(
-                "password".to_owned(),
-                json!(value.shadowsocks.cipher.password(&value.password)?),
-            );
+            if let Some(password) =
+                input.material(|| value.shadowsocks.cipher.password(&value.password))?
+            {
+                output.insert("password".to_owned(), json!(password));
+            }
             output.insert(
                 "udp".to_owned(),
                 json!(value.shadowsocks.udp.unwrap_or(true)),
@@ -146,7 +148,7 @@ pub fn outbound(
                 &value.transport,
                 &value.network,
                 !matches!(value.security, Security::None),
-                store,
+                input,
                 globals,
             )?);
             Some(Cow::Borrowed(&value.security))
@@ -212,7 +214,7 @@ pub fn outbound(
                 &value.transport,
                 &value.network,
                 !matches!(value.security, Security::None),
-                store,
+                input,
                 globals,
             )?);
             Some(Cow::Borrowed(&value.security))
@@ -250,7 +252,7 @@ pub fn outbound(
             {
                 return unsupported("Mihomo XHTTP/3 不支持 REALITY 握手");
             }
-            let mut options = Options::new(&value.vless)?;
+            let mut options = input.vless(&value.vless)?;
             output.insert("server".to_owned(), json!(value.server));
             output.insert("port".to_owned(), json!(value.port));
             output.insert("uuid".to_owned(), json!(value.uuid));
@@ -284,7 +286,7 @@ pub fn outbound(
                 &value.transport,
                 &value.network,
                 !matches!(value.security, Security::None),
-                store,
+                input,
                 globals,
             )?);
             Some(Cow::Borrowed(&value.security))
@@ -296,7 +298,7 @@ pub fn outbound(
             .map_or(Cow::Borrowed(tls.as_ref()), |transport| {
                 transport.client_tls(&tls)
             });
-        client_tls(&tls, store, &mut output, globals, kind)?;
+        client_tls(&tls, input, &mut output, globals, kind)?;
         if matches!(source, Connection::Socks(_)) {
             output.remove("sni");
         }
@@ -630,11 +632,12 @@ fn keep_alive(options: &mut Options, globals: &mut Map<String, Value>) -> Result
 
 pub fn client_tls(
     security: &Security,
-    store: &Store,
+    input: super::parameters::Input<'_>,
     output: &mut Map<String, Value>,
     globals: &mut Map<String, Value>,
     kind: &str,
 ) -> Result<()> {
+    let store = input.store;
     let v2ray = matches!(kind, "vless" | "vmess" | "trojan");
     let (source, reality) = match security {
         Security::None => return Ok(()),
@@ -665,8 +668,7 @@ pub fn client_tls(
     if v2ray || kind == "anytls" {
         options.rename(output, &[("fingerprint", "client-fingerprint")]);
         if let Some(reality) = reality {
-            reality.validate()?;
-            let mut options = Options::new(reality)?;
+            let mut options = input.reality(reality)?;
             options.take("tls");
             let mut reality = Map::new();
             options.rename(

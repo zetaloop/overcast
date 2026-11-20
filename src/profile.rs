@@ -224,210 +224,254 @@ impl Builder<'_> {
 
     fn clients(&self, source: &Inbound, user: Option<&User>) -> Result<Vec<Connection>> {
         let credentials = source.account(user);
-        let uuid = credentials
-            .map(|(uuid, _)| uuid.to_string())
-            .unwrap_or_default();
-        let password = credentials.map_or("", |(_, password)| password);
+        if credentials.is_none()
+            && matches!(
+                source.protocol,
+                Protocol::Hysteria2(_) | Protocol::AnyTls(_)
+            )
+        {
+            return Ok(Vec::new());
+        }
         let mut source = source.clone();
-        if let Some(keys) = self.config.keys.get(&source.uuid) {
+        let keys = self.config.keys.get(&source.uuid);
+        if let Some(keys) = keys {
             keys.apply(&mut source);
         }
+        let encryption = match &source.protocol {
+            Protocol::Vless(protocol) => protocol
+                .encryption
+                .as_ref()
+                .map(|value| -> Result<String> {
+                    let keys = keys
+                        .and_then(|keys| keys.encryption.as_ref())
+                        .ok_or("缺少已保存的 VLESS 加密材料")?;
+                    Ok(crate::native::encryption::client(value, keys))
+                })
+                .transpose()?,
+            _ => None,
+        };
         let mut clients = Vec::new();
         for port in source.ports()? {
             self.progress.check()?;
             for security in self.security(&source)? {
-                let server = source.listen.host.clone();
-                let transport = source.transport.clone();
-                match &source.protocol {
-                    Protocol::Mixed(value) => {
-                        let proxy = connection::Proxy {
-                            server,
-                            port,
-                            username: credentials.map(|_| uuid.clone()),
-                            password: credentials.map(|_| password.to_owned()),
-                            ..connection::Proxy::default()
-                        };
-                        if value.http.enabled {
-                            let versions = if value.http.versions.is_empty() {
-                                vec![connection::HttpVersion::Auto]
-                            } else {
-                                value
-                                    .http
-                                    .versions
-                                    .iter()
-                                    .map(|version| match version {
-                                        crate::inbound::HttpVersion::Http1 => {
-                                            connection::HttpVersion::Http1
-                                        }
-                                        crate::inbound::HttpVersion::Http2 => {
-                                            connection::HttpVersion::Http2
-                                        }
-                                        crate::inbound::HttpVersion::Http3 => {
-                                            connection::HttpVersion::Http3
-                                        }
-                                    })
-                                    .collect()
-                            };
-                            for version in versions {
-                                clients.push(Connection::Http(connection::Http {
-                                    proxy: proxy.clone(),
-                                    security: security.clone(),
-                                    transport: transport.clone(),
-                                    http: connection::HttpOptions {
-                                        version,
-                                        ..connection::HttpOptions::default()
-                                    },
-                                    ..connection::Http::default()
-                                }));
-                            }
-                        }
-                        if value.socks.enabled {
-                            clients.push(Connection::Socks(connection::Socks {
-                                proxy,
-                                security,
-                                transport,
-                                ..connection::Socks::default()
-                            }));
-                        }
-                    }
-                    Protocol::Vless(value) => {
-                        let encryption = value
-                            .encryption
-                            .as_ref()
-                            .map(|value| -> Result<String> {
-                                let keys = self
-                                    .config
-                                    .keys
-                                    .get(&source.uuid)
-                                    .and_then(|keys| keys.encryption.as_ref())
-                                    .ok_or("缺少已保存的 VLESS 加密材料")?;
-                                Ok(crate::native::encryption::client(value, keys))
-                            })
-                            .transpose()?;
-                        clients.push(Connection::Vless(crate::vless::Client {
-                            server,
-                            port,
-                            uuid: uuid.clone(),
-                            security,
-                            transport,
-                            vless: crate::vless::ClientOptions {
-                                flow: value.flow,
-                                encryption,
-                                ..crate::vless::ClientOptions::default()
-                            },
-                            multiplex: multiplex(value.multiplex.as_ref()),
-                            ..crate::vless::Client::default()
-                        }));
-                    }
-                    Protocol::Vmess(value) => {
-                        clients.push(Connection::Vmess(crate::vmess::Client {
-                            server,
-                            port,
-                            uuid: uuid.clone(),
-                            security,
-                            transport,
-                            vmess: crate::vmess::ClientOptions {
-                                alter_id: value.alter_id,
-                                ..crate::vmess::ClientOptions::default()
-                            },
-                            multiplex: multiplex(value.multiplex.as_ref()),
-                            ..crate::vmess::Client::default()
-                        }))
-                    }
-                    Protocol::Trojan(value) => {
-                        clients.push(Connection::Trojan(crate::trojan::Client {
-                            server,
-                            port,
-                            password: password.to_owned(),
-                            security,
-                            transport,
-                            multiplex: multiplex(value.multiplex.as_ref()),
-                            ..crate::trojan::Client::default()
-                        }))
-                    }
-                    Protocol::Shadowsocks(value) => {
-                        let credential = value.cipher.credential(password);
-                        let password = match self
-                            .config
-                            .keys
-                            .get(&source.uuid)
-                            .and_then(|k| k.shadowsocks.as_ref())
-                        {
-                            Some(keys) => format!("{}:{credential}", keys.password),
-                            None => credential,
-                        };
-                        clients.push(Connection::Shadowsocks(crate::shadowsocks::Client {
-                            server,
-                            port,
-                            password,
-                            security,
-                            transport,
-                            shadowsocks: crate::shadowsocks::ClientOptions {
-                                cipher: value.cipher,
-                                tcp: (!value.tcp).then_some(false),
-                                udp: (!(value.tcp || value.udp)).then_some(false),
-                                ..crate::shadowsocks::ClientOptions::default()
-                            },
-                            multiplex: multiplex(value.multiplex.as_ref()),
-                            ..crate::shadowsocks::Client::default()
-                        }));
-                    }
-                    Protocol::Hysteria2(value) => {
-                        let Some((_, password)) = credentials else {
-                            continue;
-                        };
-                        clients.push(Connection::Hysteria2(crate::hysteria::Client {
-                            server,
-                            port,
-                            password: password.to_owned(),
-                            tls: security.tls().cloned().ok_or("Hysteria 2 入口使用 TLS")?,
-                            hysteria: crate::hysteria::ClientOptions {
-                                obfs: value.obfs.clone(),
-                                quic: value.client.clone(),
-                                ..crate::hysteria::ClientOptions::default()
-                            },
-                            ..crate::hysteria::Client::default()
-                        }));
-                    }
-                    Protocol::AnyTls(_) => {
-                        let Some((_, password)) = credentials else {
-                            continue;
-                        };
-                        clients.push(Connection::AnyTls(crate::anytls::Client {
-                            server,
-                            port,
-                            password: password.to_owned(),
-                            security,
-                            ..crate::anytls::Client::default()
-                        }));
-                    }
-                    Protocol::Forward(_) => {
-                        clients.push(Connection::Forward(crate::forward::Client {
-                            server,
-                            port,
-                            security,
-                            transport,
-                            ..crate::forward::Client::default()
-                        }))
-                    }
-                }
+                clients.extend(peer_options(
+                    &source,
+                    port,
+                    security,
+                    credentials,
+                    keys,
+                    encryption.as_deref(),
+                )?);
             }
         }
         Ok(clients)
     }
+}
 
+fn peer_options(
+    source: &Inbound,
+    port: u16,
+    security: connection::Security,
+    credentials: Option<(Uuid, &str)>,
+    keys: Option<&crate::keys::Keys>,
+    encryption: Option<&str>,
+) -> Result<Vec<Connection>> {
+    let uuid = credentials
+        .map(|(uuid, _)| uuid.to_string())
+        .unwrap_or_default();
+    let password = credentials.map_or("", |(_, password)| password);
+    let mut clients = Vec::new();
+    let server = source.listen.host.clone();
+    let transport = source.transport.clone();
+    match &source.protocol {
+        Protocol::Mixed(value) => {
+            let proxy = connection::Proxy {
+                server,
+                port,
+                username: credentials.map(|_| uuid.clone()),
+                password: credentials.map(|_| password.to_owned()),
+                ..connection::Proxy::default()
+            };
+            if value.http.enabled {
+                let versions = if value.http.versions.is_empty() {
+                    vec![connection::HttpVersion::Auto]
+                } else {
+                    value
+                        .http
+                        .versions
+                        .iter()
+                        .map(|version| match version {
+                            crate::inbound::HttpVersion::Http1 => connection::HttpVersion::Http1,
+                            crate::inbound::HttpVersion::Http2 => connection::HttpVersion::Http2,
+                            crate::inbound::HttpVersion::Http3 => connection::HttpVersion::Http3,
+                        })
+                        .collect()
+                };
+                for version in versions {
+                    clients.push(Connection::Http(connection::Http {
+                        proxy: proxy.clone(),
+                        security: security.clone(),
+                        transport: transport.clone(),
+                        http: connection::HttpOptions {
+                            version,
+                            ..connection::HttpOptions::default()
+                        },
+                        ..connection::Http::default()
+                    }));
+                }
+            }
+            if value.socks.enabled {
+                clients.push(Connection::Socks(connection::Socks {
+                    proxy,
+                    security,
+                    transport,
+                    ..connection::Socks::default()
+                }));
+            }
+        }
+        Protocol::Vless(value) => {
+            clients.push(Connection::Vless(crate::vless::Client {
+                server,
+                port,
+                uuid: uuid.clone(),
+                security,
+                transport,
+                vless: crate::vless::ClientOptions {
+                    flow: value.flow,
+                    encryption: encryption.map(str::to_owned),
+                    ..crate::vless::ClientOptions::default()
+                },
+                multiplex: multiplex(value.multiplex.as_ref()),
+                ..crate::vless::Client::default()
+            }));
+        }
+        Protocol::Vmess(value) => clients.push(Connection::Vmess(crate::vmess::Client {
+            server,
+            port,
+            uuid: uuid.clone(),
+            security,
+            transport,
+            vmess: crate::vmess::ClientOptions {
+                alter_id: value.alter_id,
+                ..crate::vmess::ClientOptions::default()
+            },
+            multiplex: multiplex(value.multiplex.as_ref()),
+            ..crate::vmess::Client::default()
+        })),
+        Protocol::Trojan(value) => clients.push(Connection::Trojan(crate::trojan::Client {
+            server,
+            port,
+            password: password.to_owned(),
+            security,
+            transport,
+            multiplex: multiplex(value.multiplex.as_ref()),
+            ..crate::trojan::Client::default()
+        })),
+        Protocol::Shadowsocks(value) => {
+            let credential = value.cipher.credential(password);
+            let password = match keys.and_then(|k| k.shadowsocks.as_ref()) {
+                Some(keys) => format!("{}:{credential}", keys.password),
+                None => credential,
+            };
+            clients.push(Connection::Shadowsocks(crate::shadowsocks::Client {
+                server,
+                port,
+                password,
+                security,
+                transport,
+                shadowsocks: crate::shadowsocks::ClientOptions {
+                    cipher: value.cipher,
+                    tcp: (!value.tcp).then_some(false),
+                    udp: (!(value.tcp || value.udp)).then_some(false),
+                    ..crate::shadowsocks::ClientOptions::default()
+                },
+                multiplex: multiplex(value.multiplex.as_ref()),
+                ..crate::shadowsocks::Client::default()
+            }));
+        }
+        Protocol::Hysteria2(value) => {
+            clients.push(Connection::Hysteria2(crate::hysteria::Client {
+                server,
+                port,
+                password: password.to_owned(),
+                tls: security.tls().cloned().ok_or("Hysteria 2 入口使用 TLS")?,
+                hysteria: crate::hysteria::ClientOptions {
+                    obfs: value.obfs.clone(),
+                    quic: value.client.clone(),
+                    ..crate::hysteria::ClientOptions::default()
+                },
+                ..crate::hysteria::Client::default()
+            }));
+        }
+        Protocol::AnyTls(_) => {
+            clients.push(Connection::AnyTls(crate::anytls::Client {
+                server,
+                port,
+                password: password.to_owned(),
+                security,
+                ..crate::anytls::Client::default()
+            }));
+        }
+        Protocol::Forward(_) => clients.push(Connection::Forward(crate::forward::Client {
+            server,
+            port,
+            security,
+            transport,
+            ..crate::forward::Client::default()
+        })),
+    }
+    Ok(clients)
+}
+
+fn peer_tls(server: &crate::inbound::Tls) -> connection::Tls {
+    connection::Tls {
+        alpn: server.alpn.clone(),
+        min_version: server.min_version.clone(),
+        max_version: server.max_version.clone(),
+        cipher_suites: server.cipher_suites.clone(),
+        curves: server.curves.clone(),
+        ..connection::Tls::default()
+    }
+}
+
+pub(crate) fn draft(source: &Inbound) -> Result<Vec<Connection>> {
+    let security = match &source.security {
+        crate::inbound::Security::None => connection::Security::None,
+        crate::inbound::Security::Tls(server) => {
+            let mut tls = peer_tls(server);
+            if server
+                .server_name
+                .as_ref()
+                .is_some_and(|name| !name.is_empty())
+                || !source.listen.host.is_empty()
+            {
+                tls.server_name = Some(crate::certificate::name(source)?);
+            }
+            tls.ech = server.ech.as_ref().map(|_| Default::default());
+            connection::Security::Tls(tls)
+        }
+        crate::inbound::Security::Reality(server) => {
+            let mut tls = peer_tls(&server.tls);
+            tls.server_name = server
+                .server_names
+                .first()
+                .cloned()
+                .or_else(|| server.tls.server_name.clone());
+            connection::Security::Reality(Box::new(crate::reality::Client {
+                tls,
+                ..Default::default()
+            }))
+        }
+    };
+    peer_options(source, 0, security, None, None, None)
+}
+
+impl Builder<'_> {
     fn security(&self, source: &Inbound) -> Result<Vec<connection::Security>> {
         let Some(server) = source.security.tls() else {
             return Ok(vec![connection::Security::None]);
         };
-        let mut tls = connection::Tls {
-            alpn: server.alpn.clone(),
-            min_version: server.min_version.clone(),
-            max_version: server.max_version.clone(),
-            cipher_suites: server.cipher_suites.clone(),
-            curves: server.curves.clone(),
-            ..connection::Tls::default()
-        };
+        let mut tls = peer_tls(server);
         if let Some(ech) = &server.ech {
             tls.ech = Some(connection::Ech {
                 config: Some(crate::ech::public(source, ech, self.store)?),

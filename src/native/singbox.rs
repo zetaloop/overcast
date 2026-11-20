@@ -11,9 +11,10 @@ use super::{certificate_paths, hashes, listener::Credential, options::Options, p
 
 pub fn outbound(
     source: &Connection,
-    store: &Store,
+    input: super::parameters::Input<'_>,
     globals: &mut Map<String, Value>,
 ) -> Result<Map<String, Value>> {
+    let store = input.store;
     if source.multiplex().is_some()
         && !matches!(
             source,
@@ -60,7 +61,7 @@ pub fn outbound(
             output.insert("password".to_owned(), json!(value.password));
             output.insert(
                 "tls".to_owned(),
-                client_tls(&Security::Tls(value.tls.clone()), store, globals)?,
+                client_tls(&Security::Tls(value.tls.clone()), input, globals)?,
             );
         }
         Connection::AnyTls(value) => {
@@ -88,7 +89,7 @@ pub fn outbound(
             output.insert("password".to_owned(), json!(value.password));
             output.insert(
                 "tls".to_owned(),
-                client_tls(&value.security, store, globals)?,
+                client_tls(&value.security, input, globals)?,
             );
         }
         Connection::Forward(_) => unreachable!(),
@@ -114,7 +115,7 @@ pub fn outbound(
             if !matches!(value.security, Security::None) {
                 output.insert(
                     "tls".to_owned(),
-                    client_tls(&value.transport.client_tls(&value.security), store, globals)?,
+                    client_tls(&value.transport.client_tls(&value.security), input, globals)?,
                 );
             }
         }
@@ -151,7 +152,7 @@ pub fn outbound(
             options.finish("sing-box SOCKS")?;
         }
         Connection::Vless(value) => {
-            let mut options = Options::new(&value.vless)?;
+            let mut options = input.vless(&value.vless)?;
             output.insert("server".to_owned(), json!(value.server));
             output.insert("server_port".to_owned(), json!(value.port));
             output.insert("uuid".to_owned(), json!(value.uuid));
@@ -200,7 +201,7 @@ pub fn outbound(
             if !matches!(value.security, Security::None) {
                 output.insert(
                     "tls".to_owned(),
-                    client_tls(&value.transport.client_tls(&value.security), store, globals)?,
+                    client_tls(&value.transport.client_tls(&value.security), input, globals)?,
                 );
             }
             if let Some(transport) = super::transport::singbox(
@@ -262,7 +263,7 @@ pub fn outbound(
             if !matches!(value.security, Security::None) {
                 output.insert(
                     "tls".to_owned(),
-                    client_tls(&value.transport.client_tls(&value.security), store, globals)?,
+                    client_tls(&value.transport.client_tls(&value.security), input, globals)?,
                 );
             }
             if let Some(transport) = super::transport::singbox(
@@ -299,7 +300,7 @@ pub fn outbound(
             if !matches!(value.security, Security::None) {
                 output.insert(
                     "tls".to_owned(),
-                    client_tls(&value.transport.client_tls(&value.security), store, globals)?,
+                    client_tls(&value.transport.client_tls(&value.security), input, globals)?,
                 );
             }
             if let Some(transport) = super::transport::singbox(
@@ -323,10 +324,11 @@ pub fn outbound(
                     false,
                 )?,
             );
-            output.insert(
-                "password".to_owned(),
-                json!(value.shadowsocks.cipher.password(&value.password)?),
-            );
+            if let Some(password) =
+                input.material(|| value.shadowsocks.cipher.password(&value.password))?
+            {
+                output.insert("password".to_owned(), json!(password));
+            }
             for name in ["cipher", "tcp", "udp", "plugin", "udp_over_tcp"] {
                 options.take(name);
             }
@@ -877,13 +879,14 @@ fn fallbacks(
 
 fn client_tls(
     security: &Security,
-    store: &Store,
+    input: super::parameters::Input<'_>,
     globals: &mut Map<String, Value>,
 ) -> Result<Value> {
+    let store = input.store;
     let source = match security {
         Security::None => return Ok(json!({})),
         Security::Tls(tls) => tls,
-        Security::Reality(reality) => return super::reality::singbox(reality, store),
+        Security::Reality(reality) => return super::reality::singbox(reality, input),
     };
     let mut options = Options::new(source)?;
     let mut output = Map::from_iter([("enabled".to_owned(), json!(true))]);

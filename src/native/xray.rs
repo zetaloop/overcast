@@ -15,7 +15,10 @@ use super::{
     transport, unsupported,
 };
 
-pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>> {
+pub fn outbound(
+    source: &Connection,
+    input: super::parameters::Input<'_>,
+) -> Result<Map<String, Value>> {
     let (kind, proxy, network) = match source {
         Connection::Direct(value) => ("freedom", None, &value.network),
         Connection::Http(value) => ("http", Some(&value.proxy), &value.network),
@@ -65,7 +68,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             if !value.warp.remote_dns.is_empty() {
                 settings.insert("remoteDNS".to_owned(), json!(value.warp.remote_dns));
             }
-            stream.extend(super::warp::xray(value)?);
+            stream.extend(super::warp::xray(value, input)?);
             None
         }
         Connection::Hysteria2(value) => {
@@ -130,7 +133,7 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
             if value.multiplex.is_some() && value.vless.flow == crate::vless::Flow::Vision {
                 return unsupported("Vision 与 Mux.Cool TCP 流复用无法同时使用");
             }
-            let mut options = Options::new(&value.vless)?;
+            let mut options = input.vless(&value.vless)?;
             settings.insert("address".to_owned(), json!(value.server));
             settings.insert("port".to_owned(), json!(value.port));
             settings.insert("id".to_owned(), json!(value.uuid));
@@ -247,10 +250,11 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
                 "method".to_owned(),
                 super::shadowsocks::cipher(value.shadowsocks.cipher, inbound::Core::Xray, false)?,
             );
-            settings.insert(
-                "password".to_owned(),
-                json!(value.shadowsocks.cipher.password(&value.password)?),
-            );
+            if let Some(password) =
+                input.material(|| value.shadowsocks.cipher.password(&value.password))?
+            {
+                settings.insert("password".to_owned(), json!(password));
+            }
             options.take("cipher");
             options.take("tcp");
             options.take("udp");
@@ -273,13 +277,13 @@ pub fn outbound(source: &Connection, store: &Store) -> Result<Map<String, Value>
         if tls.reality().is_some() {
             reality_transport(source.transport().unwrap())?;
         }
-        stream.extend(security(&tls, store)?);
+        stream.extend(security(&tls, input)?);
     }
     if let Some(transport) = source.transport() {
         stream.extend(transport::xray(
             transport,
             false,
-            store,
+            input,
             tls.as_deref()
                 .is_some_and(|tls| !matches!(tls, connection::Security::None)),
         )?);
@@ -738,7 +742,7 @@ pub fn listeners(
         stream.extend(transport::xray(
             &source.transport,
             true,
-            store,
+            store.into(),
             !matches!(source.security, inbound::Security::None),
         )?);
     }
@@ -860,13 +864,18 @@ fn socket(options: &mut Options) -> Result<Map<String, Value>> {
     Ok(output)
 }
 
-pub fn security(source: &connection::Security, store: &Store) -> Result<Map<String, Value>> {
+pub fn security(
+    source: &connection::Security,
+    input: super::parameters::Input<'_>,
+) -> Result<Map<String, Value>> {
     let (kind, name, value) = match source {
         connection::Security::None => return Ok(Map::new()),
-        connection::Security::Tls(tls) => ("tls", "tlsSettings", client_tls(tls, store)?),
-        connection::Security::Reality(reality) => {
-            ("reality", "realitySettings", super::reality::xray(reality)?)
-        }
+        connection::Security::Tls(tls) => ("tls", "tlsSettings", client_tls(tls, input.store)?),
+        connection::Security::Reality(reality) => (
+            "reality",
+            "realitySettings",
+            super::reality::xray(reality, input)?,
+        ),
     };
     Ok(Map::from_iter([
         ("security".to_owned(), json!(kind)),

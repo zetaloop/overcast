@@ -44,6 +44,10 @@ impl Options {
         self.values.keys().map(String::as_str)
     }
 
+    pub(super) fn require(&mut self, key: &str) {
+        self.values.entry(key).or_insert(Value::Null);
+    }
+
     pub fn seconds(&mut self, name: &str) -> Option<u64> {
         let duration = humantime::parse_duration(self.values.get(name)?.as_str()?).ok()?;
         if duration.subsec_nanos() != 0 {

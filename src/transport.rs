@@ -364,7 +364,13 @@ impl Value for Transport {
     }
 
     fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
-        self.choose(screen, parent, field, |_| true)
+        self.select(
+            screen,
+            parent,
+            field,
+            &Self::variants(),
+            &crate::native::parameters::Peers::client(crate::native::stack::CORES),
+        )
     }
 }
 
@@ -382,26 +388,13 @@ impl Transport {
         ]
     }
 
-    pub fn choose(
-        &mut self,
-        screen: &mut Screen,
-        parent: &Menu<'_>,
-        field: usize,
-        allowed: impl Fn(&Self) -> bool,
-    ) -> Result<bool> {
-        let choices: Vec<_> = Self::variants()
-            .into_iter()
-            .filter(|(_, value)| allowed(value))
-            .collect();
-        self.select(screen, parent, field, &choices)
-    }
-
     pub(crate) fn select(
         &mut self,
         screen: &mut Screen,
         parent: &Menu<'_>,
         field: usize,
         choices: &[(&str, Self)],
+        peers: &crate::native::parameters::Peers,
     ) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let current = choices
@@ -436,7 +429,12 @@ impl Transport {
                         Self::Default | Self::Quic => false,
                         Self::WebSocket(value) => form::edit(screen, &title, value)?,
                         Self::HttpUpgrade(value) => form::edit(screen, &title, value)?,
-                        Self::Grpc(value) => form::edit(screen, &title, value)?,
+                        Self::Grpc(value) => form::scoped(screen, &title, value, |value| {
+                            let names = peers.grpc_fields(value);
+                            let mut fields = form::Form::fields(value, Grpc::default());
+                            fields.retain(|field| names.contains(field.key()));
+                            fields
+                        })?,
                         Self::XHttp(value) => form::edit(screen, &title, value.as_mut())?,
                         Self::Http(value) => form::edit(screen, &title, value)?,
                         Self::Kcp(value) => form::edit(screen, &title, value)?,

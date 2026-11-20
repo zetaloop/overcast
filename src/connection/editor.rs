@@ -47,6 +47,7 @@ pub(crate) struct Choices {
     transports: Vec<(&'static str, Transport)>,
     network_cores: Vec<Engine>,
     requested: Core,
+    grpc: crate::native::parameters::Peers,
 }
 
 impl Choices {
@@ -87,6 +88,11 @@ impl Choices {
                     .any(|core| stack.transport(core, mode, t))
             })
             .collect();
+        let grpc =
+            crate::native::parameters::Peers::client(requested.candidates(None).filter(|&core| {
+                stack.transport(core, mode, &Transport::Grpc(Default::default()))
+                    && (requested != Core::Auto || core.network(connection.network()).is_ok())
+            }));
         Self {
             cores,
             modes,
@@ -94,6 +100,7 @@ impl Choices {
             transports,
             network_cores,
             requested,
+            grpc,
         }
     }
 
@@ -239,6 +246,7 @@ impl Choices {
             return None;
         }
         let choices = self.transports.clone();
+        let peers = self.grpc.clone();
         let mut active = self.transport(value);
         Some(form::control(
             "transport",
@@ -247,7 +255,7 @@ impl Choices {
             default,
             Some(active.text()),
             move |slot, screen, menu, field| {
-                let changed = active.select(screen, menu, field, &choices)?;
+                let changed = active.select(screen, menu, field, &choices, &peers)?;
                 if changed {
                     *slot = active.clone();
                 }

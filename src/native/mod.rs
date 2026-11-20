@@ -7,7 +7,7 @@ pub(crate) mod listener;
 mod mihomo;
 mod multiplex;
 pub(crate) mod options;
-mod parameters;
+pub(crate) mod parameters;
 mod reality;
 mod routing;
 pub(crate) mod shadowsocks;
@@ -193,18 +193,24 @@ pub fn prepare(
         }
     }
     let mut coverage = graph::Coverage::default();
-    let mut include = |uuid: Uuid| {
-        if let Some(scope) = scopes.remove(&uuid) {
+    let mut clients = BTreeSet::new();
+    let mut include = |inbound: &Inbound, layer: Layer| -> Result<()> {
+        if layer == Layer::Transport && !inbound.response_only() && clients.insert(inbound.uuid) {
+            parameters::check_clients(inbound, store)
+                .map_err(|error| format!("入站 {}：{error}", inbound.name))?;
+        }
+        if let Some(scope) = scopes.remove(&inbound.uuid) {
             coverage.reached.extend(scope.reached);
             coverage.remainder |= scope.remainder;
         }
+        Ok(())
     };
     for inbound in config
         .inbounds
         .iter()
         .filter(|inbound| inbound.listen.enabled)
     {
-        include(inbound.uuid);
+        include(inbound, Layer::Transport)?;
     }
     let Some(mut graph) = graph else {
         return Ok((None, coverage));
@@ -319,7 +325,7 @@ pub fn prepare(
             };
             let port = builder.port(&tag, networks)?;
             let listener = member.internal(port, layer)?;
-            include(uuid);
+            include(graph.entries[member.entry].inbound, layer)?;
             for &network in &listener.binding.networks {
                 internal.insert((uuid, network, layer), listeners.len());
             }
@@ -621,7 +627,7 @@ pub fn prepare(
                                 {
                                     let mut value = xray::outbound(
                                         &Connection::Direct(connection::Direct::default()),
-                                        store,
+                                        store.into(),
                                     )?;
                                     value.insert("tag".to_owned(), json!(tag));
                                     value.get_mut("settings").unwrap()["redirect"] =
@@ -706,8 +712,10 @@ pub fn prepare(
                     Ok(())
                 })?;
                 assets.push("routing.lua".to_owned());
-                let mut direct =
-                    xray::outbound(&Connection::Direct(connection::Direct::default()), store)?;
+                let mut direct = xray::outbound(
+                    &Connection::Direct(connection::Direct::default()),
+                    store.into(),
+                )?;
                 direct.insert("tag".to_owned(), json!("direct"));
                 let mut outbounds = vec![
                     json!({"tag": "block", "protocol": "blackhole"}),
@@ -1391,6 +1399,15 @@ impl Core {
         store: &Store,
         globals: &mut Map<String, Value>,
     ) -> Result<Map<String, Value>> {
+        self.client(connection, store.into(), globals)
+    }
+
+    fn client(
+        self,
+        connection: &Connection,
+        input: parameters::Input<'_>,
+        globals: &mut Map<String, Value>,
+    ) -> Result<Map<String, Value>> {
         stack::Stack::Outbound(connection).check(
             self,
             connection.security_mode(),
@@ -1399,9 +1416,9 @@ impl Core {
                 .unwrap_or(&crate::transport::Transport::Default),
         )?;
         match self {
-            Self::Xray => xray::outbound(connection, store),
-            Self::SingBox => singbox::outbound(connection, store, globals),
-            Self::Mihomo => mihomo::outbound(connection, store, globals),
+            Self::Xray => xray::outbound(connection, input),
+            Self::SingBox => singbox::outbound(connection, input, globals),
+            Self::Mihomo => mihomo::outbound(connection, input, globals),
         }
     }
 }

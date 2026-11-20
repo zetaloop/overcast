@@ -882,9 +882,13 @@ fn edit(
                 }
                 "transport" => {
                     let mut transport = active.transport.clone();
-                    transport
-                        .choose(screen, &menu, selected, |value| {
-                            active.supports_transport(value)
+                    let choices: Vec<_> = Transport::variants()
+                        .into_iter()
+                        .filter(|(_, value)| active.supports_transport(value))
+                        .collect();
+                    crate::native::parameters::Peers::inbound(&active, store)
+                        .and_then(|peers| {
+                            transport.select(screen, &menu, selected, &choices, &peers)
                         })
                         .map(|edited| {
                             if edited {

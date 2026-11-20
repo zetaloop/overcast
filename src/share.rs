@@ -719,8 +719,12 @@ fn transport(
                     }
                 }
             }
-            let mut native =
-                crate::native::transport::xray(&Transport::XHttp(value), false, store, secure)?;
+            let mut native = crate::native::transport::xray(
+                &Transport::XHttp(value),
+                false,
+                store.into(),
+                secure,
+            )?;
             query.insert("type".to_owned(), json!("xhttp"));
             let mut extra = native
                 .remove("xhttpSettings")

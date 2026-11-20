@@ -631,13 +631,13 @@ fn merge(
                 &super::transport::xray(
                     &source.transport,
                     true,
-                    store,
+                    store.into(),
                     !matches!(source.security, crate::inbound::Security::None),
                 )?,
                 &super::transport::xray(
                     &member.source.transport,
                     true,
-                    store,
+                    store.into(),
                     !matches!(member.source.security, crate::inbound::Security::None),
                 )?,
                 &[],

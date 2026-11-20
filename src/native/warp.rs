@@ -11,7 +11,7 @@ use crate::{
 
 use super::{options::Options, single_headers, unsupported};
 
-pub fn xray(source: &Client) -> Result<Map<String, Value>> {
+pub fn xray(source: &Client, input: super::parameters::Input<'_>) -> Result<Map<String, Value>> {
     let value = &source.warp;
     let mut options = Options::new(value)?;
     for name in ["mode", "tcp", "udp", "remote_dns", "quic"] {
@@ -44,14 +44,16 @@ pub fn xray(source: &Client) -> Result<Map<String, Value>> {
     if value.mode == Mode::Http2 {
         options.copy(&mut tls, &["fingerprint"]);
     }
-    let mut masque = Map::from_iter([(
-        "warp".to_owned(),
-        json!({
+    let mut masque = Map::new();
+    if let Some(registration) = input.material(|| {
+        Ok(json!({
             "privateKey": source.registration.private_key,
             "publicKey": source.registration.public_key()?,
             "address": source.registration.addresses()?,
-        }),
-    )]);
+        }))
+    })? {
+        masque.insert("warp".to_owned(), registration);
+    }
     options.copy(&mut masque, &["host", "path"]);
     if options.take("headers").is_some() {
         masque.insert("headers".to_owned(), json!(single_headers(&value.headers)?));
@@ -99,7 +101,7 @@ pub fn xray(source: &Client) -> Result<Map<String, Value>> {
     Ok(output)
 }
 
-pub fn mihomo(source: &Client) -> Result<Map<String, Value>> {
+pub fn mihomo(source: &Client, input: super::parameters::Input<'_>) -> Result<Map<String, Value>> {
     let value = &source.warp;
     if value.mode == Mode::Http2
         && (matches!(source.network.tcp_fast_open, Some(FastOpen::Enabled(true)))
@@ -111,17 +113,14 @@ pub fn mihomo(source: &Client) -> Result<Map<String, Value>> {
     for name in ["mode", "tcp", "udp", "remote_dns", "quic", "stack"] {
         options.take(name);
     }
-    let mut output = Map::from_iter([
-        (
+    let mut output = Map::from_iter([("udp".to_owned(), json!(value.udp.unwrap_or(true)))]);
+    if let Some(public) = input.material(|| source.registration.public_key())? {
+        output.insert("public-key".to_owned(), json!(public));
+        output.insert(
             "private-key".to_owned(),
             json!(source.registration.private_key),
-        ),
-        (
-            "public-key".to_owned(),
-            json!(source.registration.public_key()?),
-        ),
-        ("udp".to_owned(), json!(value.udp.unwrap_or(true))),
-    ]);
+        );
+    }
     if !source.registration.ipv4.is_empty() {
         output.insert("ip".to_owned(), json!(source.registration.ipv4));
     }
