@@ -1,13 +1,16 @@
 use std::rc::Rc;
 
 use crate::{
+    Result,
     config::Store,
-    form::{self, Field, Value},
+    form::{self, Field, Form, Value},
     native::{parameters::Peers, stack::Stack},
+    security::Material,
     transport::Transport,
+    tui::{Menu, Screen},
 };
 
-use super::{AddressStrategy, Connection, Core, FastOpen, Network, Security};
+use super::{AddressStrategy, Connection, Core, FastOpen, Network, Security, Tls};
 use crate::inbound::Core as Engine;
 
 impl Connection {
@@ -67,6 +70,10 @@ impl Connection {
             Self::Hysteria2(_) | Self::Direct(_) | Self::Warp(_) => (None, None),
         }
     }
+
+    pub(crate) fn transport_mut(&mut self) -> Option<&mut Transport> {
+        self.stream().1
+    }
 }
 
 fn handshake(mode: usize) -> Security {
@@ -76,6 +83,178 @@ fn handshake(mode: usize) -> Security {
         2 => Security::Reality(Box::default()),
         _ => unreachable!(),
     }
+}
+
+type Candidates<'a, T> = dyn Fn(&T) -> Peers + 'a;
+
+impl Tls {
+    fn paired(&self, requested: Core, candidates: &Candidates<'_, Self>) -> bool {
+        if requested != Core::Auto {
+            return requested.candidates(None).any(Engine::paired_identity);
+        }
+        let mut unbound = self.clone();
+        unbound.client_certificate = None;
+        unbound.client_key = None;
+        candidates(&unbound).paired_identity()
+    }
+
+    pub(crate) fn set_identity(&mut self, cert: bool, material: Material, paired: bool) {
+        let (slot, other) = if cert {
+            (&mut self.client_certificate, &mut self.client_key)
+        } else {
+            (&mut self.client_key, &mut self.client_certificate)
+        };
+        if paired
+            && other
+                .as_ref()
+                .is_some_and(|v| v.inline().is_some() != material.inline().is_some())
+        {
+            *other = None;
+        }
+        *slot = Some(material);
+    }
+
+    fn edit_tls(
+        &mut self,
+        screen: &mut Screen,
+        title: &str,
+        requested: Core,
+        candidates: &Candidates<'_, Self>,
+    ) -> Result<bool> {
+        let edit = |cert: bool, tls: &mut Self, screen: &mut Screen, menu: &Menu<'_>, index| {
+            let paired = tls.paired(requested, candidates);
+            let (current, other) = if cert {
+                (&tls.client_certificate, &tls.client_key)
+            } else {
+                (&tls.client_key, &tls.client_certificate)
+            };
+            let mut material = current
+                .clone()
+                .or_else(|| other.as_ref().filter(|_| paired).map(Material::empty))
+                .unwrap_or_default();
+            let changed = material.edit(screen, menu, index)?;
+            if changed {
+                tls.set_identity(cert, material, paired);
+            }
+            Ok(changed)
+        };
+        form::controls(
+            screen,
+            title,
+            self,
+            None,
+            |tls| {
+                let hint = if tls.paired(requested, candidates) {
+                    match (&tls.client_certificate, &tls.client_key) {
+                        (Some(v), None) => Some(("client_key", v.empty().text())),
+                        (None, Some(v)) => Some(("client_certificate", v.empty().text())),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let mut fields = tls.fields(Self::default());
+                if let Some((key, text)) = hint
+                    && let Some(field) = fields.iter_mut().find(|f| f.key() == key)
+                {
+                    field.preview(text);
+                }
+                fields
+            },
+            &[
+                ("client_certificate", &|tls, s, m, i| {
+                    edit(true, tls, s, m, i)
+                }),
+                ("client_key", &|tls, s, m, i| edit(false, tls, s, m, i)),
+            ],
+        )
+    }
+}
+
+fn edit_security(
+    value: &mut Security,
+    screen: &mut Screen,
+    title: &str,
+    modes: &[usize],
+    requested: Core,
+    candidates: &Candidates<'_, Security>,
+) -> Result<bool> {
+    value.choose(
+        screen,
+        title,
+        modes,
+        |s, t, tls| tls.edit_tls(s, t, requested, &|v| candidates(&Security::Tls(v.clone()))),
+        |s, t, r| {
+            form::controls(
+                s,
+                t,
+                r,
+                None,
+                |v| v.fields(Default::default()),
+                &[("tls", &|r, s, m, i| {
+                    let security = r.clone();
+                    let title = format!("{} / {}", m.title, m.items[i].label.content);
+                    r.tls.edit_tls(s, &title, requested, &|v| {
+                        let mut r = security.clone();
+                        r.tls = v.clone();
+                        candidates(&Security::Reality(Box::new(r)))
+                    })
+                })],
+            )
+        },
+    )
+}
+
+pub(crate) fn edit_xhttp(
+    xhttp: &mut crate::transport::XHttp,
+    screen: &mut Screen,
+    title: &str,
+    requested: Core,
+    candidates: &Candidates<'_, crate::transport::XHttp>,
+) -> Result<bool> {
+    form::controls(
+        screen,
+        title,
+        xhttp,
+        None,
+        |v| v.fields(Default::default()),
+        &[("download", &|x, s, m, i| {
+            let outer = x.clone();
+            form::optional_page(&mut x.download, s, m, i, |s, title, download, enabled| {
+                form::controls(
+                    s,
+                    title,
+                    download,
+                    Some(enabled),
+                    |v| v.fields(Default::default()),
+                    &[("security", &|d, s, m, i| {
+                        let leg = d.clone();
+                        let check = |security: &Security| {
+                            let mut x = outer.clone();
+                            x.download = Some(crate::transport::Download {
+                                security: security.clone(),
+                                ..leg.clone()
+                            });
+                            candidates(&x)
+                        };
+                        let modes: Vec<_> = (0..3)
+                            .filter(|&mode| {
+                                d.security.index() == mode || check(&handshake(mode)).available()
+                            })
+                            .collect();
+                        edit_security(
+                            &mut d.security,
+                            s,
+                            &format!("{} / {}", m.title, m.items[i].label.content),
+                            &modes,
+                            requested,
+                            &check,
+                        )
+                    })],
+                )
+            })
+        })],
+    )
 }
 
 #[derive(Clone)]
@@ -221,11 +400,13 @@ impl Choices {
                                 .is_empty()
                     })
                     .collect();
-                let changed = active.choose(
+                let changed = edit_security(
+                    &mut active,
                     screen,
                     &format!("{} / {label}", menu.title),
                     &modes,
-                    form::edit,
+                    context.source.core(),
+                    &|s| Peers::client(context.candidates(|c| *c.stream().0.unwrap() = s.clone())),
                 )?;
                 if changed {
                     *slot = active.clone();
@@ -233,6 +414,30 @@ impl Choices {
                 Ok(changed)
             },
         ))
+    }
+
+    pub(crate) fn tls<'a>(
+        &self,
+        label: &'static str,
+        value: &'a mut Tls,
+        default: Tls,
+    ) -> Box<dyn Field + 'a> {
+        let ctx = self.clone();
+        form::control("tls", label, value, default, None, move |tls, s, m, _| {
+            tls.edit_tls(
+                s,
+                &format!("{} / {label}", m.title),
+                ctx.source.core(),
+                &|v| {
+                    Peers::client(ctx.candidates(|c| {
+                        let Connection::Hysteria2(hy) = c else {
+                            unreachable!()
+                        };
+                        hy.tls = v.clone();
+                    }))
+                },
+            )
+        })
     }
 
     pub(crate) fn transports(&self) -> Vec<(&'static str, Transport)> {
@@ -275,15 +480,27 @@ impl Choices {
             Some(active.text()),
             move |slot, screen, menu, field| {
                 let choices = context.transports();
-                let changed =
-                    active.select(screen, menu, field, &choices, |value, screen, title| {
+                let changed = active.select(
+                    screen,
+                    menu,
+                    field,
+                    &choices,
+                    |value, screen, title| {
                         let peers = Peers::client(context.candidates(|c| {
                             *c.stream().1.unwrap() = Transport::Grpc(Default::default())
                         }));
                         let requested = context.source.core();
                         let fixed = requested.candidates(None).find(|_| requested != Core::Auto);
                         value.edit(screen, title, &peers, fixed)
-                    })?;
+                    },
+                    |screen, title, x| {
+                        edit_xhttp(x, screen, title, context.source.core(), &|v| {
+                            Peers::client(context.candidates(|c| {
+                                *c.stream().1.unwrap() = Transport::XHttp(Box::new(v.clone()))
+                            }))
+                        })
+                    },
+                )?;
                 if changed {
                     *slot = active.clone();
                 }
@@ -321,6 +538,9 @@ macro_rules! client_fields {
     };
     (@push $f:ident, $c:ident, $s:ident, $d:ident, network, $label:literal) => {
         $f.push($c.network(&mut $s.network, $d.network));
+    };
+    (@push $f:ident, $c:ident, $s:ident, $d:ident, tls, $label:literal) => {
+        $f.push($c.tls($label, &mut $s.tls, $d.tls));
     };
     (@push $f:ident, $c:ident, $s:ident, $d:ident, $key:ident, $label:literal) => {
         $f.push($crate::form::field(stringify!($key), $label, &mut $s.$key, $d.$key));

@@ -28,13 +28,21 @@ impl Material {
             Self::File(_) => None,
         }
     }
+
+    pub(crate) fn empty(&self) -> Self {
+        match self {
+            Self::Inline(_) => Self::Inline(String::new()),
+            Self::File(_) => Self::File(String::new()),
+        }
+    }
 }
 
 impl Value for Material {
     fn text(&self) -> String {
         match self {
+            Self::File(path) if path.is_empty() => "文件路径".into(),
             Self::File(path) => path.clone(),
-            Self::Inline(text) => text.lines().next().unwrap_or_default().to_owned(),
+            Self::Inline(text) => text.lines().next().unwrap_or("正文").to_owned(),
         }
     }
 
@@ -131,6 +139,7 @@ impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
         screen: &mut Screen,
         title: &str,
         modes: &[usize],
+        edit_tls: impl FnOnce(&mut Screen, &str, &mut T) -> Result<bool>,
         edit_reality: impl FnOnce(&mut Screen, &str, &mut R) -> Result<bool>,
     ) -> Result<bool> {
         let labels = ["无", "TLS", "REALITY"];
@@ -174,7 +183,7 @@ impl<T: Form, R: Form + Handshake<T>> Security<T, R> {
         let title = format!("{title} / {}", labels[mode]);
         let edited = match self {
             Self::None => false,
-            Self::Tls(value) => form::edit(screen, &title, value)?,
+            Self::Tls(value) => edit_tls(screen, &title, value)?,
             Self::Reality(value) => edit_reality(screen, &title, value.as_mut())?,
         };
         Ok(edited || switching)
@@ -188,6 +197,6 @@ impl<T: Form, R: Form + Handshake<T>> Value for Security<T, R> {
 
     fn edit(&mut self, screen: &mut Screen, parent: &Menu<'_>, field: usize) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
-        self.choose(screen, &title, &[0, 1, 2], form::edit)
+        self.choose(screen, &title, &[0, 1, 2], form::edit, form::edit)
     }
 }

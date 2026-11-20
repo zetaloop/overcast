@@ -55,6 +55,7 @@ pub trait Field {
     fn edit(&mut self, screen: &mut Screen, menu: &Menu<'_>, selected: usize) -> Result<bool>;
     fn reset(&mut self);
     fn restrict(&mut self, allowed: &dyn Fn(&str) -> bool);
+    fn preview(&mut self, text: String);
 }
 
 pub type Fields<'a> = Vec<Box<dyn Field + 'a>>;
@@ -145,6 +146,10 @@ impl<T: Value, E: FnMut(&mut T, &mut Screen, &Menu<'_>, usize) -> Result<bool>> 
         *self.value = self.default.clone();
     }
 
+    fn preview(&mut self, text: String) {
+        self.preview = Some(text);
+    }
+
     fn restrict(&mut self, allowed: &dyn Fn(&str) -> bool) {
         let mut choices = T::alternatives();
         choices.retain(|(key, _, _)| allowed(key));
@@ -218,9 +223,15 @@ pub fn scoped<T: Form>(
     value: &mut T,
     fields: impl Fn(&mut T) -> Fields<'_>,
 ) -> Result<bool> {
-    edit_group(screen, title, value, None, None, None, &|v| {
-        (v.groups(), fields(v))
-    })
+    edit_group(
+        screen,
+        title,
+        value,
+        None,
+        None,
+        None,
+        (&|v| (v.groups(), fields(v)), &[]),
+    )
 }
 
 pub fn flat<T>(
@@ -229,9 +240,15 @@ pub fn flat<T>(
     value: &mut T,
     fields: impl Fn(&mut T) -> Fields<'_>,
 ) -> Result<bool> {
-    edit_group(screen, title, value, None, None, None, &|v| {
-        (Vec::new(), fields(v))
-    })
+    edit_group(
+        screen,
+        title,
+        value,
+        None,
+        None,
+        None,
+        (&|v| (Vec::new(), fields(v)), &[]),
+    )
 }
 
 pub fn retain<T: Form>(value: &mut T, allowed: impl Fn(&str) -> bool) {
@@ -244,9 +261,36 @@ pub fn retain<T: Form>(value: &mut T, allowed: impl Fn(&str) -> bool) {
 
 type Submit<'a, T> = dyn Fn(&T, &mut Screen) -> Result<()> + 'a;
 type Confirm<'a, T> = (&'a dyn Fn(&T) -> bool, &'a Submit<'a, T>);
+pub type Editor<'a, T> = (
+    &'static str,
+    &'a dyn Fn(&mut T, &mut Screen, &Menu<'_>, usize) -> Result<bool>,
+);
+type Layout<'a, T> = (
+    &'a dyn Fn(&mut T) -> (Vec<Group>, Fields<'_>),
+    &'a [Editor<'a, T>],
+);
 
 fn layout<T: Form>(value: &mut T) -> (Vec<Group>, Fields<'_>) {
     (value.groups(), value.fields(T::default()))
+}
+
+pub fn controls<T: Form>(
+    screen: &mut Screen,
+    title: &str,
+    value: &mut T,
+    enabled: Option<&mut bool>,
+    fields: impl Fn(&mut T) -> Fields<'_>,
+    editors: &[Editor<'_, T>],
+) -> Result<bool> {
+    edit_group(
+        screen,
+        title,
+        value,
+        None,
+        None,
+        enabled,
+        (&|v| (v.groups(), fields(v)), editors),
+    )
 }
 
 pub fn page<T: Form + PartialEq>(
@@ -262,7 +306,7 @@ pub fn page<T: Form + PartialEq>(
         None,
         Some((&|draft| draft != value, &save)),
         None,
-        &layout,
+        (&layout, &[]),
     )
     .map(|_| ())
 }
@@ -273,18 +317,36 @@ pub fn optional<T: Form>(
     menu: &Menu<'_>,
     selected: usize,
 ) -> Result<bool> {
+    optional_page(
+        slot,
+        screen,
+        menu,
+        selected,
+        |screen, title, value, enabled| {
+            edit_group(
+                screen,
+                title,
+                value,
+                None,
+                None,
+                Some(enabled),
+                (&layout, &[]),
+            )
+        },
+    )
+}
+
+pub fn optional_page<T: Form>(
+    slot: &mut Option<T>,
+    screen: &mut Screen,
+    menu: &Menu<'_>,
+    selected: usize,
+    edit: impl FnOnce(&mut Screen, &str, &mut T, &mut bool) -> Result<bool>,
+) -> Result<bool> {
     let mut enabled = slot.is_some();
     let mut value = slot.clone().unwrap_or_default();
     let title = format!("{} / {}", menu.title, menu.items[selected].label.content);
-    let changed = edit_group(
-        screen,
-        &title,
-        &mut value,
-        None,
-        None,
-        Some(&mut enabled),
-        &layout,
-    )?;
+    let changed = edit(screen, &title, &mut value, &mut enabled)?;
     if changed {
         *slot = enabled.then_some(value);
     }
@@ -298,7 +360,7 @@ fn edit_group<T>(
     group: Option<&Group>,
     submit: Option<Confirm<'_, T>>,
     mut enabled: Option<&mut bool>,
-    bindings: &dyn Fn(&mut T) -> (Vec<Group>, Fields<'_>),
+    controls: Layout<'_, T>,
 ) -> Result<bool> {
     let mut selected = 0;
     let mut notice = String::new();
@@ -307,7 +369,7 @@ fn edit_group<T>(
         let pending = submit.is_some_and(|(dirty, _)| dirty(value));
         let active = enabled.as_deref().copied().unwrap_or(true);
         let (mut groups, mut fields) = if active {
-            bindings(value)
+            controls.0(value)
         } else {
             Default::default()
         };
@@ -374,10 +436,18 @@ fn edit_group<T>(
                     Some(group),
                     None,
                     None,
-                    bindings,
+                    controls,
                 )
             }
-            Action::Select => fields[selected].edit(screen, &menu, selected),
+            Action::Select => {
+                let key = fields[selected].key();
+                if let Some((_, edit)) = controls.1.iter().find(|(name, _)| *name == key) {
+                    drop(fields);
+                    edit(value, screen, &menu, selected)
+                } else {
+                    fields[selected].edit(screen, &menu, selected)
+                }
+            }
             Action::Key(key) if key.code == KeyCode::Delete && selected < fields.len() => {
                 fields[selected].reset();
                 Ok(true)

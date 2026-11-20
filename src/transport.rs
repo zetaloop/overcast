@@ -373,6 +373,7 @@ impl Value for Transport {
                 let peers = crate::native::parameters::Peers::client(crate::native::stack::CORES);
                 value.edit(screen, title, &peers, None)
             },
+            form::edit,
         )
     }
 }
@@ -432,6 +433,7 @@ impl Transport {
         field: usize,
         choices: &[(&str, Self)],
         grpc: impl FnOnce(&mut Grpc, &mut Screen, &str) -> Result<bool>,
+        xhttp: impl FnOnce(&mut Screen, &str, &mut XHttp) -> Result<bool>,
     ) -> Result<bool> {
         let title = format!("{} / {}", parent.title, parent.items[field].label.content);
         let current = choices
@@ -467,7 +469,7 @@ impl Transport {
                         Self::WebSocket(value) => form::edit(screen, &title, value)?,
                         Self::HttpUpgrade(value) => form::edit(screen, &title, value)?,
                         Self::Grpc(value) => grpc(value, screen, &title)?,
-                        Self::XHttp(value) => form::edit(screen, &title, value.as_mut())?,
+                        Self::XHttp(value) => xhttp(screen, &title, value.as_mut())?,
                         Self::Http(value) => form::edit(screen, &title, value)?,
                         Self::Kcp(value) => form::edit(screen, &title, value)?,
                     };

@@ -79,6 +79,20 @@ impl Input<'_> {
 }
 
 impl Core {
+    pub(crate) fn paired_identity(self) -> bool {
+        self == Self::Mihomo
+    }
+
+    pub(super) fn identity(self, tls: &crate::connection::Tls) -> Result<()> {
+        if self.paired_identity()
+            && let (Some(cert), Some(key)) = (&tls.client_certificate, &tls.client_key)
+            && cert.inline().is_some() != key.inline().is_some()
+        {
+            return super::unsupported("Mihomo 的客户端证书与私钥需同为正文或同为文件路径");
+        }
+        Ok(())
+    }
+
     pub(crate) fn parameters(
         self,
         value: &Connection,
@@ -106,23 +120,41 @@ pub(crate) struct Peers {
 }
 
 impl Peers {
-    pub(crate) fn inbound(source: &Inbound, store: &Store) -> Result<Self> {
-        let mut source = source.clone();
-        source.transport = Transport::Grpc(Grpc::default());
-        let pending = Handshake::from(&source);
-        let clients = crate::profile::draft(&source)?
-            .iter()
-            .map(|client| {
-                client
-                    .core()
-                    .candidates(None)
-                    .filter(|&core| core.parameters(client, store, pending).is_ok())
-                    .collect()
-            })
-            .collect();
-        Ok(Self {
-            server: Some(source.core),
-            clients,
+    pub(crate) fn available(&self) -> bool {
+        !self.clients.is_empty() && self.clients.iter().all(|cores| !cores.is_empty())
+    }
+
+    pub(crate) fn paired_identity(&self) -> bool {
+        self.available()
+            && self
+                .clients
+                .iter()
+                .any(|cores| cores.iter().all(|core| core.paired_identity()))
+    }
+
+    pub(crate) fn transports<'a>(
+        source: &Inbound,
+        store: &'a Store,
+    ) -> Result<impl Fn(&Transport) -> Self + use<'a>> {
+        let pending = Handshake::from(source);
+        let server = source.core;
+        let clients = crate::profile::draft(source)?;
+        Ok(move |transport: &Transport| Self {
+            server: Some(server),
+            clients: clients
+                .iter()
+                .cloned()
+                .map(|mut client| {
+                    if let Some(value) = client.transport_mut() {
+                        *value = transport.clone();
+                    }
+                    client
+                        .core()
+                        .candidates(None)
+                        .filter(|&core| core.parameters(&client, store, pending).is_ok())
+                        .collect()
+                })
+                .collect(),
         })
     }
 

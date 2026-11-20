@@ -699,11 +699,7 @@ pub fn client_tls(
             json!(hex_hashes(std::slice::from_ref(hash))?.remove(0)),
         );
     }
-    if let (Some(cert), Some(key)) = (&source.client_certificate, &source.client_key)
-        && cert.inline().is_some() != key.inline().is_some()
-    {
-        return unsupported("Mihomo 的客户端证书与私钥需同为正文或同为文件路径");
-    }
+    inbound::Core::Mihomo.identity(source)?;
     for (name, value, destination) in [
         (
             "client_certificate",

@@ -868,6 +868,7 @@ fn edit(
                             screen,
                             &title,
                             &inbound.securities(),
+                            form::edit,
                             |screen, title, reality| {
                                 reality.use_names();
                                 let allowed = reality.fields_for(inbound.core);
@@ -887,10 +888,33 @@ fn edit(
                         .filter(|(_, value)| active.supports_transport(value))
                         .collect();
                     transport
-                        .select(screen, &menu, selected, &choices, |value, screen, title| {
-                            let peers = crate::native::parameters::Peers::inbound(&active, store)?;
-                            value.edit(screen, title, &peers, None)
-                        })
+                        .select(
+                            screen,
+                            &menu,
+                            selected,
+                            &choices,
+                            |value, screen, title| {
+                                let peers =
+                                    crate::native::parameters::Peers::transports(&active, store)?;
+                                value.edit(
+                                    screen,
+                                    title,
+                                    &peers(&Transport::Grpc(Default::default())),
+                                    None,
+                                )
+                            },
+                            |screen, title, value| {
+                                let peers =
+                                    crate::native::parameters::Peers::transports(&active, store)?;
+                                crate::connection::editor::edit_xhttp(
+                                    value,
+                                    screen,
+                                    title,
+                                    crate::connection::Core::Auto,
+                                    &|x| peers(&Transport::XHttp(Box::new(x.clone()))),
+                                )
+                            },
+                        )
                         .map(|edited| {
                             if edited {
                                 inbound.transport = transport;
