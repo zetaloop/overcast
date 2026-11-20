@@ -27,7 +27,7 @@ fn external() -> Result<bool> {
         "overcast.service",
     ]))?;
     let path = path.trim();
-    Ok(!path.is_empty() && path != UNIT)
+    Ok(!path.is_empty() && fs::canonicalize(path)? != Path::new(UNIT))
 }
 
 pub(super) fn install(store: &Store) -> Result<()> {
