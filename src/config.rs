@@ -313,16 +313,16 @@ impl Store {
         progress.check()?;
         let previous = service::Deployment::load(self)?;
         let mut config = self.load()?;
-        let mut resources = Resources::load(self)?;
-        let planned = (|| -> Result<_> {
-            let objects = config.objects();
-            let result = change(&mut config, &mut resources)?;
-            config.prune(&objects)?;
-            config.validate()?;
-            config.maintenance.next()?;
-            if let Some(target) = previous.reuse(self, &config, &resources)? {
-                return Ok((result, None, target));
-            }
+        let selected = Resources::load(self)?;
+        let mut resources = selected.clone();
+        let objects = config.objects();
+        let result = change(&mut config, &mut resources)?;
+        config.prune(&objects)?;
+        config.validate()?;
+        config.maintenance.next()?;
+        let (prepared, target) = if let Some(target) = previous.reuse(self, &config, &resources)? {
+            (None, target)
+        } else {
             let (prepared, coverage) = native::prepare(
                 self,
                 &config,
@@ -343,14 +343,68 @@ impl Store {
                 let cached = config.keys.entry(uuid).or_default();
                 *cached = used.with_cache(cached);
             }
-            Ok((result, prepared, target))
-        })();
-        resources.save(self)?;
-        let (result, mut prepared, target) = planned?;
-        progress.check()?;
+            (prepared, target)
+        };
+        service::check(&previous, &target, progress)?;
         let path = self.directory.join("config.json");
         let mut directories = previous.directories();
-        if let Some(prepared) = &prepared {
+        let used = target.directories();
+        target.save(self)?;
+        let mut selection_saved = false;
+        let applied = (|| -> Result<()> {
+            service::switch(self, &previous, &target, progress)?;
+            if resources != selected {
+                resources.save(self)?;
+                selection_saved = true;
+            }
+            self.write(&path, |file| {
+                serde_json::to_writer_pretty(&mut *file, &config)?;
+                file.write_all(b"\n")?;
+                Ok(())
+            })?;
+            Ok(())
+        })();
+        if let Err(error) = applied {
+            let step = progress.activity(tr("Restoring deployment", "恢复部署"));
+            let recovery = previous
+                .save(self)
+                .and_then(|()| service::switch(self, &target, &previous, &Progress::default()));
+            if recovery.is_err()
+                && let Some(prepared) = prepared
+            {
+                prepared.keep();
+            }
+            let selection = if selection_saved {
+                selected.save(self)
+            } else {
+                Ok(())
+            };
+            let mut errors = Vec::new();
+            for outcome in [recovery, selection] {
+                if let Err(cause) = outcome {
+                    errors.push(cause.to_string());
+                }
+            }
+            if !errors.is_empty() {
+                let recovery = errors.join("; ");
+                return Err(message!(
+                    "{error}; could not restore the previous deployment: {recovery}",
+                    "{error}；恢复部署失败：{recovery}"
+                )
+                .into());
+            }
+            step.finish(tr("Previous deployment restored", "已恢复此前部署"));
+            return Err(message!(
+                "{error}\nPrevious deployment restored",
+                "{error}\n已恢复此前部署"
+            )
+            .into());
+        }
+        if let Some(prepared) = prepared
+            && used
+                .iter()
+                .any(|path| path.starts_with(prepared.directory()))
+        {
             directories.extend(prepared.state.instances.iter().map(|instance| {
                 prepared
                     .directory()
@@ -359,36 +413,7 @@ impl Store {
                     .unwrap()
                     .to_owned()
             }));
-        }
-        let used = target.directories();
-        if prepared.as_ref().is_some_and(|prepared| {
-            used.iter()
-                .any(|directory| directory.starts_with(prepared.directory()))
-        }) {
-            prepared.take().unwrap().keep();
-        }
-        service::apply(self, &previous, &target, progress)?;
-        if let Err(error) = self.write(&path, |file| {
-            serde_json::to_writer_pretty(&mut *file, &config)?;
-            file.write_all(b"\n")?;
-            Ok(())
-        }) {
-            let step = progress.activity(tr("Restoring deployment", "恢复部署"));
-            match service::restore(self, &target, &previous, &Progress::default()) {
-                Ok(()) => step.finish(tr("Previous deployment restored", "已恢复此前部署")),
-                Err(recovery) => {
-                    return Err(message!(
-                        "{error}; could not restore the previous deployment: {recovery}",
-                        "{error}；恢复部署失败：{recovery}"
-                    )
-                    .into());
-                }
-            }
-            return Err(message!(
-                "{error}\nPrevious deployment restored",
-                "{error}\n已恢复此前部署"
-            )
-            .into());
+            prepared.keep();
         }
         for directory in directories.difference(&used) {
             if let Err(error) = fs::remove_dir_all(directory)

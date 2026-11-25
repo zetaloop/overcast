@@ -213,7 +213,7 @@ impl Deployment {
             .collect()
     }
 
-    fn save(&self, store: &Store) -> Result<()> {
+    pub(crate) fn save(&self, store: &Store) -> Result<()> {
         store.write(&store.directory.join("deployment.json"), |file| {
             serde_json::to_writer_pretty(file, self)?;
             Ok(())
@@ -390,12 +390,7 @@ pub fn logs(screen: &mut Screen, store: &Store) -> Result<()> {
     }
 }
 
-pub fn apply(
-    store: &Store,
-    previous: &Deployment,
-    target: &Deployment,
-    progress: &Progress,
-) -> Result<()> {
+pub fn check(previous: &Deployment, target: &Deployment, progress: &Progress) -> Result<()> {
     for unit in target
         .units
         .iter()
@@ -403,40 +398,10 @@ pub fn apply(
     {
         unit.check(progress)?;
     }
-    progress.check()?;
-    target.save(store)?;
-    if let Err(error) = switch(store, previous, target, progress) {
-        let step = progress.activity(tr("Restoring deployment", "恢复部署"));
-        match restore(store, target, previous, &Progress::default()) {
-            Ok(()) => step.finish(tr("Previous deployment restored", "已恢复此前部署")),
-            Err(recovery) => {
-                return Err(message!(
-                    "{error}; could not restore the previous deployment: {recovery}",
-                    "{error}；恢复部署失败：{recovery}"
-                )
-                .into());
-            }
-        }
-        return Err(message!(
-            "{error}\nPrevious deployment restored",
-            "{error}\n已恢复此前部署"
-        )
-        .into());
-    }
-    Ok(())
+    progress.check()
 }
 
-pub fn restore(
-    store: &Store,
-    current: &Deployment,
-    previous: &Deployment,
-    progress: &Progress,
-) -> Result<()> {
-    previous.save(store)?;
-    switch(store, current, previous, progress)
-}
-
-fn switch(
+pub(crate) fn switch(
     store: &Store,
     previous: &Deployment,
     target: &Deployment,

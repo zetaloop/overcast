@@ -19,7 +19,7 @@ use crate::{
     progress::{Progress, Step},
 };
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Resources {
     pub components: BTreeMap<Component, Installed>,

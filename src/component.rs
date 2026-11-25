@@ -41,7 +41,7 @@ pub struct Settings {
     pub preview: bool,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Installed {
     pub tag: String,
