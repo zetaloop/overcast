@@ -30,12 +30,11 @@ fn external() -> Result<bool> {
     Ok(!path.is_empty() && fs::canonicalize(path)? != Path::new(UNIT))
 }
 
-pub(super) fn install(store: &Store) -> Result<()> {
+pub(super) fn install(_: &Store) -> Result<()> {
     if !external()? {
         let unit = format!(
-            "[Unit]\nDescription=Overcast\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=exec\nExecStart={} --run {}\nExecReload=/bin/kill -HUP $MAINPID\nKillMode=mixed\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n",
+            "[Unit]\nDescription=Overcast\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=exec\nExecStart={} --run\nExecReload=/bin/kill -HUP $MAINPID\nKillMode=mixed\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n",
             quote(&crate::update::service_program()?)?,
-            quote(&store.directory)?,
         );
         fs::write(UNIT, unit)?;
         execute(Command::new("systemctl").arg("daemon-reload"))?;

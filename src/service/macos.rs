@@ -40,7 +40,7 @@ pub(super) fn install(store: &Store) -> Result<()> {
     let output = logs.join("overcast.log");
     let definition = json!({
         "Label": LABEL,
-        "ProgramArguments": [crate::update::service_program()?, "--run", store.directory],
+        "ProgramArguments": [crate::update::service_program()?, "--run"],
         "RunAtLoad": true,
         "KeepAlive": {"SuccessfulExit": false},
         "StandardOutPath": output,

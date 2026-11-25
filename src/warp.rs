@@ -287,7 +287,7 @@ impl form::Value for Registration {
                 Action::Back => return Ok(false),
                 Action::Select => match items[selected].key.as_str() {
                     "register" => {
-                        let store = Store::open(None)?;
+                        let store = Store::open()?;
                         let edited = screen.work(
                             tr("Register with WARP", "注册 WARP"),
                             "",

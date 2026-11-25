@@ -135,7 +135,7 @@ fn open(access: ServiceAccess) -> Result<Option<Service>> {
     }
 }
 
-pub(super) fn install(store: &Store) -> Result<()> {
+pub(super) fn install(_: &Store) -> Result<()> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -147,7 +147,7 @@ pub(super) fn install(store: &Store) -> Result<()> {
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
         executable_path: crate::update::service_program()?,
-        launch_arguments: vec!["--run".into(), store.directory.as_os_str().to_owned()],
+        launch_arguments: vec!["--run".into()],
         dependencies: Vec::new(),
         account_name: None,
         account_password: None,

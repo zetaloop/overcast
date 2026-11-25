@@ -87,7 +87,7 @@ impl Value for Endpoint {
                             Self::Inbound(uuid) => Some(*uuid),
                             _ => None,
                         };
-                        match inbound::select(screen, &Store::open(None)?, current, |_| true)? {
+                        match inbound::select(screen, &Store::open()?, current, |_| true)? {
                             Some(uuid) => {
                                 *self = Self::Inbound(uuid);
                                 Ok(true)

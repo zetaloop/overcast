@@ -1,10 +1,9 @@
 use crate::language::{message, text as tr};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    env,
     fs::{self, File, OpenOptions},
     io::{BufReader, ErrorKind, Write},
-    path::{Path, PathBuf, absolute},
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -251,14 +250,10 @@ fn default_directory() -> Result<PathBuf> {
 }
 
 impl Store {
-    pub fn open(directory: Option<PathBuf>) -> Result<Self> {
-        let directory = absolute(
-            match directory.or_else(|| env::var_os("OVERCAST_HOME").map(PathBuf::from)) {
-                Some(directory) => directory,
-                None => default_directory()?,
-            },
-        )?;
-        Ok(Self { directory })
+    pub fn open() -> Result<Self> {
+        Ok(Self {
+            directory: default_directory()?,
+        })
     }
 
     pub fn load(&self) -> Result<Config> {

@@ -18,8 +18,6 @@ You can also pass menu actions on the command line. For example, `overcast add-u
 | macOS | `/Library/Application Support/Overcast` |
 | Windows | `%ProgramData%\Overcast` |
 
-Set `OVERCAST_HOME` to use a different directory.
-
 ## Build from source
 
 ```sh

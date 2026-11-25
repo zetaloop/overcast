@@ -530,11 +530,7 @@ pub fn run(store: Store) -> Result<()> {
             }
         });
         let result = match orchestrate(&store, sender, events, &progress) {
-            Ok(Exit::Restart) => Err(Command::new(program)
-                .arg("--run")
-                .arg(&store.directory)
-                .exec()
-                .into()),
+            Ok(Exit::Restart) => Err(Command::new(program).arg("--run").exec().into()),
             Ok(Exit::Stop) => Ok(()),
             Err(error) => Err(error),
         };

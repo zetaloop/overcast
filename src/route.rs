@@ -110,14 +110,14 @@ impl Destination {
 
 impl Value for Destination {
     fn text(&self) -> String {
-        match Store::open(None).and_then(|store| store.load()) {
+        match Store::open().and_then(|store| store.load()) {
             Ok(config) => self.name(&config),
             Err(error) => error.to_string(),
         }
     }
 
     fn edit(&mut self, screen: &mut Screen, _: &Menu<'_>, _: usize) -> Result<bool> {
-        match destination(screen, &Store::open(None)?, *self, false, |_, _| Ok(true))? {
+        match destination(screen, &Store::open()?, *self, false, |_, _| Ok(true))? {
             Some(value) => {
                 *self = value;
                 Ok(true)

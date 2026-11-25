@@ -54,31 +54,30 @@ fn run() -> Result<()> {
     #[cfg(windows)]
     update::cleanup()?;
     let mut args = std::env::args().skip(1).peekable();
-    match args.peek().map(String::as_str) {
-        Some("--run") => {
-            args.next();
-            let store = Store::open(args.next().map(Into::into))?;
-            language::load(&store)?;
+    let store = Store::open()?;
+    let configured = language::load(&store)?;
+    if matches!(args.peek().map(String::as_str), Some("--run" | "--update")) {
+        let run = args.next().as_deref() == Some("--run");
+        if let Some(argument) = args.next() {
+            return Err(language::message!(
+                "Unexpected argument: {argument}",
+                "多余的参数：{argument}"
+            )
+            .into());
+        }
+        if run {
             return service::run(store);
         }
-        Some("--update") => {
-            args.next();
-            let store = Store::open(args.next().map(Into::into))?;
-            language::load(&store)?;
-            let progress = progress::Progress::default();
-            if let Some(update) = maintenance::update(&store, &progress)? {
-                println!(
-                    "{} {}",
-                    language::text("Updated Overcast to", "Overcast 已更新至"),
-                    update.activate(&store, &progress)?
-                );
-            }
-            return Ok(());
+        let progress = progress::Progress::default();
+        if let Some(update) = maintenance::update(&store, &progress)? {
+            println!(
+                "{} {}",
+                language::text("Updated Overcast to", "Overcast 已更新至"),
+                update.activate(&store, &progress)?
+            );
         }
-        _ => {}
+        return Ok(());
     }
-    let store = Store::open(None)?;
-    let configured = language::load(&store)?;
     let mut screen = Screen::open([])?;
     if !configured && !language::choose(&mut screen, &store)? {
         return screen.finish();
