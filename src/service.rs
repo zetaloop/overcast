@@ -319,13 +319,7 @@ impl Unit {
 
     fn check(&self, progress: &Progress) -> Result<()> {
         progress.check()?;
-        let step = progress.activity(message!(
-            "Reading {} configuration",
-            "读取 {} 配置",
-            self.component.name()
-        ));
         execute(&mut self.command(true))?;
-        step.finish(&self.name);
         Ok(())
     }
 
@@ -411,7 +405,13 @@ pub fn check(previous: &Deployment, target: &Deployment, progress: &Progress) ->
         .iter()
         .filter(|unit| unit.certificates.is_empty() && !previous.units.contains(unit))
     {
+        let step = progress.activity(message!(
+            "Reading {} configuration",
+            "读取 {} 配置",
+            unit.component.name()
+        ));
         unit.check(progress)?;
+        step.finish(&unit.name);
     }
     progress.check()
 }
@@ -599,41 +599,50 @@ fn orchestrate(
         running: BTreeMap::new(),
         generation: 0,
     };
-    let mut deployment = Deployment::default();
+    let mut deployment: Option<Deployment> = None;
     let mut retries: BTreeMap<String, Instant> = BTreeMap::new();
     let mut delays: BTreeMap<String, Duration> = BTreeMap::new();
     let mut maintenance = None;
     let mut pending = true;
-    let exit = loop {
+    loop {
         if pending {
             pending = false;
             let target = Deployment::load(store)?;
-            let result = orchestrator.transition(&deployment, &target);
-            retries.clear();
-            if let Err(error) = &result {
-                log(
-                    store,
-                    &message!(
-                        "Could not apply deployment: {error}",
-                        "应用部署失败：{error}"
-                    ),
-                );
-            }
-            report(
-                store,
-                target.id,
-                None,
-                result.err().map(|error| error.to_string()),
-            )?;
-            if maintenance.is_none() || deployment.config.maintenance != target.config.maintenance {
-                maintenance = target
-                    .config
-                    .maintenance
-                    .next()?
-                    .map(|delay| Instant::now() + delay);
-            }
-            deployment = target;
+            let id = target.id;
+            let error = match orchestrator.transition(&target) {
+                Ok(()) => {
+                    retries.clear();
+                    delays.retain(|name, _| orchestrator.running.contains_key(name));
+                    if deployment
+                        .as_ref()
+                        .is_none_or(|old| old.config.maintenance != target.config.maintenance)
+                    {
+                        maintenance = target
+                            .config
+                            .maintenance
+                            .next()?
+                            .map(|delay| Instant::now() + delay);
+                    }
+                    deployment = Some(target);
+                    None
+                }
+                Err(error) => {
+                    log(
+                        store,
+                        &message!(
+                            "Could not apply deployment: {error}",
+                            "应用部署失败：{error}"
+                        ),
+                    );
+                    if deployment.is_none() {
+                        return Err(error);
+                    }
+                    Some(error.to_string())
+                }
+            };
+            report(store, id, None, error)?;
         }
+        let deployment = deployment.as_ref().unwrap();
         let deadline = retries.values().copied().chain(maintenance).min();
         let event = match deadline {
             Some(deadline) => {
@@ -648,8 +657,8 @@ fn orchestrate(
                 }
                 pending = true;
             }
-            Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => break Exit::Stop,
-            Ok(Event::Restart) => break Exit::Restart,
+            Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => return Ok(Exit::Stop),
+            Ok(Event::Restart) => return Ok(Exit::Restart),
             Ok(Event::Exited(name, generation)) => {
                 if orchestrator
                     .running
@@ -685,7 +694,7 @@ fn orchestrate(
                         update.version
                     ),
                 );
-                break Exit::Restart;
+                return Ok(Exit::Restart);
             }
             Ok(Event::Maintained(Ok(None))) => {}
             Ok(Event::Maintained(Err(error))) => log(
@@ -735,27 +744,21 @@ fn orchestrate(
                 }
             }
         }
-    };
-    let names: Vec<_> = orchestrator
-        .running
-        .values()
-        .filter(|process| process.unit.component != Component::Caddy)
-        .map(|process| process.unit.name.clone())
-        .chain(
-            deployment
-                .caddy()
-                .map(|unit| unit.name.clone())
-                .filter(|name| orchestrator.running.contains_key(name)),
-        )
-        .collect();
-    for name in names {
-        orchestrator.stop(&name);
     }
-    Ok(exit)
+}
+
+impl Drop for Orchestrator<'_> {
+    fn drop(&mut self) {
+        let mut processes: Vec<_> = std::mem::take(&mut self.running).into_values().collect();
+        processes.sort_by_key(|process| process.unit.component == Component::Caddy);
+        for process in processes {
+            process.stop();
+        }
+    }
 }
 
 impl Orchestrator<'_> {
-    fn transition(&mut self, previous: &Deployment, target: &Deployment) -> Result<()> {
+    fn transition(&mut self, target: &Deployment) -> Result<()> {
         let changed: BTreeSet<_> = target
             .units
             .iter()
@@ -786,12 +789,7 @@ impl Orchestrator<'_> {
                 .filter(|process| process.unit.program == unit.program)
             {
                 Some(process) => {
-                    let port = previous
-                        .ports
-                        .get("caddy")
-                        .copied()
-                        .unwrap_or(target.ports["caddy"]);
-                    reload(unit, port)?;
+                    reload(&process.unit, unit)?;
                     process.unit = unit.clone();
                 }
                 None => {
@@ -1073,12 +1071,16 @@ fn log(store: &Store, message: &str) {
     }
 }
 
-fn reload(unit: &Unit, port: u16) -> Result<()> {
+fn reload(active: &Unit, unit: &Unit) -> Result<()> {
+    let config: serde_json::Value = serde_json::from_slice(&fs::read(&active.config)?)?;
+    let address = config["admin"]["listen"]
+        .as_str()
+        .ok_or(tr("Missing Caddy admin address", "缺少 Caddy 管理地址"))?;
     execute(
         Command::new(&unit.program)
             .args(["reload", "--config"])
             .arg(&unit.config)
-            .args(["--address", &format!("127.0.0.1:{port}")]),
+            .args(["--address", address]),
     )?;
     Ok(())
 }

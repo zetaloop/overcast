@@ -113,7 +113,6 @@ pub fn wait(
     store.create_dir(&directory)?;
     watcher.watch(&directory, RecursiveMode::Recursive)?;
     watcher.watch(&store.directory, RecursiveMode::NonRecursive)?;
-    let step = progress.activity(tr("Preparing certificates", "准备证书"));
     progress.until(|| {
         if !current()? {
             return Err(std::io::Error::new(
@@ -125,14 +124,14 @@ pub fn wait(
         if let Some(error) = failure.lock().expect("certificate lock poisoned").take() {
             return Err(error.into());
         }
-        let mut pending = Vec::new();
+        let mut ready = true;
         let now = SystemTime::now();
         for name in names {
             let (certificate, key) = paths(store, name);
             let bytes = match fs::read(&certificate) {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == ErrorKind::NotFound => {
-                    pending.push(name.as_str());
+                    ready = false;
                     continue;
                 }
                 Err(error) => return Err(error.into()),
@@ -155,14 +154,11 @@ pub fn wait(
                 .into());
             }
             if !key.try_exists()? || now >= validity.not_after.to_system_time() {
-                pending.push(name.as_str());
+                ready = false;
             }
         }
-        step.detail(pending.join(tr(", ", "、")));
-        Ok(pending.is_empty())
-    })?;
-    step.finish(message!("Certificates: {}", "{} 份证书", names.len()));
-    Ok(())
+        Ok(ready)
+    })
 }
 
 pub fn config(store: &Store, names: &BTreeSet<String>, port: u16) -> Value {
