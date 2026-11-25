@@ -135,6 +135,13 @@ fn open(access: ServiceAccess) -> Result<Option<Service>> {
     }
 }
 
+pub(crate) fn running() -> Result<bool> {
+    let Some(service) = open(ServiceAccess::QUERY_STATUS)? else {
+        return Ok(false);
+    };
+    Ok(service.query_status()?.current_state == ServiceState::Running)
+}
+
 pub(super) fn install(_: &Store) -> Result<()> {
     let manager = ServiceManager::local_computer(
         None::<&str>,

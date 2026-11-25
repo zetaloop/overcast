@@ -1,4 +1,4 @@
-use crate::language::message;
+use crate::language::{message, text as tr};
 use std::{fs, process::Command};
 
 use serde_json::json;
@@ -11,10 +11,10 @@ const TARGET: &str = "system/build.loop.overcast";
 const PLIST: &str = "/Library/LaunchDaemons/build.loop.overcast.plist";
 const NOT_FOUND: i32 = 113;
 
-fn loaded() -> Result<bool> {
+fn state() -> Result<Option<String>> {
     let output = Command::new("launchctl").args(["print", TARGET]).output()?;
     if output.status.code() == Some(NOT_FOUND) {
-        return Ok(false);
+        return Ok(None);
     }
     if !output.status.success() {
         return Err(message!(
@@ -24,11 +24,25 @@ fn loaded() -> Result<bool> {
         )
         .into());
     }
-    Ok(true)
+    let output = std::str::from_utf8(&output.stdout)?;
+    Ok(Some(
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("\tstate = "))
+            .ok_or(tr(
+                "launchctl did not report the service state",
+                "launchctl 未返回服务状态",
+            ))?
+            .to_owned(),
+    ))
+}
+
+pub(crate) fn running() -> Result<bool> {
+    Ok(state()?.as_deref() == Some("running"))
 }
 
 fn unload() -> Result<()> {
-    if loaded()? {
+    if state()?.is_some() {
         execute(Command::new("launchctl").args(["bootout", "--wait", TARGET]))?;
     }
     Ok(())

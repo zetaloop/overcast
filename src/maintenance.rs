@@ -306,7 +306,12 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::I
         let config = store.load()?;
         let resources = Resources::load(store)?;
         let mut running = Item::new("running", tr("Run service", "运行服务").stylized());
-        running.marker = if config.running { "■" } else { "□" };
+        let active = crate::service::running();
+        match &active {
+            Ok(true) => running.marker = "■",
+            Ok(false) => running.marker = "□",
+            Err(error) => running.value = error.to_string(),
+        }
         let mut schedule = Item::new(
             "schedule",
             tr("Scheduled maintenance", "定时维护").stylized(),
@@ -360,21 +365,18 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::I
             component::edit(screen, store, &client, *component)
         } else {
             match items[selected].key.as_str() {
-                "running" => screen
-                    .work(
-                        if config.running {
-                            tr("Stopping service", "停止服务")
-                        } else {
-                            tr("Starting service", "启动服务")
-                        },
-                        "",
-                        |progress| {
-                            store.update(progress, |config, _| {
-                                config.running = !config.running;
-                                Ok(())
-                            })
-                        },
-                    )
+                "running" => active
+                    .and_then(|running| {
+                        screen.work(
+                            if running {
+                                tr("Stopping service", "停止服务")
+                            } else {
+                                tr("Starting service", "启动服务")
+                            },
+                            "",
+                            |progress| crate::service::set_running(store, !running, progress),
+                        )
+                    })
                     .map(|()| None),
                 "logs" => crate::service::logs(screen, store).map(|()| None),
                 "rules" => screen

@@ -157,7 +157,11 @@ impl Update {
 
     pub fn install(self, store: &Store, progress: &Progress) -> Result<Installed> {
         let lock = store.lock()?;
-        let deployment = service::Deployment::load(store)?;
+        let running = if service::running()? {
+            Some(service::Deployment::load(store)?.id)
+        } else {
+            None
+        };
         progress.check()?;
         let step = progress.activity(tr("Update Overcast", "更新 Overcast"));
         let candidate = self.download.into_temp_path();
@@ -179,7 +183,7 @@ impl Update {
         step.finish(&self.version);
         Ok(Installed {
             version: self.version,
-            running: deployment.config.running.then_some(deployment.id),
+            running,
             _lock: lock,
         })
     }

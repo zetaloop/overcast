@@ -30,6 +30,19 @@ fn external() -> Result<bool> {
     Ok(!path.is_empty() && fs::canonicalize(path)? != Path::new(UNIT))
 }
 
+pub(crate) fn running() -> Result<bool> {
+    let state = execute(Command::new("systemctl").args([
+        "show",
+        "--property=ActiveState",
+        "--value",
+        "overcast.service",
+    ]))?;
+    Ok(matches!(
+        state.trim(),
+        "active" | "reloading" | "refreshing"
+    ))
+}
+
 pub(super) fn install(_: &Store) -> Result<()> {
     if !external()? {
         let unit = format!(
@@ -40,7 +53,14 @@ pub(super) fn install(_: &Store) -> Result<()> {
         execute(Command::new("systemctl").arg("daemon-reload"))?;
         execute(Command::new("systemctl").args(["enable", "overcast.service"]))?;
     }
-    execute(Command::new("systemctl").args(["restart", "overcast.service"]))?;
+    execute(Command::new("systemctl").args(["start", "overcast.service"]))?;
+    if !running()? {
+        return Err(tr(
+            "systemd finished the start job without activating overcast.service",
+            "systemd 已完成启动操作，但 overcast.service 未运行",
+        )
+        .into());
+    }
     Ok(())
 }
 

@@ -33,7 +33,6 @@ pub struct Config {
     pub rules: Vec<Rule>,
     pub components: BTreeMap<Component, Settings>,
     pub maintenance: crate::maintenance::Schedule,
-    pub running: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<Uuid, crate::keys::Keys>,
 }
@@ -47,7 +46,6 @@ impl Default for Config {
             rules: Vec::new(),
             components: BTreeMap::new(),
             maintenance: Default::default(),
-            running: false,
             keys: BTreeMap::new(),
         }
     }
@@ -133,7 +131,7 @@ impl Config {
     pub(crate) fn runtime(&self) -> Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
         let fields = value.as_object_mut().unwrap();
-        for field in ["components", "maintenance", "running", "keys"] {
+        for field in ["components", "maintenance", "keys"] {
             fields.remove(field);
         }
         for field in ["users", "inbounds", "outbounds"] {

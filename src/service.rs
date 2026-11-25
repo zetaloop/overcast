@@ -14,6 +14,8 @@ use systemd as platform;
 #[cfg(windows)]
 use windows as platform;
 
+pub(crate) use platform::running;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
@@ -91,8 +93,16 @@ impl Deployment {
     }
 
     pub fn load(store: &Store) -> Result<Self> {
-        match fs::read(store.directory.join("deployment.json")) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        let path = store.directory.join("deployment.json");
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+                message!(
+                    "Could not parse {}: {error}",
+                    "无法解析 {}：{error}",
+                    path.display()
+                )
+                .into()
+            }),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(error.into()),
         }
@@ -412,40 +422,53 @@ pub(crate) fn switch(
     target: &Deployment,
     progress: &Progress,
 ) -> Result<()> {
-    match (previous.config.running, target.config.running) {
-        (false, false) => {}
-        (true, false) => {
-            let step = progress.activity(tr("Stopping service", "停止服务"));
-            platform::remove()?;
-            step.finish(tr("Stopped", "已停止"));
+    if (previous.units != target.units || previous.config.maintenance != target.config.maintenance)
+        && running()?
+    {
+        let step = progress.activity(tr("Applying services", "应用服务"));
+        report(
+            store,
+            target.id,
+            Some(tr("Loading configuration", "载入配置").to_owned()),
+            None,
+        )?;
+        platform::reload()?;
+        wait(store, target.id, progress, &step)?;
+        step.finish(tr("Applied", "已应用"));
+    }
+    Ok(())
+}
+
+pub fn set_running(store: &Store, start: bool, progress: &Progress) -> Result<()> {
+    let _lock = store.lock()?;
+    progress.check()?;
+    if start == running()? {
+        return Ok(());
+    }
+    if start {
+        let id = Deployment::load(store)?.id;
+        let step = progress.activity(tr("Starting service", "启动服务"));
+        report(
+            store,
+            id,
+            Some(tr("Starting orchestrator", "启动编排器").to_owned()),
+            None,
+        )?;
+        platform::install(store)?;
+        if let Err(error) = wait(store, id, progress, &step) {
+            platform::remove().map_err(|stop| {
+                message!(
+                    "{error}; could not stop the service: {stop}",
+                    "{error}；停止服务失败：{stop}"
+                )
+            })?;
+            return Err(error);
         }
-        (false, true) => {
-            let step = progress.activity(tr("Starting service", "启动服务"));
-            report(
-                store,
-                target.id,
-                Some(tr("Starting orchestrator", "启动编排器").to_owned()),
-                None,
-            )?;
-            platform::install(store)?;
-            wait(store, target.id, progress, &step)?;
-            step.finish(tr("Started", "已启动"));
-        }
-        (true, true)
-            if previous.units == target.units
-                && previous.config.maintenance == target.config.maintenance => {}
-        (true, true) => {
-            let step = progress.activity(tr("Applying services", "应用服务"));
-            report(
-                store,
-                target.id,
-                Some(tr("Loading configuration", "载入配置").to_owned()),
-                None,
-            )?;
-            platform::reload()?;
-            wait(store, target.id, progress, &step)?;
-            step.finish(tr("Applied", "已应用"));
-        }
+        step.finish(tr("Started", "已启动"));
+    } else {
+        let step = progress.activity(tr("Stopping service", "停止服务"));
+        platform::remove()?;
+        step.finish(tr("Stopped", "已停止"));
     }
     Ok(())
 }
@@ -493,6 +516,7 @@ fn wait(store: &Store, id: Uuid, progress: &Progress, step: &Step) -> Result<()>
 }
 
 pub fn run(store: Store) -> Result<()> {
+    store.create_dir(&store.directory)?;
     #[cfg(unix)]
     {
         use nix::sys::signal::{SigSet, Signal};
@@ -905,7 +929,7 @@ impl Orchestrator<'_> {
         };
         if let Err(error) = self.progress.until(|| {
             let desired = Deployment::load(self.store)?;
-            if !desired.config.running || !desired.units.contains(unit) {
+            if !desired.units.contains(unit) {
                 return Err(std::io::Error::new(
                     ErrorKind::Interrupted,
                     tr("Deployment superseded", "部署已被替换"),
