@@ -350,7 +350,7 @@ pub fn logs(screen: &mut Screen, store: &Store) -> Result<()> {
     }
     paths.sort();
     if paths.is_empty() {
-        return screen.view(tr("Logs", "运行日志"), tr("No logs yet", "尚无运行日志"));
+        return screen.view(tr("Logs", "日志"), tr("No logs yet", "尚无日志"));
     }
     let mut selected = 0;
     let mut notice = String::new();
@@ -367,7 +367,7 @@ pub fn logs(screen: &mut Screen, store: &Store) -> Result<()> {
             )))
             .collect();
         let menu = Menu {
-            title: tr("Logs", "运行日志"),
+            title: tr("Logs", "日志"),
             heading: "",
             items: &items,
             help: tr(
@@ -700,10 +700,7 @@ fn orchestrate(
                     Ok(None) => {}
                     Err(error) => log(
                         store,
-                        &message!(
-                            "Scheduled maintenance failed: {error}",
-                            "定时维护失败：{error}"
-                        ),
+                        &message!("Scheduled update failed: {error}", "定时更新失败：{error}"),
                     ),
                 }
             }

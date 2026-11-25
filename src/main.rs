@@ -45,6 +45,7 @@ mod warp;
 use std::{error::Error, process::ExitCode};
 
 use config::Store;
+use language::text;
 use termina::style::{AnsiColor, StyleExt};
 use tui::{Action, Item, Menu, Screen};
 
@@ -84,27 +85,25 @@ fn run() -> Result<()> {
     }
     screen.arguments.extend(args);
     screen.aliases(&[
-        ("help", &["about"]),
-        ("version", &["about"]),
+        ("help", &["settings", "about"]),
+        ("version", &["settings", "about"]),
         ("add-user", &["users", "new", "name"]),
     ]);
     let mut selected = 0;
     let mut notice = String::new();
     loop {
-        use language::text;
-        let items = [
+        let mut items = [
             Item::new("inbounds", text("Inbounds", "入站").stylized()),
             Item::new("outbounds", text("Outbounds", "出站").stylized()),
             Item::new("users", text("Users", "用户").stylized()),
             Item::new("rules", text("Routing", "分流").stylized()),
-            Item::new("maintenance", text("Maintenance", "维护").stylized()),
             Item::new("settings", text("Settings", "设置").stylized()),
-            Item::new("about", text("About", "关于").stylized()),
             Item::new(
                 "exit",
                 text("Quit", "退出").foreground(AnsiColor::BrightRed),
             ),
         ];
+        items[4].gap = true;
         let menu = Menu {
             title: text("Main menu", "主菜单"),
             heading: "",
@@ -124,7 +123,7 @@ fn run() -> Result<()> {
             1 => outbound::run(&mut screen, &store),
             2 => user::run(&mut screen, &store),
             3 => route::run(&mut screen, &store),
-            4 => match maintenance::run(&mut screen, &store) {
+            4 => match settings(&mut screen, &store) {
                 Ok(Some(update)) => {
                     let version =
                         screen.work(text("Applying update", "应用更新"), "", |progress| {
@@ -140,8 +139,6 @@ fn run() -> Result<()> {
                 }
                 result => result.map(|_| ()),
             },
-            5 => language::settings(&mut screen, &store),
-            6 => screen.about(),
             _ => break,
         };
         notice = result
@@ -149,6 +146,69 @@ fn run() -> Result<()> {
             .map_or_else(String::new, |error| error.to_string());
     }
     screen.finish()
+}
+
+fn settings(screen: &mut Screen, store: &Store) -> Result<Option<update::Installed>> {
+    let mut selected = 0;
+    let mut notice = String::new();
+    loop {
+        let mut running = Item::new("running", text("Run service", "总开关").stylized());
+        let active = service::running();
+        match &active {
+            Ok(true) => running.marker = "■",
+            Ok(false) => running.marker = "□",
+            Err(error) => running.value = error.to_string(),
+        }
+        let mut language = Item::new("language", "Language / 语言".stylized());
+        language.value = text("English", "简体中文").into();
+        language.gap = true;
+        let items = [
+            running,
+            Item::new("logs", text("Logs", "日志").stylized()),
+            Item::new("updates", text("Updates", "更新").stylized()),
+            language,
+            Item::new("about", text("About", "关于").stylized()),
+            Item::new("back", text("Back", "返回").stylized()),
+        ];
+        let menu = Menu {
+            title: text("Settings", "设置"),
+            heading: "",
+            items: &items,
+            help: text(
+                "Arrow keys to select\nEnter to confirm\nEsc to go back",
+                "方向键 选择\n回车键 确定\nEsc 返回",
+            ),
+        };
+        match screen.select(&menu, &mut selected, &notice)? {
+            Action::Back => return Ok(None),
+            Action::Select => {}
+            _ => continue,
+        }
+        let result = match items[selected].key.as_str() {
+            "running" => active.and_then(|running| {
+                screen.work(
+                    if running {
+                        text("Stopping service", "停止服务")
+                    } else {
+                        text("Starting service", "启动服务")
+                    },
+                    "",
+                    |progress| service::set_running(store, !running, progress),
+                )
+            }),
+            "logs" => service::logs(screen, store),
+            "updates" => match maintenance::run(screen, store) {
+                Ok(Some(update)) => return Ok(Some(update)),
+                result => result.map(|_| ()),
+            },
+            "language" => language::choose(screen, store).map(|_| ()),
+            "about" => screen.about(),
+            _ => return Ok(None),
+        };
+        notice = result
+            .err()
+            .map_or_else(String::new, |error| error.to_string());
+    }
 }
 
 fn main() -> ExitCode {

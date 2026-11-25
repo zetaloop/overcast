@@ -90,28 +90,3 @@ pub fn choose(screen: &mut Screen, store: &Store) -> Result<bool> {
         }
     }
 }
-
-pub fn settings(screen: &mut Screen, store: &Store) -> Result<()> {
-    let mut selected = 0;
-    loop {
-        let mut language = Item::new("language", "Language / 语言".stylized());
-        language.value = text("English", "简体中文").into();
-        let items = [language, Item::new("back", text("Back", "返回").stylized())];
-        let menu = Menu {
-            title: text("Settings", "设置"),
-            heading: "",
-            items: &items,
-            help: text(
-                "Arrow keys to select\nEnter to edit\nEsc to go back",
-                "方向键 选择\n回车键 编辑\nEsc 返回",
-            ),
-        };
-        match screen.select(&menu, &mut selected, "")? {
-            Action::Select if selected == 0 => {
-                choose(screen, store)?;
-            }
-            Action::Select | Action::Back => return Ok(()),
-            _ => {}
-        }
-    }
-}

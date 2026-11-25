@@ -84,19 +84,19 @@ impl Schedule {
         match self.mode {
             Mode::Calendar => {
                 let (hour, minute) = self.calendar.time.trim().split_once(':').ok_or(tr(
-                    "Enter the maintenance time as HH:mm",
-                    "维护时间使用 HH:mm 格式",
+                    "Enter the update time as HH:mm",
+                    "更新时间使用 HH:mm 格式",
                 ))?;
                 let hour: i8 = hour
                     .parse()
-                    .map_err(|_| tr("Invalid maintenance hour", "维护时间的小时格式不正确"))?;
+                    .map_err(|_| tr("Invalid update hour", "更新时间的小时格式不正确"))?;
                 let minute: i8 = minute
                     .parse()
-                    .map_err(|_| tr("Invalid maintenance minute", "维护时间的分钟格式不正确"))?;
+                    .map_err(|_| tr("Invalid update minute", "更新时间的分钟格式不正确"))?;
                 let time = jiff::civil::Time::new(hour, minute, 0, 0).map_err(|_| {
                     tr(
                         "Enter a time between 00:00 and 23:59",
-                        "维护时间使用 00:00 至 23:59",
+                        "更新时间使用 00:00 至 23:59",
                     )
                 })?;
                 let now = jiff::Zoned::now();
@@ -116,16 +116,12 @@ impl Schedule {
             Mode::Interval => {
                 let interval = humantime::parse_duration(&self.interval).map_err(|error| {
                     message!(
-                        "Invalid maintenance interval: {error}",
-                        "维护间隔格式不正确：{error}"
+                        "Invalid update interval: {error}",
+                        "更新间隔格式不正确：{error}"
                     )
                 })?;
                 if interval.is_zero() {
-                    return Err(tr(
-                        "Maintenance interval must be positive",
-                        "维护间隔需要大于零",
-                    )
-                    .into());
+                    return Err(tr("Update interval must be positive", "更新间隔需要大于零").into());
                 }
                 Ok(Some(interval))
             }
@@ -319,17 +315,7 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::I
     loop {
         let config = store.load()?;
         let resources = Resources::load(store)?;
-        let mut running = Item::new("running", tr("Run service", "运行服务").stylized());
-        let active = crate::service::running();
-        match &active {
-            Ok(true) => running.marker = "■",
-            Ok(false) => running.marker = "□",
-            Err(error) => running.value = error.to_string(),
-        }
-        let mut schedule = Item::new(
-            "schedule",
-            tr("Scheduled maintenance", "定时维护").stylized(),
-        );
+        let mut schedule = Item::new("schedule", tr("Scheduled updates", "定时更新").stylized());
         schedule.value = if config.maintenance.enabled {
             tr("On", "开启")
         } else {
@@ -337,29 +323,29 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::I
         }
         .to_owned();
         let mut items = vec![
-            running,
-            Item::new("logs", tr("Logs", "运行日志").stylized()),
-            Item::new(
-                "rules",
-                tr("Update routing data", "更新规则数据").stylized(),
-            ),
-            Item::new("update", tr("Update all", "更新全部").stylized()),
+            Item::new("all", tr("Update all", "一键更新").stylized()),
             schedule,
         ];
-        items[2].gap = true;
-        let versions = items.len();
-        items.extend(Component::ALL.iter().map(|component| {
+        for component in Component::ALL {
             let mut item = Item::new(component.key(), component.name().stylized());
             item.value = component
                 .version(&resources)
                 .unwrap_or(tr("Not installed", "未安装"))
                 .to_owned();
-            item
-        }));
-        items[versions].gap = true;
+            item.gap = component == Component::Overcast;
+            items.push(item);
+            if component == Component::Mihomo {
+                let mut item = Item::new("meta-rules-dat", "meta-rules-dat".stylized());
+                item.value = resources.geodata.map_or_else(
+                    || tr("Not installed", "未安装").to_owned(),
+                    |release| release.to_string(),
+                );
+                items.push(item);
+            }
+        }
         items.push(Item::new("back", tr("Back", "返回").stylized()));
         let menu = Menu {
-            title: tr("Maintenance", "维护"),
+            title: tr("Updates", "更新"),
             heading: "",
             items: &items,
             help: tr(
@@ -379,37 +365,23 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<Option<crate::update::I
             component::edit(screen, store, &client, *component)
         } else {
             match items[selected].key.as_str() {
-                "running" => active
-                    .and_then(|running| {
-                        screen.work(
-                            if running {
-                                tr("Stopping service", "停止服务")
-                            } else {
-                                tr("Starting service", "启动服务")
-                            },
-                            "",
-                            |progress| crate::service::set_running(store, !running, progress),
-                        )
-                    })
-                    .map(|()| None),
-                "logs" => crate::service::logs(screen, store).map(|()| None),
-                "rules" => screen
+                "meta-rules-dat" => screen
                     .work(
                         tr("Update routing data", "更新规则数据"),
                         "",
                         |progress| rules(store, progress),
                     )
                     .map(|()| None),
-                "update" => screen.work(tr("Updating resources", "更新资源"), "", |progress| {
+                "all" => screen.work(tr("Updating resources", "更新资源"), "", |progress| {
                     update(store, progress)
                 }),
                 "schedule" => form::page(
                     screen,
-                    tr("Scheduled maintenance", "定时维护"),
+                    tr("Scheduled updates", "定时更新"),
                     &config.maintenance,
                     |settings: &Schedule, screen| {
                         screen.work(
-                            tr("Updating maintenance schedule", "更新维护日程"),
+                            tr("Saving update schedule", "保存更新日程"),
                             "",
                             |progress| {
                                 store.update(progress, |config, _| {
