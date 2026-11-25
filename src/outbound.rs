@@ -252,7 +252,6 @@ fn edit(
     existing: bool,
     mut outbound: Outbound,
 ) -> Result<Option<Uuid>> {
-    let saved = serde_json::to_vec(&outbound)?;
     let initial = serde_json::to_vec(&outbound.effective())?;
     let mut selected = if existing { 0 } else { 1 };
     let mut notice = String::new();
@@ -428,10 +427,10 @@ fn edit(
                                         .outbounds
                                         .iter_mut()
                                         .find(|current| current.uuid == outbound.uuid)
-                                        .ok_or(tr("The outbound has been deleted", "出站已被删除"))?;
-                                    if serde_json::to_vec(&*current)? != saved {
-                                        return Err(tr("The outbound was modified elsewhere. Reopen it to edit.", "出站已在其他编辑中更改，请重新打开").into());
-                                    }
+                                        .ok_or(tr(
+                                            "The outbound has been deleted",
+                                            "出站已被删除",
+                                        ))?;
                                     *current = value;
                                 } else {
                                     config.outbounds.push(value);

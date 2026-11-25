@@ -750,7 +750,6 @@ fn edit(
     mut inbound: Inbound,
 ) -> Result<Option<Uuid>> {
     let mut protocols = BTreeMap::new();
-    let saved = serde_json::to_vec(&inbound)?;
     let initial = serde_json::to_vec(&inbound.effective())?;
     let deployed = if existing {
         Some(crate::service::Deployment::load(store)?)
@@ -1084,28 +1083,32 @@ fn edit(
                     keys.show(source, screen)
                 }
                 "create" | "apply" => {
-                    let result = screen.work(tr("Saving inbound", "保存入站"), &inbound.name, |progress| {
-                        store.update(progress, |config, _| {
-                            let mut value = active.clone();
-                            if value.name.trim().is_empty() {
-                                value.name = value.summary();
-                            }
-                            if existing {
-                                let current = config
-                                    .inbounds
-                                    .iter_mut()
-                                    .find(|current| current.uuid == inbound.uuid)
-                                    .ok_or(tr("The inbound has been deleted", "入站已被删除"))?;
-                                if serde_json::to_vec(&*current)? != saved {
-                                    return Err(tr("The inbound was modified elsewhere. Reopen it to edit.", "入站已在其他编辑中更改，请重新打开").into());
+                    let result = screen.work(
+                        tr("Saving inbound", "保存入站"),
+                        &inbound.name,
+                        |progress| {
+                            store.update(progress, |config, _| {
+                                let mut value = active.clone();
+                                if value.name.trim().is_empty() {
+                                    value.name = value.summary();
                                 }
-                                *current = value;
-                            } else {
-                                config.inbounds.push(value);
-                            }
-                            Ok(())
-                        })
-                    });
+                                if existing {
+                                    let current = config
+                                        .inbounds
+                                        .iter_mut()
+                                        .find(|current| current.uuid == inbound.uuid)
+                                        .ok_or(tr(
+                                            "The inbound has been deleted",
+                                            "入站已被删除",
+                                        ))?;
+                                    *current = value;
+                                } else {
+                                    config.inbounds.push(value);
+                                }
+                                Ok(())
+                            })
+                        },
+                    );
                     if result.is_ok() {
                         return Ok(Some(inbound.uuid));
                     }
