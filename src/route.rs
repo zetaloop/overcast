@@ -765,13 +765,13 @@ pub fn run(screen: &mut Screen, store: &Store) -> Result<()> {
     let mut focus = None;
     let mut notice = String::new();
     loop {
-        let config = store.load()?;
-        let coverage = crate::service::Deployment::load(store)?.coverage;
-        let (paths, mut items) = rows(&config.rules, &config, Some(&coverage));
-        if coverage.remainder {
+        let deployment = crate::service::Deployment::confirmed(store)?;
+        let config = &deployment.config;
+        let (paths, mut items) = rows(&config.rules, config, Some(&deployment.coverage));
+        if deployment.coverage.remainder {
             let mut item = Item::new("", tr("Remaining traffic", "其余流量").stylized());
             item.branch = Some(String::new());
-            item.value = Destination::Block.name(&config);
+            item.value = Destination::Block.name(config);
             item.inert = true;
             items.push(item);
         }

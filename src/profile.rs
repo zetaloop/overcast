@@ -84,7 +84,7 @@ pub fn copy(
                 tr("Generating connection details", "生成连接资料"),
                 "",
                 |progress| {
-                    let deployment = crate::service::Deployment::load(store)?;
+                    let deployment = crate::service::Deployment::confirmed(store)?;
                     let profiles = build(store, &deployment, inbound, user, progress)?;
                     if profiles.is_empty() {
                         return Err(tr("No available connections", "当前没有可用的接入连接").into());

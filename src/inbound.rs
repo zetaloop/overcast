@@ -752,7 +752,7 @@ fn edit(
     let mut protocols = BTreeMap::new();
     let initial = serde_json::to_vec(&inbound.effective())?;
     let deployed = if existing {
-        Some(crate::service::Deployment::load(store)?)
+        Some(crate::service::Deployment::confirmed(store)?)
     } else {
         None
     };

@@ -85,6 +85,11 @@ enum Exit {
 }
 
 impl Deployment {
+    pub fn confirmed(store: &Store) -> Result<Self> {
+        let _lock = store.lock()?;
+        Self::load(store)
+    }
+
     pub fn load(store: &Store) -> Result<Self> {
         match fs::read(store.directory.join("deployment.json")) {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
