@@ -4,7 +4,7 @@ Overcast is a terminal-based proxy orchestrator for Xray, sing-box, and Mihomo. 
 
 ## Getting started
 
-Download the standalone executable for your platform from [Releases](https://github.com/zetaloop/overcast/releases) and run it. Enable **Scheduled maintenance** for automatic updates.
+Install Overcast with Scoop, Homebrew, or Nix via [zetaloop/zetaloop](https://github.com/zetaloop/zetaloop), or download the standalone executable from [Releases](https://github.com/zetaloop/overcast/releases). The standalone version can update itself through **Scheduled maintenance**.
 
 Configure your inbounds, outbounds, and routing rules, then turn on **Run service** under **Maintenance**. This requires administrator privileges. The service starts at boot and applies changes as you save them.
 
