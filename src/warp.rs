@@ -1,7 +1,7 @@
 use crate::language::{message, text as tr};
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions},
+    fs::File,
     net::{Ipv4Addr, Ipv6Addr},
     process::Command,
 };
@@ -9,7 +9,6 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use termina::style::StyleExt;
-use uuid::Uuid;
 use x509_cert::{
     der::{DecodePem, Encode},
     spki::SubjectPublicKeyInfoOwned,
@@ -225,22 +224,14 @@ fn register(store: &Store, progress: &Progress) -> Result<Registration> {
         })?,
     };
     progress.check()?;
-    let directory = store
-        .directory
-        .join("warp")
-        .join(Uuid::new_v4().to_string());
-    store.create_dir(&directory)?;
-    let file = directory.join("config.json");
+    let directory = tempfile::tempdir()?;
+    let file = directory.path().join("config.json");
     let step = progress.activity(tr("Registering with WARP", "登记 WARP"));
     let output = Command::new(program)
         .arg("--config")
         .arg(&file)
         .args(["register", "--accept-tos"])
         .output()?;
-    if file.try_exists()? {
-        OpenOptions::new().write(true).open(&file)?.sync_all()?;
-        progress.record(tr("Registration", "登记资料"), &file.to_string_lossy());
-    }
     if !output.status.success() {
         return Err(message!(
             "WARP registration failed: {}{}",
