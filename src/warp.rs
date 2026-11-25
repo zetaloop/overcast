@@ -215,10 +215,7 @@ fn register(store: &Store, progress: &Progress) -> Result<Registration> {
     let program = match program {
         Some(program) if program.try_exists()? => program,
         _ => store.update(progress, |config, resources| {
-            let preview = config
-                .components
-                .get(&Component::Usque)
-                .is_some_and(|settings| settings.preview);
+            let preview = config.preview(Component::Usque);
             Component::Usque.ensure(store, preview, resources, progress)?;
             Component::Usque.program(store, &resources.components[&Component::Usque])
         })?,

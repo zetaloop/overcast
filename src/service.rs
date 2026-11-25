@@ -176,10 +176,7 @@ impl Deployment {
         {
             component.ensure(
                 store,
-                config
-                    .components
-                    .get(component)
-                    .is_some_and(|settings| settings.preview),
+                config.preview(*component),
                 resources,
                 &progress.group(component.name()),
             )?;
@@ -603,6 +600,7 @@ fn orchestrate(
     let mut retries: BTreeMap<String, Instant> = BTreeMap::new();
     let mut delays: BTreeMap<String, Duration> = BTreeMap::new();
     let mut maintenance = None;
+    let mut maintaining = false;
     let mut pending = true;
     loop {
         if pending {
@@ -685,25 +683,30 @@ fn orchestrate(
                     retries.insert(name, Instant::now() + delay);
                 }
             }
-            Ok(Event::Maintained(Ok(Some(update)))) => {
-                log(
-                    store,
-                    &message!(
-                        "Updated Overcast to {}",
-                        "Overcast 已更新至 {}",
-                        update.version
+            Ok(Event::Maintained(result)) => {
+                maintaining = false;
+                match result {
+                    Ok(Some(update)) => {
+                        log(
+                            store,
+                            &message!(
+                                "Updated Overcast to {}",
+                                "Overcast 已更新至 {}",
+                                update.version
+                            ),
+                        );
+                        return Ok(Exit::Restart);
+                    }
+                    Ok(None) => {}
+                    Err(error) => log(
+                        store,
+                        &message!(
+                            "Scheduled maintenance failed: {error}",
+                            "定时维护失败：{error}"
+                        ),
                     ),
-                );
-                return Ok(Exit::Restart);
+                }
             }
-            Ok(Event::Maintained(Ok(None))) => {}
-            Ok(Event::Maintained(Err(error))) => log(
-                store,
-                &message!(
-                    "Scheduled maintenance failed: {error}",
-                    "定时维护失败：{error}"
-                ),
-            ),
             Err(RecvTimeoutError::Timeout) => {
                 let now = Instant::now();
                 let due: Vec<_> = retries
@@ -730,12 +733,15 @@ fn orchestrate(
                     }
                 }
                 if maintenance.is_some_and(|at| at <= now) {
-                    let store = store.clone();
-                    let sender = orchestrator.sender.clone();
-                    thread::spawn(move || {
-                        let result = maintenance::update(&store, &Progress::default());
-                        let _ = sender.send(Event::Maintained(result));
-                    });
+                    if !maintaining {
+                        maintaining = true;
+                        let store = store.clone();
+                        let sender = orchestrator.sender.clone();
+                        thread::spawn(move || {
+                            let result = maintenance::update(&store, &Progress::default());
+                            let _ = sender.send(Event::Maintained(result));
+                        });
+                    }
                     maintenance = deployment
                         .config
                         .maintenance

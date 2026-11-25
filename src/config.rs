@@ -59,6 +59,12 @@ pub enum Reference {
 }
 
 impl Config {
+    pub fn preview(&self, component: Component) -> bool {
+        self.components
+            .get(&component)
+            .is_some_and(|settings| settings.preview)
+    }
+
     fn objects(&self) -> HashSet<Reference> {
         self.users
             .iter()

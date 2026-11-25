@@ -272,18 +272,32 @@ choices!(Day {
 });
 
 pub fn update(store: &Store, progress: &Progress) -> Result<Option<crate::update::Installed>> {
-    let config = store.load()?;
-    let mut prepared = Resources::load(store)?;
+    let (config, selected) = {
+        let _lock = store.lock()?;
+        (store.load()?, Resources::load(store)?)
+    };
+    let mut prepared = selected.clone();
     let update = component::update(store, &config, &mut prepared, progress)?;
     if prepared.geodata.is_some() {
         prepared.geodata = Some(Catalog::update(store, progress)?.release);
     }
-    store.update(progress, |_, resources| {
-        resources.components.extend(prepared.components);
-        if let Some(release) = prepared.geodata {
-            resources.geodata = Some(release);
+    if prepared == selected && update.is_none() {
+        return Ok(None);
+    }
+    let update = store.update(progress, |current, resources| {
+        for (component, program) in prepared.components {
+            if resources.components.get(&component) == selected.components.get(&component)
+                && current.preview(component) == config.preview(component)
+            {
+                resources.components.insert(component, program);
+            }
         }
-        Ok(())
+        if resources.geodata == selected.geodata {
+            resources.geodata = prepared.geodata;
+        }
+        Ok(update.filter(|_| {
+            current.preview(Component::Overcast) == config.preview(Component::Overcast)
+        }))
     })?;
     update
         .map(|update| update.install(store, progress))

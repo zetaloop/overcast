@@ -549,8 +549,7 @@ pub fn edit(
     loop {
         let config = store.load()?;
         let resources = Resources::load(store)?;
-        let settings = config.components.get(&component);
-        let preview = settings.is_some_and(|settings| settings.preview);
+        let preview = config.preview(component);
         let installed = resources.components.get(&component);
         let own = component == Component::Overcast;
         let version = component
@@ -725,10 +724,7 @@ pub fn update(
             .map(|component| {
                 let progress = progress.group(component.name());
                 let client = &client;
-                let preview = config
-                    .components
-                    .get(&component)
-                    .is_some_and(|settings| settings.preview);
+                let preview = config.preview(component);
                 scope.spawn(move || {
                     let result = component
                         .release(client, None, preview, &progress)
